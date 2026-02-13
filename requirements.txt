@@ -1,0 +1,6 @@
+requests==2.32.3
+python-dotenv==1.0.1
+streamlit==1.43.1
+pandas==2.2.3
+google-cloud-storage==2.19.0
+pytest==8.3.5
