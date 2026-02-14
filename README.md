@@ -65,6 +65,7 @@ python -m college_basketball_dfs.cbb_odds_pipeline --date 2026-02-12 --bucket yo
 The importer pulls `h2h,spreads,totals` for `basketball_ncaab` and writes:
 - raw odds JSON
 - normalized game-level odds CSV
+- By default you can filter to FanDuel with bookmaker key `fanduel` (sidebar `Bookmakers Filter`).
 
 Backfill odds across a season range:
 
@@ -87,6 +88,11 @@ python -m college_basketball_dfs.cbb_props_pipeline --date 2026-02-12 --bucket y
 Writes:
 - raw props JSON: `cbb/props/YYYY-MM-DD.json`
 - normalized props lines CSV: `cbb/props_lines/YYYY-MM-DD_props.csv`
+
+Daily pregame workflow in Streamlit:
+- Set `Props Date Preset` to `Tomorrow`
+- Set `Props Fetch Mode` to `Pregame Live`
+- Click `Run Props Import` before tip-off
 
 ## Streamlit Admin App
 

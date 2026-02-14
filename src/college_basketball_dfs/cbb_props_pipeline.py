@@ -128,6 +128,7 @@ def run_cbb_props_pipeline(
     sport_key: str = "basketball_ncaab",
     regions: str = "us",
     markets: str = "player_points,player_rebounds,player_assists",
+    bookmakers: str | None = None,
     historical_mode: bool = False,
     historical_snapshot_time: str | None = None,
     force_refresh: bool = False,
@@ -172,6 +173,7 @@ def run_cbb_props_pipeline(
                     sport_key=sport_key,
                     regions=regions,
                     markets="h2h",
+                    bookmakers=bookmakers,
                     historical=historical_mode,
                     historical_snapshot_time=historical_snapshot_time,
                 )
@@ -190,6 +192,7 @@ def run_cbb_props_pipeline(
                     sport_key=sport_key,
                     regions=regions,
                     markets=markets,
+                    bookmakers=bookmakers,
                     historical=historical_mode,
                     historical_snapshot_time=event_snapshot_time,
                 )
@@ -206,6 +209,7 @@ def run_cbb_props_pipeline(
             "sport_key": sport_key,
             "regions": regions,
             "markets": markets,
+            "bookmakers": bookmakers,
             "historical_mode": historical_mode,
             "historical_snapshot_time": historical_snapshot_time,
             "events": event_payloads,
@@ -234,6 +238,9 @@ def run_cbb_props_pipeline(
     return {
         "game_date": game_date.isoformat(),
         "props_cache_hit": props_cache_hit,
+        "historical_mode": historical_mode,
+        "markets": markets,
+        "bookmakers": bookmakers,
         "bucket_name": store.bucket_name,
         "props_blob": props_blob,
         "props_lines_blob": props_lines_blob,
@@ -263,6 +270,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sport-key", type=str, default="basketball_ncaab")
     parser.add_argument("--regions", type=str, default="us")
     parser.add_argument("--markets", type=str, default="player_points,player_rebounds,player_assists")
+    parser.add_argument(
+        "--bookmakers",
+        type=str,
+        default=os.getenv("CBB_ODDS_BOOKMAKERS", ""),
+        help="Optional bookmaker key filter (example: fanduel).",
+    )
     parser.add_argument("--historical-mode", action="store_true")
     parser.add_argument("--historical-snapshot-time", type=str, default=None)
     parser.add_argument("--force-refresh", action="store_true")
@@ -283,6 +296,7 @@ def main() -> None:
         sport_key=args.sport_key,
         regions=args.regions,
         markets=args.markets,
+        bookmakers=(args.bookmakers or None),
         historical_mode=args.historical_mode,
         historical_snapshot_time=args.historical_snapshot_time,
         force_refresh=args.force_refresh,

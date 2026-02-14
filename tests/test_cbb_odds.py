@@ -125,6 +125,23 @@ def test_fetch_game_odds_historical_reads_data_field(monkeypatch) -> None:
     assert "date" in captured["params"]
 
 
+def test_fetch_game_odds_includes_bookmakers_param(monkeypatch) -> None:
+    captured = {}
+
+    def fake_get(self, path, params):
+        captured["params"] = params
+        return []
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_odds.OddsApiClient.get", fake_get)
+    client = OddsApiClient(api_key="x")
+    try:
+        client.fetch_game_odds(game_date=date(2026, 2, 12), bookmakers="fanduel")
+    finally:
+        client.close()
+
+    assert captured["params"]["bookmakers"] == "fanduel"
+
+
 def test_fetch_event_odds_historical_reads_data_field(monkeypatch) -> None:
     captured = {}
 

@@ -105,6 +105,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sport-key", type=str, default="basketball_ncaab")
     parser.add_argument("--regions", type=str, default="us")
     parser.add_argument("--markets", type=str, default="h2h,spreads,totals")
+    parser.add_argument(
+        "--bookmakers",
+        type=str,
+        default=os.getenv("CBB_ODDS_BOOKMAKERS", ""),
+        help="Optional bookmaker key filter (example: fanduel).",
+    )
     parser.add_argument("--historical-mode", action="store_true", dest="historical_mode")
     parser.add_argument("--no-historical-mode", action="store_false", dest="historical_mode")
     parser.set_defaults(historical_mode=True)
@@ -130,6 +136,7 @@ def main() -> None:
         sport_key=args.sport_key,
         regions=args.regions,
         markets=args.markets,
+        bookmakers=(args.bookmakers or None),
         historical_mode=args.historical_mode,
         force_refresh=args.force_refresh,
         gcp_project=args.gcp_project,

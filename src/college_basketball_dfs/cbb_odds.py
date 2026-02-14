@@ -89,21 +89,28 @@ class OddsApiClient:
         sport_key: str = "basketball_ncaab",
         regions: str = "us",
         markets: str = "h2h,spreads,totals",
+        bookmakers: str | None = None,
         odds_format: str = "american",
         date_format: str = "iso",
         historical: bool = False,
         historical_snapshot_time: str | None = None,
     ) -> list[dict[str, Any]]:
         commence_from, commence_to = _day_window_utc(game_date)
+        common_params = {
+            "regions": regions,
+            "markets": markets,
+            "oddsFormat": odds_format,
+            "dateFormat": date_format,
+        }
+        if bookmakers:
+            common_params["bookmakers"] = bookmakers
+
         if historical:
             snapshot_time = historical_snapshot_time or f"{game_date.isoformat()}T23:59:59Z"
             payload = self.get(
                 path=f"/historical/sports/{sport_key}/odds",
                 params={
-                    "regions": regions,
-                    "markets": markets,
-                    "oddsFormat": odds_format,
-                    "dateFormat": date_format,
+                    **common_params,
                     "date": snapshot_time,
                     "commenceTimeFrom": commence_from,
                     "commenceTimeTo": commence_to,
@@ -119,10 +126,7 @@ class OddsApiClient:
         payload = self.get(
             path=f"/sports/{sport_key}/odds",
             params={
-                "regions": regions,
-                "markets": markets,
-                "oddsFormat": odds_format,
-                "dateFormat": date_format,
+                **common_params,
                 "commenceTimeFrom": commence_from,
                 "commenceTimeTo": commence_to,
             },
@@ -137,21 +141,28 @@ class OddsApiClient:
         sport_key: str = "basketball_ncaab",
         regions: str = "us",
         markets: str = "player_points,player_rebounds,player_assists",
+        bookmakers: str | None = None,
         odds_format: str = "american",
         date_format: str = "iso",
         historical: bool = False,
         historical_snapshot_time: str | None = None,
     ) -> dict[str, Any]:
+        common_params = {
+            "regions": regions,
+            "markets": markets,
+            "oddsFormat": odds_format,
+            "dateFormat": date_format,
+        }
+        if bookmakers:
+            common_params["bookmakers"] = bookmakers
+
         if historical:
             if not historical_snapshot_time:
                 raise OddsApiError("historical_snapshot_time is required for historical event odds.")
             payload = self.get(
                 path=f"/historical/sports/{sport_key}/events/{event_id}/odds",
                 params={
-                    "regions": regions,
-                    "markets": markets,
-                    "oddsFormat": odds_format,
-                    "dateFormat": date_format,
+                    **common_params,
                     "date": historical_snapshot_time,
                 },
             )
@@ -164,12 +175,7 @@ class OddsApiClient:
         else:
             payload = self.get(
                 path=f"/sports/{sport_key}/events/{event_id}/odds",
-                params={
-                    "regions": regions,
-                    "markets": markets,
-                    "oddsFormat": odds_format,
-                    "dateFormat": date_format,
-                },
+                params=common_params,
             )
 
         if not isinstance(payload, dict):

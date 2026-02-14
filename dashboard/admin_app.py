@@ -3,7 +3,7 @@ from __future__ import annotations
 import io
 import os
 import sys
-from datetime import date
+from datetime import date, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -144,17 +144,36 @@ default_bucket = os.getenv("CBB_GCS_BUCKET", "").strip() or (_secret("cbb_gcs_bu
 default_base_url = os.getenv("NCAA_API_BASE_URL", "https://ncaa-api.henrygd.me").strip()
 default_project = os.getenv("GCP_PROJECT", "").strip() or (_secret("gcp_project") or "")
 odds_api_key = (_resolve_odds_api_key() or "").strip()
+default_bookmakers = os.getenv("CBB_ODDS_BOOKMAKERS", "").strip() or (_secret("cbb_odds_bookmakers") or "fanduel")
 
 with st.sidebar:
     st.header("Pipeline Settings")
     selected_date = st.date_input("Slate Date", value=prior_day())
-    props_selected_date = st.date_input("Props Date", value=prior_day())
+    props_date_preset = st.selectbox(
+        "Props Date Preset",
+        options=["Custom", "Today", "Tomorrow"],
+        index=2,
+        help="Use Today/Tomorrow for pregame props pulls without manual date entry.",
+    )
+    if props_date_preset == "Today":
+        props_selected_date = date.today()
+        st.caption(f"Props Date: {props_selected_date.isoformat()}")
+    elif props_date_preset == "Tomorrow":
+        props_selected_date = date.today() + timedelta(days=1)
+        st.caption(f"Props Date: {props_selected_date.isoformat()}")
+    else:
+        props_selected_date = st.date_input("Props Date", value=prior_day())
     default_season_start = season_start_for_date(date.today())
     backfill_start = st.date_input("Backfill Start", value=default_season_start)
     backfill_end = st.date_input("Backfill End", value=prior_day())
     bucket_name = st.text_input("GCS Bucket", value=default_bucket)
     base_url = st.text_input("NCAA API Base URL", value=default_base_url)
     gcp_project = st.text_input("GCP Project (optional)", value=default_project)
+    bookmakers_filter = st.text_input(
+        "Bookmakers Filter",
+        value=default_bookmakers,
+        help="Comma-separated bookmaker keys (example: fanduel). Leave blank for all.",
+    )
     st.caption(
         "The Odds API key source: "
         + ("loaded from secrets/env" if odds_api_key else "missing (`the_odds_api_key`)")
@@ -166,6 +185,12 @@ with st.sidebar:
         "Props Markets",
         value="player_points,player_rebounds,player_assists",
         help="Comma-separated The Odds API player prop market keys.",
+    )
+    props_fetch_mode = st.selectbox(
+        "Props Fetch Mode",
+        options=["Pregame Live", "Historical Snapshot"],
+        index=0,
+        help="Use Pregame Live for today/tomorrow pulls prior to tip-off.",
     )
     run_clicked = st.button("Run Cache Pipeline")
     run_odds_clicked = st.button("Run Odds Import")
@@ -216,6 +241,7 @@ if run_odds_clicked:
                     game_date=selected_date,
                     bucket_name=bucket_name,
                     odds_api_key=odds_api_key,
+                    bookmakers=(bookmakers_filter.strip() or None),
                     historical_mode=(selected_date < date.today()),
                     historical_snapshot_time=f"{selected_date.isoformat()}T23:59:59Z" if selected_date < date.today() else None,
                     force_refresh=force_refresh,
@@ -242,10 +268,9 @@ if run_props_clicked:
                     bucket_name=bucket_name,
                     odds_api_key=odds_api_key,
                     markets=props_markets.strip(),
-                    historical_mode=(props_selected_date < date.today()),
-                    historical_snapshot_time=(
-                        f"{props_selected_date.isoformat()}T23:59:59Z" if props_selected_date < date.today() else None
-                    ),
+                    bookmakers=(bookmakers_filter.strip() or None),
+                    historical_mode=(props_fetch_mode == "Historical Snapshot"),
+                    historical_snapshot_time=None,
                     force_refresh=force_refresh,
                     gcp_project=gcp_project or None,
                     gcp_service_account_json=cred_json,
@@ -299,6 +324,7 @@ if run_odds_backfill_clicked:
                     end_date=backfill_end,
                     bucket_name=bucket_name,
                     odds_api_key=odds_api_key,
+                    bookmakers=(bookmakers_filter.strip() or None),
                     historical_mode=True,
                     force_refresh=force_refresh,
                     gcp_project=gcp_project or None,
@@ -334,12 +360,13 @@ if odds_summary:
 props_summary = st.session_state.get("cbb_props_summary")
 if props_summary:
     st.subheader("Props Import Summary")
-    p1, p2, p3, p4, p5 = st.columns(5)
+    p1, p2, p3, p4, p5, p6 = st.columns(6)
     p1.metric("Events", props_summary["event_count"])
     p2.metric("Prop Rows", props_summary["prop_rows"])
     p3.metric("Cache Hit", "Yes" if props_summary["props_cache_hit"] else "No")
     p4.metric("Events w/ Books", props_summary.get("events_with_bookmakers", 0))
     p5.metric("Events w/ Markets", props_summary.get("events_with_requested_markets", 0))
+    p6.metric("Mode", "Historical" if props_summary.get("historical_mode") else "Live")
     st.json(props_summary)
 
 odds_backfill_summary = st.session_state.get("cbb_odds_backfill_summary")
