@@ -44,12 +44,80 @@ def _resolve_event_snapshot_time(
             parsed = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
             if parsed.tzinfo is None:
                 parsed = parsed.replace(tzinfo=timezone.utc)
-            snapshot = parsed.astimezone(timezone.utc) - timedelta(hours=4)
+            # Player props are often posted closer to tipoff; sample just before commence.
+            snapshot = parsed.astimezone(timezone.utc) - timedelta(minutes=15)
             return snapshot.replace(microsecond=0).isoformat().replace("+00:00", "Z")
         except ValueError:
             pass
 
-    return f"{game_date.isoformat()}T16:00:00Z"
+    return f"{game_date.isoformat()}T23:45:00Z"
+
+
+def _event_body(event: dict[str, Any]) -> dict[str, Any]:
+    wrapped = event.get("data")
+    if isinstance(wrapped, dict):
+        return wrapped
+    return event
+
+
+def _props_diagnostics(payload: dict[str, Any], requested_markets_csv: str) -> dict[str, int]:
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return {
+            "events_with_bookmakers": 0,
+            "events_with_requested_markets": 0,
+            "total_bookmakers": 0,
+            "total_requested_markets": 0,
+            "total_outcomes": 0,
+        }
+
+    requested = {x.strip().lower() for x in requested_markets_csv.split(",") if x.strip()}
+    events_with_bookmakers = 0
+    events_with_requested_markets = 0
+    total_bookmakers = 0
+    total_requested_markets = 0
+    total_outcomes = 0
+
+    for event in events:
+        if not isinstance(event, dict):
+            continue
+        body = _event_body(event)
+        bookmakers = body.get("bookmakers")
+        if not isinstance(bookmakers, list):
+            continue
+        if bookmakers:
+            events_with_bookmakers += 1
+        total_bookmakers += len(bookmakers)
+
+        event_has_requested = False
+        for bookmaker in bookmakers:
+            if not isinstance(bookmaker, dict):
+                continue
+            markets = bookmaker.get("markets")
+            if not isinstance(markets, list):
+                continue
+            for market in markets:
+                if not isinstance(market, dict):
+                    continue
+                market_key = str(market.get("key") or "").strip().lower()
+                if requested and market_key not in requested:
+                    continue
+                event_has_requested = True
+                total_requested_markets += 1
+                outcomes = market.get("outcomes")
+                if isinstance(outcomes, list):
+                    total_outcomes += len(outcomes)
+
+        if event_has_requested:
+            events_with_requested_markets += 1
+
+    return {
+        "events_with_bookmakers": events_with_bookmakers,
+        "events_with_requested_markets": events_with_requested_markets,
+        "total_bookmakers": total_bookmakers,
+        "total_requested_markets": total_requested_markets,
+        "total_outcomes": total_outcomes,
+    }
 
 
 def run_cbb_props_pipeline(
@@ -149,6 +217,7 @@ def run_cbb_props_pipeline(
     rows = flatten_player_props_payload(payload)
     csv_text = rows_to_csv_text(rows)
     props_lines_blob = store.write_props_lines_csv(game_date, csv_text)
+    diagnostics = _props_diagnostics(payload, markets)
 
     local_json_path: str | None = None
     local_csv_path: str | None = None
@@ -170,6 +239,11 @@ def run_cbb_props_pipeline(
         "props_lines_blob": props_lines_blob,
         "event_count": len(payload.get("events", [])) if isinstance(payload.get("events"), list) else 0,
         "prop_rows": len(rows),
+        "events_with_bookmakers": diagnostics["events_with_bookmakers"],
+        "events_with_requested_markets": diagnostics["events_with_requested_markets"],
+        "total_bookmakers": diagnostics["total_bookmakers"],
+        "total_requested_markets": diagnostics["total_requested_markets"],
+        "total_outcomes": diagnostics["total_outcomes"],
         "local_json_path": local_json_path,
         "local_csv_path": local_csv_path,
     }

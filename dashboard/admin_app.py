@@ -334,10 +334,12 @@ if odds_summary:
 props_summary = st.session_state.get("cbb_props_summary")
 if props_summary:
     st.subheader("Props Import Summary")
-    p1, p2, p3 = st.columns(3)
+    p1, p2, p3, p4, p5 = st.columns(5)
     p1.metric("Events", props_summary["event_count"])
     p2.metric("Prop Rows", props_summary["prop_rows"])
     p3.metric("Cache Hit", "Yes" if props_summary["props_cache_hit"] else "No")
+    p4.metric("Events w/ Books", props_summary.get("events_with_bookmakers", 0))
+    p5.metric("Events w/ Markets", props_summary.get("events_with_requested_markets", 0))
     st.json(props_summary)
 
 odds_backfill_summary = st.session_state.get("cbb_odds_backfill_summary")

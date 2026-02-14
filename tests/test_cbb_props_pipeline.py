@@ -152,4 +152,14 @@ def test_props_pipeline_historical_uses_pregame_snapshot(monkeypatch) -> None:
         historical_snapshot_time=None,
         store=store,
     )
-    assert seen["snapshot"] == "2026-02-12T19:00:00Z"
+    assert seen["snapshot"] == "2026-02-12T22:45:00Z"
+
+
+def test_props_pipeline_returns_diagnostics_fields() -> None:
+    store = FakeStore(cached_props=_sample_props_payload())
+    summary = run_cbb_props_pipeline(game_date=date(2026, 2, 12), store=store)
+    assert "events_with_bookmakers" in summary
+    assert "events_with_requested_markets" in summary
+    assert "total_bookmakers" in summary
+    assert "total_requested_markets" in summary
+    assert "total_outcomes" in summary
