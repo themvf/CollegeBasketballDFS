@@ -34,6 +34,14 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     normalize_injuries_frame,
     remove_injured_players,
 )
+from college_basketball_dfs.cbb_tournament_review import (
+    build_field_entries_and_players,
+    build_player_exposure_comparison,
+    build_user_strategy_summary,
+    summarize_generated_lineups,
+    normalize_contest_standings_frame,
+    extract_actual_ownership_from_standings,
+)
 
 
 def _secret(name: str) -> str | None:
@@ -149,6 +157,32 @@ def _write_ownership_csv(store: CbbGcsStore, slate_date: date, csv_text: str) ->
     if callable(writer):
         return writer(slate_date, csv_text)
     blob_name = _ownership_blob_name(slate_date)
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
+def _contest_standings_blob_name(slate_date: date, contest_id: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(contest_id or "").strip())
+    safe = safe or "contest"
+    return f"cbb/contest_standings/{slate_date.isoformat()}_{safe}.csv"
+
+
+def _read_contest_standings_csv(store: CbbGcsStore, slate_date: date, contest_id: str) -> str | None:
+    reader = getattr(store, "read_contest_standings_csv", None)
+    if callable(reader):
+        return reader(slate_date, contest_id)
+    blob = store.bucket.blob(_contest_standings_blob_name(slate_date, contest_id))
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _write_contest_standings_csv(store: CbbGcsStore, slate_date: date, contest_id: str, csv_text: str) -> str:
+    writer = getattr(store, "write_contest_standings_csv", None)
+    if callable(writer):
+        return writer(slate_date, contest_id, csv_text)
+    blob_name = _contest_standings_blob_name(slate_date, contest_id)
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
@@ -532,6 +566,27 @@ def load_actual_results_frame_for_date(
     return out
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_contest_standings_frame(
+    bucket_name: str,
+    selected_date: date,
+    contest_id: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = _read_contest_standings_csv(store, selected_date, contest_id)
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+    return pd.read_csv(io.StringIO(csv_text))
+
+
 def build_optimizer_pool_for_date(
     bucket_name: str,
     slate_date: date,
@@ -662,8 +717,18 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review = st.tabs(
-    ["Game Data", "Prop Data", "Backfill", "DK Slate", "Injuries", "Slate + Vegas", "Lineup Generator", "Projection Review"]
+tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
+    [
+        "Game Data",
+        "Prop Data",
+        "Backfill",
+        "DK Slate",
+        "Injuries",
+        "Slate + Vegas",
+        "Lineup Generator",
+        "Projection Review",
+        "Tournament Review",
+    ]
 )
 
 with tab_game:
@@ -1523,6 +1588,178 @@ with tab_projection_review:
                     mime="text/csv",
                     key="download_projection_review_csv",
                 )
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_tournament_review:
+    st.subheader("Tournament Review")
+    st.caption(
+        "Upload contest standings to analyze field construction (stacks, salary left, ownership) "
+        "and compare against our lineups and projection assumptions."
+    )
+    tr_date = st.date_input("Tournament Date", value=optimizer_slate_date, key="tournament_review_date")
+    tr_contest_id = st.text_input("Contest ID", value="contest", key="tournament_review_contest_id")
+    tr_upload = st.file_uploader(
+        "Upload Contest Standings CSV",
+        type=["csv"],
+        key="tournament_standings_upload",
+    )
+    t1, t2 = st.columns(2)
+    tr_save_clicked = t1.button("Save Contest CSV to GCS", key="save_tournament_csv")
+    tr_refresh_clicked = t2.button("Refresh Tournament Review", key="refresh_tournament_review")
+    if tr_refresh_clicked:
+        load_contest_standings_frame.clear()
+
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to run tournament review.")
+    else:
+        try:
+            if tr_save_clicked:
+                if tr_upload is None:
+                    st.error("Choose a contest standings CSV before saving.")
+                else:
+                    csv_text = tr_upload.getvalue().decode("utf-8-sig")
+                    client = build_storage_client(
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                        project=gcp_project or None,
+                    )
+                    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                    blob_name = _write_contest_standings_csv(store, tr_date, tr_contest_id, csv_text)
+                    load_contest_standings_frame.clear()
+                    st.success(f"Saved contest standings to `{blob_name}`")
+
+            if tr_upload is not None:
+                standings_df = pd.read_csv(io.StringIO(tr_upload.getvalue().decode("utf-8-sig")))
+            else:
+                standings_df = load_contest_standings_frame(
+                    bucket_name=bucket_name,
+                    selected_date=tr_date,
+                    contest_id=tr_contest_id,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+
+            if standings_df.empty:
+                st.warning("No contest standings loaded. Upload a CSV or save/load one from GCS.")
+            else:
+                normalized_standings = normalize_contest_standings_frame(standings_df)
+                slate_df = load_dk_slate_frame_for_date(
+                    bucket_name=bucket_name,
+                    selected_date=tr_date,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+
+                projections_df = load_projection_snapshot_frame(
+                    bucket_name=bucket_name,
+                    selected_date=tr_date,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                if projections_df.empty and not slate_df.empty:
+                    fallback_pool, _, _, _, _ = build_optimizer_pool_for_date(
+                        bucket_name=bucket_name,
+                        slate_date=tr_date,
+                        bookmaker=(bookmakers_filter.strip() or None),
+                        gcp_project=gcp_project or None,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                    )
+                    projections_df = fallback_pool
+
+                entries_df, expanded_df = build_field_entries_and_players(normalized_standings, slate_df)
+                if entries_df.empty:
+                    st.warning("Could not parse lineup strings from this standings file.")
+                else:
+                    actual_own_df = extract_actual_ownership_from_standings(normalized_standings)
+                    exposure_df = build_player_exposure_comparison(
+                        expanded_players_df=expanded_df,
+                        entry_count=int(len(entries_df)),
+                        projection_df=projections_df,
+                        actual_ownership_df=actual_own_df,
+                    )
+                    user_summary_df = build_user_strategy_summary(entries_df)
+
+                    m1, m2, m3, m4, m5 = st.columns(5)
+                    m1.metric("Field Entries", int(len(entries_df)))
+                    m2.metric("Avg Salary Left", f"{float(entries_df['salary_left'].mean()):.0f}")
+                    m3.metric("Avg Max Team Stack", f"{float(entries_df['max_team_stack'].mean()):.2f}")
+                    m4.metric("Avg Max Game Stack", f"{float(entries_df['max_game_stack'].mean()):.2f}")
+                    top10 = entries_df.nsmallest(10, "Rank")
+                    m5.metric("Top-10 Avg Salary Left", f"{float(top10['salary_left'].mean()):.0f}")
+
+                    our_generated = st.session_state.get("cbb_generated_lineups", [])
+                    if our_generated:
+                        our_df = summarize_generated_lineups(our_generated)
+                        if not our_df.empty:
+                            st.subheader("Our Generated Lineups vs Field")
+                            c1, c2, c3, c4 = st.columns(4)
+                            c1.metric("Our Lineups", int(len(our_df)))
+                            c2.metric("Our Avg Salary Left", f"{float(our_df['salary_left'].mean()):.0f}")
+                            c3.metric("Our Avg Max Team Stack", f"{float(our_df['max_team_stack'].mean()):.2f}")
+                            c4.metric("Our Avg Max Game Stack", f"{float(our_df['max_game_stack'].mean()):.2f}")
+
+                    st.subheader("Field Lineup Construction")
+                    show_entry_cols = [
+                        "Rank",
+                        "EntryId",
+                        "EntryName",
+                        "Points",
+                        "parsed_players",
+                        "mapped_players",
+                        "salary_used",
+                        "salary_left",
+                        "unique_teams",
+                        "unique_games",
+                        "max_team_stack",
+                        "max_game_stack",
+                    ]
+                    entry_cols = [c for c in show_entry_cols if c in entries_df.columns]
+                    st.dataframe(entries_df[entry_cols], hide_index=True, use_container_width=True)
+
+                    st.subheader("Player Exposure vs Ownership")
+                    if exposure_df.empty:
+                        st.info("No player exposure table available.")
+                    else:
+                        exp_cols = [
+                            "Name",
+                            "TeamAbbrev",
+                            "appearances",
+                            "field_ownership_pct",
+                            "projected_ownership",
+                            "ownership_diff_vs_proj",
+                            "actual_ownership_from_file",
+                            "blended_projection",
+                            "our_dk_projection",
+                            "vegas_dk_projection",
+                        ]
+                        use_cols = [c for c in exp_cols if c in exposure_df.columns]
+                        st.dataframe(exposure_df[use_cols], hide_index=True, use_container_width=True)
+
+                    st.subheader("User Strategy Summary")
+                    if user_summary_df.empty:
+                        st.info("No user-level summary available.")
+                    else:
+                        st.dataframe(user_summary_df, hide_index=True, use_container_width=True)
+
+                    st.download_button(
+                        "Download Tournament Entry Construction CSV",
+                        data=entries_df.to_csv(index=False),
+                        file_name=f"tournament_entries_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                        mime="text/csv",
+                        key="download_tournament_entries",
+                    )
+                    st.download_button(
+                        "Download Tournament Exposure CSV",
+                        data=exposure_df.to_csv(index=False),
+                        file_name=f"tournament_exposure_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                        mime="text/csv",
+                        key="download_tournament_exposure",
+                    )
         except Exception as exc:
             st.exception(exc)
 

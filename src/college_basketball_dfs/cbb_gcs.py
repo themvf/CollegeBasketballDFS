@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import re
 from dataclasses import dataclass
 from datetime import date
 from typing import Any
@@ -57,6 +58,7 @@ class CbbGcsStore:
     injuries_prefix: str = "cbb/injuries"
     projections_prefix: str = "cbb/projections"
     ownership_prefix: str = "cbb/ownership"
+    contest_standings_prefix: str = "cbb/contest_standings"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -97,6 +99,11 @@ class CbbGcsStore:
 
     def ownership_blob_name(self, game_date: date) -> str:
         return f"{self.ownership_prefix}/{game_date.isoformat()}_ownership.csv"
+
+    def contest_standings_blob_name(self, game_date: date, contest_id: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(contest_id or "").strip())
+        safe = safe or "contest"
+        return f"{self.contest_standings_prefix}/{game_date.isoformat()}_{safe}.csv"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
@@ -226,6 +233,18 @@ class CbbGcsStore:
 
     def write_ownership_csv(self, game_date: date, csv_text: str) -> str:
         blob_name = self.ownership_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_contest_standings_csv(self, game_date: date, contest_id: str) -> str | None:
+        blob = self.bucket.blob(self.contest_standings_blob_name(game_date, contest_id))
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_contest_standings_csv(self, game_date: date, contest_id: str, csv_text: str) -> str:
+        blob_name = self.contest_standings_blob_name(game_date, contest_id)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name

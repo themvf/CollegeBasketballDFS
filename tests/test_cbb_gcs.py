@@ -82,3 +82,13 @@ def test_ownership_blob_name_and_rw() -> None:
     written = store.write_ownership_csv(d, "id,actual_ownership\n1,12.5\n")
     assert written == expected_blob
     assert "12.5" in (store.read_ownership_csv(d) or "")
+
+
+def test_contest_standings_blob_name_and_rw() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    expected_blob = "cbb/contest_standings/2026-02-14_contest-123.csv"
+    assert store.contest_standings_blob_name(d, "contest-123") == expected_blob
+    written = store.write_contest_standings_csv(d, "contest-123", "Rank,EntryId\n1,123\n")
+    assert written == expected_blob
+    assert "EntryId" in (store.read_contest_standings_csv(d, "contest-123") or "")
