@@ -17,6 +17,7 @@ if str(SRC) not in sys.path:
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_backfill import run_season_backfill, season_start_for_date
 from college_basketball_dfs.cbb_ncaa import prior_day
+from college_basketball_dfs.cbb_odds_backfill import run_odds_season_backfill
 from college_basketball_dfs.cbb_odds import flatten_odds_payload
 from college_basketball_dfs.cbb_odds_pipeline import run_cbb_odds_pipeline
 from college_basketball_dfs.cbb_pipeline import run_cbb_cache_pipeline
@@ -135,6 +136,7 @@ with st.sidebar:
     run_clicked = st.button("Run Cache Pipeline")
     run_odds_clicked = st.button("Run Odds Import")
     run_backfill_clicked = st.button("Run Season Backfill")
+    run_odds_backfill_clicked = st.button("Run Odds Season Backfill")
     preview_clicked = st.button("Load Cached Preview")
 
 cred_json = _resolve_credential_json()
@@ -217,6 +219,34 @@ if run_backfill_clicked:
             except Exception as exc:
                 st.exception(exc)
 
+if run_odds_backfill_clicked:
+    if not bucket_name:
+        st.error("Set a GCS bucket before running odds backfill.")
+    elif not odds_api_key:
+        st.error("Set The Odds API key in Streamlit secrets (`the_odds_api_key`).")
+    elif backfill_start > backfill_end:
+        st.error("Backfill start date must be before or equal to end date.")
+    else:
+        with st.spinner("Running odds season backfill..."):
+            try:
+                result = run_odds_season_backfill(
+                    start_date=backfill_start,
+                    end_date=backfill_end,
+                    bucket_name=bucket_name,
+                    odds_api_key=odds_api_key,
+                    force_refresh=force_refresh,
+                    gcp_project=gcp_project or None,
+                    gcp_service_account_json=cred_json,
+                    gcp_service_account_json_b64=cred_json_b64,
+                    sleep_seconds=float(backfill_sleep),
+                    stop_on_error=stop_on_error,
+                )
+                load_odds_frame_for_date.clear()
+                st.session_state["cbb_odds_backfill_summary"] = result.as_dict()
+                st.success("Odds season backfill completed.")
+            except Exception as exc:
+                st.exception(exc)
+
 summary = st.session_state.get("cbb_last_summary")
 if summary:
     c1, c2, c3, c4 = st.columns(4)
@@ -234,6 +264,16 @@ if odds_summary:
     o2.metric("Game Rows", odds_summary["odds_game_rows"])
     o3.metric("Cache Hit", "Yes" if odds_summary["odds_cache_hit"] else "No")
     st.json(odds_summary)
+
+odds_backfill_summary = st.session_state.get("cbb_odds_backfill_summary")
+if odds_backfill_summary:
+    st.subheader("Odds Season Backfill Summary")
+    ob1, ob2, ob3, ob4 = st.columns(4)
+    ob1.metric("Total Dates", odds_backfill_summary["total_dates"])
+    ob2.metric("Success Dates", odds_backfill_summary["success_dates"])
+    ob3.metric("Failed Dates", odds_backfill_summary["failed_dates"])
+    ob4.metric("Cache Hits", odds_backfill_summary["odds_cache_hits"])
+    st.json(odds_backfill_summary)
 
 backfill_summary = st.session_state.get("cbb_backfill_summary")
 if backfill_summary:

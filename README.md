@@ -66,6 +66,12 @@ The importer pulls `h2h,spreads,totals` for `basketball_ncaab` and writes:
 - raw odds JSON
 - normalized game-level odds CSV
 
+Backfill odds across a season range:
+
+```bash
+python -m college_basketball_dfs.cbb_odds_backfill --start-date 2025-11-01 --end-date 2026-03-31 --bucket your-gcs-bucket --odds-api-key your_key
+```
+
 ## Streamlit Admin App
 
 Run locally:
@@ -77,6 +83,7 @@ streamlit run dashboard/admin_app.py
 Use sidebar controls to:
 - run the cache pipeline
 - run The Odds API import for selected date
+- run odds season backfill for a date range
 - run season backfill for a date range
 - preview cached raw JSON and player CSV from GCS
 - lookup a team and view game-level results table:
