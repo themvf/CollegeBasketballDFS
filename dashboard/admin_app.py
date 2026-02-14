@@ -148,6 +148,7 @@ odds_api_key = (_resolve_odds_api_key() or "").strip()
 with st.sidebar:
     st.header("Pipeline Settings")
     selected_date = st.date_input("Slate Date", value=prior_day())
+    props_selected_date = st.date_input("Props Date", value=prior_day())
     default_season_start = season_start_for_date(date.today())
     backfill_start = st.date_input("Backfill Start", value=default_season_start)
     backfill_end = st.date_input("Backfill End", value=prior_day())
@@ -237,12 +238,14 @@ if run_props_clicked:
         with st.spinner("Importing player props from The Odds API..."):
             try:
                 summary = run_cbb_props_pipeline(
-                    game_date=selected_date,
+                    game_date=props_selected_date,
                     bucket_name=bucket_name,
                     odds_api_key=odds_api_key,
                     markets=props_markets.strip(),
-                    historical_mode=(selected_date < date.today()),
-                    historical_snapshot_time=f"{selected_date.isoformat()}T23:59:59Z" if selected_date < date.today() else None,
+                    historical_mode=(props_selected_date < date.today()),
+                    historical_snapshot_time=(
+                        f"{props_selected_date.isoformat()}T23:59:59Z" if props_selected_date < date.today() else None
+                    ),
                     force_refresh=force_refresh,
                     gcp_project=gcp_project or None,
                     gcp_service_account_json=cred_json,
@@ -405,7 +408,7 @@ else:
     try:
         props_df = load_props_frame_for_date(
             bucket_name=bucket_name,
-            selected_date=selected_date,
+            selected_date=props_selected_date,
             gcp_project=gcp_project or None,
             service_account_json=cred_json,
             service_account_json_b64=cred_json_b64,
