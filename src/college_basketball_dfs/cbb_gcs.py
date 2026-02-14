@@ -54,6 +54,7 @@ class CbbGcsStore:
     props_prefix: str = "cbb/props"
     props_lines_prefix: str = "cbb/props_lines"
     dk_slates_prefix: str = "cbb/dk_slates"
+    injuries_prefix: str = "cbb/injuries"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -85,6 +86,9 @@ class CbbGcsStore:
 
     def dk_slate_blob_name(self, game_date: date) -> str:
         return f"{self.dk_slates_prefix}/{game_date.isoformat()}_dk_slate.csv"
+
+    def injuries_blob_name(self) -> str:
+        return f"{self.injuries_prefix}/injuries_master.csv"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
@@ -168,6 +172,18 @@ class CbbGcsStore:
 
     def write_dk_slate_csv(self, game_date: date, csv_text: str) -> str:
         blob_name = self.dk_slate_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_injuries_csv(self) -> str | None:
+        blob = self.bucket.blob(self.injuries_blob_name())
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_injuries_csv(self, csv_text: str) -> str:
+        blob_name = self.injuries_blob_name()
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name

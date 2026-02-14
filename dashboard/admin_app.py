@@ -4,7 +4,7 @@ import io
 import inspect
 import os
 import sys
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 import pandas as pd
@@ -24,6 +24,14 @@ from college_basketball_dfs.cbb_odds_pipeline import run_cbb_odds_pipeline
 from college_basketball_dfs.cbb_pipeline import run_cbb_cache_pipeline
 from college_basketball_dfs.cbb_props_pipeline import run_cbb_props_pipeline
 from college_basketball_dfs.cbb_team_lookup import rows_from_payloads
+from college_basketball_dfs.cbb_dk_optimizer import (
+    build_dk_upload_csv,
+    build_player_pool,
+    generate_lineups,
+    lineups_summary_frame,
+    normalize_injuries_frame,
+    remove_injured_players,
+)
 
 
 def _secret(name: str) -> str | None:
@@ -67,6 +75,30 @@ def _write_dk_slate_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> 
     if callable(writer):
         return writer(slate_date, csv_text)
     blob_name = _dk_slate_blob_name(slate_date)
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
+def _injuries_blob_name() -> str:
+    return "cbb/injuries/injuries_master.csv"
+
+
+def _read_injuries_csv(store: CbbGcsStore) -> str | None:
+    reader = getattr(store, "read_injuries_csv", None)
+    if callable(reader):
+        return reader()
+    blob = store.bucket.blob(_injuries_blob_name())
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _write_injuries_csv(store: CbbGcsStore, csv_text: str) -> str:
+    writer = getattr(store, "write_injuries_csv", None)
+    if callable(writer):
+        return writer(csv_text)
+    blob_name = _injuries_blob_name()
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
@@ -181,6 +213,66 @@ def load_dk_slate_frame_for_date(
     return pd.read_csv(io.StringIO(csv_text))
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_injuries_frame(
+    bucket_name: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = _read_injuries_csv(store)
+    if not csv_text or not csv_text.strip():
+        return normalize_injuries_frame(None)
+    frame = pd.read_csv(io.StringIO(csv_text))
+    return normalize_injuries_frame(frame)
+
+
+def build_optimizer_pool_for_date(
+    bucket_name: str,
+    slate_date: date,
+    bookmaker: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+    slate_df = load_dk_slate_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=slate_date,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    injuries_df = load_injuries_frame(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if slate_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df
+
+    filtered_slate, removed_injured = remove_injured_players(slate_df, injuries_df)
+    props_df = load_props_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=slate_date,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    pool_df = build_player_pool(
+        slate_df=filtered_slate,
+        props_df=props_df,
+        bookmaker_filter=(bookmaker or None),
+    )
+    return pool_df, removed_injured, slate_df, injuries_df
+
+
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
 st.title("College Basketball Admin Cache")
 st.caption("Cache-first data pipeline backed by Google Cloud Storage.")
@@ -194,6 +286,7 @@ default_bookmakers = os.getenv("CBB_ODDS_BOOKMAKERS", "").strip() or (_secret("c
 with st.sidebar:
     st.header("Pipeline Settings")
     selected_date = st.date_input("Slate Date", value=prior_day())
+    optimizer_slate_date = st.date_input("DK/Optimizer Slate Date", value=selected_date)
     props_date_preset = st.selectbox(
         "Props Date Preset",
         options=["Custom", "Today", "Tomorrow"],
@@ -256,7 +349,9 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk = st.tabs(["Game Data", "Prop Data", "Backfill", "DK Slate"])
+tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups = st.tabs(
+    ["Game Data", "Prop Data", "Backfill", "DK Slate", "Injuries", "Slate + Vegas", "Lineup Generator"]
+)
 
 with tab_game:
     st.subheader("Game Imports")
@@ -547,6 +642,277 @@ with tab_dk:
             else:
                 st.caption(f"Rows: {len(dk_df):,} | Columns: {len(dk_df.columns):,}")
                 st.dataframe(dk_df, hide_index=True, use_container_width=True)
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_injuries:
+    st.subheader("Injuries")
+    st.caption("Persistent injury list stored in GCS by player + team.")
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to manage injuries.")
+    else:
+        try:
+            add_col1, add_col2, add_col3 = st.columns([2, 1, 1])
+            with add_col1:
+                injury_player = st.text_input("Player Name", key="inj_player_name")
+            with add_col2:
+                injury_team = st.text_input("Team Abbrev", key="inj_team_abbrev")
+            with add_col3:
+                injury_status = st.selectbox(
+                    "Status",
+                    options=["Out", "Doubtful", "Questionable", "Probable", "Available"],
+                    index=0,
+                    key="inj_status",
+                )
+            injury_notes = st.text_input("Notes (optional)", key="inj_notes")
+            add_injury_clicked = st.button("Add Injury", key="add_injury_button")
+
+            injuries_df = load_injuries_frame(
+                bucket_name=bucket_name,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+
+            if add_injury_clicked:
+                if not injury_player.strip() or not injury_team.strip():
+                    st.error("Player Name and Team Abbrev are required.")
+                else:
+                    new_row = pd.DataFrame(
+                        [
+                            {
+                                "player_name": injury_player.strip(),
+                                "team": injury_team.strip().upper(),
+                                "status": injury_status,
+                                "notes": injury_notes.strip(),
+                                "active": True,
+                                "updated_at": datetime.utcnow().strftime("%Y-%m-%d %H:%M:%SZ"),
+                            }
+                        ]
+                    )
+                    merged = pd.concat([injuries_df, new_row], ignore_index=True)
+                    merged = normalize_injuries_frame(merged)
+                    client = build_storage_client(
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                        project=gcp_project or None,
+                    )
+                    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                    _write_injuries_csv(store, merged.to_csv(index=False))
+                    load_injuries_frame.clear()
+                    st.success("Injury added.")
+                    injuries_df = load_injuries_frame(
+                        bucket_name=bucket_name,
+                        gcp_project=gcp_project or None,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                    )
+
+            st.subheader("Injury List Editor")
+            edited_injuries = st.data_editor(
+                injuries_df,
+                num_rows="dynamic",
+                use_container_width=True,
+                key="injuries_editor_df",
+            )
+            save_col, reload_col = st.columns(2)
+            save_injuries_clicked = save_col.button("Save Injury List", key="save_injury_list")
+            reload_injuries_clicked = reload_col.button("Reload from GCS", key="reload_injury_list")
+
+            if save_injuries_clicked:
+                normalized = normalize_injuries_frame(edited_injuries)
+                client = build_storage_client(
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                    project=gcp_project or None,
+                )
+                store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                blob_name = _write_injuries_csv(store, normalized.to_csv(index=False))
+                load_injuries_frame.clear()
+                st.success(f"Saved injury list to `{blob_name}`")
+
+            if reload_injuries_clicked:
+                load_injuries_frame.clear()
+                st.info("Reloaded injury cache from GCS.")
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_slate_vegas:
+    st.subheader("Slate + Vegas Player Pool")
+    vegas_bookmaker = st.text_input(
+        "Vegas Bookmaker Source",
+        value=(bookmakers_filter.strip() or "fanduel"),
+        key="slate_vegas_bookmaker",
+        help="Use the same bookmaker used for odds/props imports (example: fanduel).",
+    )
+    refresh_pool_clicked = st.button("Refresh Slate + Vegas", key="refresh_slate_vegas_pool")
+    if refresh_pool_clicked:
+        load_dk_slate_frame_for_date.clear()
+        load_props_frame_for_date.clear()
+        load_injuries_frame.clear()
+
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to build the slate player pool.")
+    else:
+        try:
+            pool_df, removed_injured_df, raw_slate_df, _ = build_optimizer_pool_for_date(
+                bucket_name=bucket_name,
+                slate_date=optimizer_slate_date,
+                bookmaker=(vegas_bookmaker.strip() or None),
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if raw_slate_df.empty:
+                st.warning("No DraftKings slate found for selected optimizer date. Upload in `DK Slate` tab first.")
+            else:
+                m1, m2, m3 = st.columns(3)
+                m1.metric("Raw Slate Players", int(len(raw_slate_df)))
+                m2.metric("Removed (Out/Doubtful)", int(len(removed_injured_df)))
+                m3.metric("Active Pool Players", int(len(pool_df)))
+
+                if not removed_injured_df.empty:
+                    st.subheader("Removed Injured Players")
+                    removed_cols = [c for c in ["Name", "TeamAbbrev", "ID"] if c in removed_injured_df.columns]
+                    st.dataframe(removed_injured_df[removed_cols], hide_index=True, use_container_width=True)
+
+                if pool_df.empty:
+                    st.warning("Player pool is empty after injury filtering.")
+                else:
+                    show_cols = [
+                        "ID",
+                        "Name + ID",
+                        "Name",
+                        "TeamAbbrev",
+                        "Position",
+                        "Salary",
+                        "projected_dk_points",
+                        "projected_ownership",
+                        "leverage_score",
+                        "vegas_points_line",
+                        "vegas_rebounds_line",
+                        "vegas_assists_line",
+                        "vegas_threes_line",
+                        "AvgPointsPerGame",
+                    ]
+                    existing_cols = [c for c in show_cols if c in pool_df.columns]
+                    display_pool = pool_df[existing_cols].sort_values("projected_dk_points", ascending=False)
+                    st.dataframe(display_pool, hide_index=True, use_container_width=True)
+                    st.download_button(
+                        "Download Active Pool CSV",
+                        data=display_pool.to_csv(index=False),
+                        file_name=f"cbb_active_pool_{optimizer_slate_date.isoformat()}.csv",
+                        mime="text/csv",
+                        key="download_active_pool_csv",
+                    )
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_lineups:
+    st.subheader("DK Lineup Generator")
+    lineup_bookmaker = st.text_input(
+        "Lineup Bookmaker Source",
+        value=(bookmakers_filter.strip() or "fanduel"),
+        key="lineup_bookmaker_source",
+    )
+    c1, c2, c3 = st.columns(3)
+    lineup_count = int(c1.slider("Lineups", min_value=1, max_value=150, value=20, step=1))
+    contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=1)
+    lineup_seed = int(c3.number_input("Random Seed", min_value=1, max_value=999999, value=7, step=1))
+
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to generate lineups.")
+    else:
+        try:
+            pool_df, removed_injured_df, raw_slate_df, _ = build_optimizer_pool_for_date(
+                bucket_name=bucket_name,
+                slate_date=optimizer_slate_date,
+                bookmaker=(lineup_bookmaker.strip() or None),
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+
+            if raw_slate_df.empty:
+                st.warning("No DraftKings slate found for selected optimizer date. Upload in `DK Slate` tab first.")
+            elif pool_df.empty:
+                st.warning("No players available after injury filtering. Check `Injuries` tab or slate date.")
+            else:
+                pool_sorted = pool_df.sort_values("projected_dk_points", ascending=False).copy()
+                player_labels = [
+                    f"{row['Name']} ({row['TeamAbbrev']}) [{row['ID']}]"
+                    for _, row in pool_sorted.iterrows()
+                ]
+                label_to_id = {
+                    f"{row['Name']} ({row['TeamAbbrev']}) [{row['ID']}]": str(row["ID"])
+                    for _, row in pool_sorted.iterrows()
+                }
+
+                l1, l2 = st.columns(2)
+                locked_labels = l1.multiselect("Lock Players (in every lineup)", options=player_labels, default=[])
+                excluded_labels = l2.multiselect("Exclude Players", options=player_labels, default=[])
+
+                exposure_players = st.multiselect(
+                    "Exposure Caps (max % by player)",
+                    options=player_labels,
+                    default=[],
+                    help="Pick players to set max exposure percentage across generated lineups.",
+                )
+                exposure_caps: dict[str, float] = {}
+                if exposure_players:
+                    st.caption("Exposure Caps")
+                    exp_cols = st.columns(3)
+                    for idx, label in enumerate(exposure_players):
+                        col = exp_cols[idx % 3]
+                        with col:
+                            pct = st.slider(
+                                label=f"{label}",
+                                min_value=0,
+                                max_value=100,
+                                value=100,
+                                step=1,
+                                key=f"exp_cap_{label}",
+                            )
+                            exposure_caps[label_to_id[label]] = float(pct)
+
+                generate_lineups_clicked = st.button("Generate DK Lineups", key="generate_dk_lineups")
+                if generate_lineups_clicked:
+                    locked_ids = [label_to_id[x] for x in locked_labels]
+                    excluded_ids = [label_to_id[x] for x in excluded_labels]
+                    lineups, warnings = generate_lineups(
+                        pool_df=pool_sorted,
+                        num_lineups=lineup_count,
+                        contest_type=contest_type,
+                        locked_ids=locked_ids,
+                        excluded_ids=excluded_ids,
+                        exposure_caps_pct=exposure_caps,
+                        random_seed=lineup_seed,
+                    )
+                    st.session_state["cbb_generated_lineups"] = lineups
+                    st.session_state["cbb_generated_lineups_warnings"] = warnings
+
+                generated = st.session_state.get("cbb_generated_lineups", [])
+                warnings = st.session_state.get("cbb_generated_lineups_warnings", [])
+                if warnings:
+                    for msg in warnings:
+                        st.warning(msg)
+                if generated:
+                    g1, g2, g3 = st.columns(3)
+                    g1.metric("Generated Lineups", len(generated))
+                    g2.metric("Injured Removed", int(len(removed_injured_df)))
+                    g3.metric("Pool Size", int(len(pool_sorted)))
+
+                    summary_df = lineups_summary_frame(generated)
+                    st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+                    upload_csv = build_dk_upload_csv(generated)
+                    st.download_button(
+                        "Download DK Upload CSV",
+                        data=upload_csv,
+                        file_name=f"dk_lineups_{optimizer_slate_date.isoformat()}.csv",
+                        mime="text/csv",
+                        key="download_dk_upload_csv",
+                    )
         except Exception as exc:
             st.exception(exc)
 

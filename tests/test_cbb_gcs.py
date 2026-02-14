@@ -53,3 +53,12 @@ def test_dk_slate_blob_name_and_rw() -> None:
 def test_dk_slate_read_missing_returns_none() -> None:
     store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
     assert store.read_dk_slate_csv(date(2026, 2, 15)) is None
+
+
+def test_injuries_blob_name_and_rw() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    expected_blob = "cbb/injuries/injuries_master.csv"
+    assert store.injuries_blob_name() == expected_blob
+    written = store.write_injuries_csv("player_name,team,status,active\nA,AAA,Out,true\n")
+    assert written == expected_blob
+    assert "A,AAA,Out,true" in (store.read_injuries_csv() or "")
