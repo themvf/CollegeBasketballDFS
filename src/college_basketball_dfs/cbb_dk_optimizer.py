@@ -501,6 +501,8 @@ def generate_lineups(
     locked_ids: list[str] | None = None,
     excluded_ids: list[str] | None = None,
     exposure_caps_pct: dict[str, float] | None = None,
+    global_max_exposure_pct: float = 100.0,
+    max_salary_left: int | None = None,
     random_seed: int = 7,
     max_attempts_per_lineup: int = 1200,
     progress_callback: Callable[[int, int, str], None] | None = None,
@@ -515,6 +517,7 @@ def generate_lineups(
 
     scored = apply_contest_objective(pool_df, contest_type)
     scored = scored.loc[scored["Salary"] > 0].copy()
+    min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
 
     locked_set = {str(x) for x in (locked_ids or []) if str(x).strip()}
     excluded_set = {str(x) for x in (excluded_ids or []) if str(x).strip()}
@@ -538,17 +541,25 @@ def generate_lineups(
     lock_salary = sum(int(p["Salary"]) for p in lock_players)
     if lock_salary > SALARY_CAP:
         return [], ["Locked players exceed salary cap."]
+    max_salary_any = int(scored["Salary"].max())
+    if lock_salary + ((ROSTER_SIZE - len(lock_players)) * max_salary_any) < min_salary_used:
+        return [], ["Locked players make minimum-salary-used constraint impossible."]
     if not _is_feasible_partial(lock_players, ROSTER_SIZE, ROSTER_SIZE - len(lock_players)):
         return [], ["Locked players make roster constraints impossible."]
 
-    cap_counts: dict[str, int] = {str(p["ID"]): num_lineups for p in players}
+    global_pct = max(0.0, min(100.0, float(global_max_exposure_pct)))
+    global_cap = max(0, int(math.floor((global_pct / 100.0) * num_lineups)))
+    cap_counts: dict[str, int] = {str(p["ID"]): global_cap for p in players}
     exposure_caps_pct = exposure_caps_pct or {}
     for pid, pct in exposure_caps_pct.items():
         player_id = str(pid)
         if player_id not in cap_counts:
             continue
         clamped_pct = max(0.0, min(100.0, float(pct)))
-        cap_counts[player_id] = max(0, int(math.floor((clamped_pct / 100.0) * num_lineups)))
+        cap_counts[player_id] = min(
+            cap_counts[player_id],
+            max(0, int(math.floor((clamped_pct / 100.0) * num_lineups))),
+        )
     for lock in locked_set:
         cap_counts[lock] = num_lineups
 
@@ -588,6 +599,8 @@ def generate_lineups(
                     rem_after_pick = remaining_slots - 1
                     if next_salary + (rem_after_pick * min_salary_any) > SALARY_CAP:
                         continue
+                    if next_salary + (rem_after_pick * max_salary_any) < min_salary_used:
+                        continue
 
                     partial = selected + [p]
                     if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
@@ -609,6 +622,9 @@ def generate_lineups(
             if not selected:
                 continue
             if not _lineup_valid(selected):
+                continue
+            final_salary = int(sum(int(p["Salary"]) for p in selected))
+            if final_salary < min_salary_used:
                 continue
 
             selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)

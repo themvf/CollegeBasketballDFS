@@ -1305,6 +1305,27 @@ with tab_lineups:
     lineup_count = int(c1.slider("Lineups", min_value=1, max_value=150, value=20, step=1))
     contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=1)
     lineup_seed = int(c3.number_input("Random Seed", min_value=1, max_value=999999, value=7, step=1))
+    c4, c5 = st.columns(2)
+    max_salary_left = int(
+        c4.slider(
+            "Max Salary Left Per Lineup",
+            min_value=0,
+            max_value=10000,
+            value=2000,
+            step=100,
+            help="Lineups must use at least 50000 - this value in salary.",
+        )
+    )
+    global_max_exposure_pct = float(
+        c5.slider(
+            "Global Max Player Exposure %",
+            min_value=0,
+            max_value=100,
+            value=100,
+            step=1,
+            help="Caps every player's max lineup rate across the run (locks override this cap).",
+        )
+    )
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
@@ -1381,6 +1402,8 @@ with tab_lineups:
                         locked_ids=locked_ids,
                         excluded_ids=excluded_ids,
                         exposure_caps_pct=exposure_caps,
+                        global_max_exposure_pct=global_max_exposure_pct,
+                        max_salary_left=max_salary_left,
                         random_seed=lineup_seed,
                         progress_callback=_lineup_progress,
                     )

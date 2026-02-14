@@ -1,3 +1,5 @@
+from collections import Counter
+
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
@@ -144,6 +146,42 @@ def test_generate_lineups_respects_locks_and_excludes() -> None:
 
     upload_csv = build_dk_upload_csv(lineups)
     assert upload_csv.startswith("G,G,G,F,F,F,UTIL,UTIL")
+
+
+def test_generate_lineups_respects_max_salary_left() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=5,
+        contest_type="Small GPP",
+        max_salary_left=5000,
+        random_seed=13,
+    )
+
+    assert warnings == []
+    assert len(lineups) == 5
+    assert all(int(lineup["salary"]) >= 45000 for lineup in lineups)
+
+
+def test_generate_lineups_respects_global_max_exposure() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    requested_lineups = 10
+    max_exposure_pct = 40.0
+    lineups, _ = generate_lineups(
+        pool_df=pool,
+        num_lineups=requested_lineups,
+        contest_type="Small GPP",
+        global_max_exposure_pct=max_exposure_pct,
+        random_seed=13,
+    )
+
+    exposure_counts: Counter[str] = Counter()
+    for lineup in lineups:
+        exposure_counts.update(lineup["player_ids"])
+
+    max_allowed_count = int((max_exposure_pct / 100.0) * requested_lineups)
+    assert exposure_counts
+    assert max(exposure_counts.values()) <= max_allowed_count
 
 
 def test_build_player_pool_blends_our_and_vegas_stats() -> None:
