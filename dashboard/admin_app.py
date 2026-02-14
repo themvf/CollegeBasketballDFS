@@ -137,6 +137,26 @@ def load_props_frame_for_date(
     return frame
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_dk_slate_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = store.read_dk_slate_csv(selected_date)
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+    return pd.read_csv(io.StringIO(csv_text))
+
+
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
 st.title("College Basketball Admin Cache")
 st.caption("Cache-first data pipeline backed by Google Cloud Storage.")
@@ -212,7 +232,7 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill = st.tabs(["Game Data", "Prop Data", "Backfill"])
+tab_game, tab_props, tab_backfill, tab_dk = st.tabs(["Game Data", "Prop Data", "Backfill", "DK Slate"])
 
 with tab_game:
     st.subheader("Game Imports")
@@ -230,6 +250,19 @@ with tab_backfill:
     c4, c5 = st.columns(2)
     run_backfill_clicked = c4.button("Run Season Backfill", key="run_season_backfill")
     run_odds_backfill_clicked = c5.button("Run Odds Season Backfill", key="run_odds_season_backfill")
+
+with tab_dk:
+    st.subheader("DraftKings Slate Upload")
+    dk_slate_date = st.date_input("DraftKings Slate Date", value=selected_date, key="dk_slate_date")
+    uploaded_dk_slate = st.file_uploader(
+        "Upload DraftKings Slate CSV",
+        type=["csv"],
+        key="dk_slate_upload",
+        help="Upload the DraftKings player/salary slate CSV for this date.",
+    )
+    d1, d2 = st.columns(2)
+    upload_dk_slate_clicked = d1.button("Upload DK Slate to GCS", key="upload_dk_slate_to_gcs")
+    load_dk_slate_clicked = d2.button("Refresh Cached Slate View", key="refresh_dk_slate_view")
 
 with tab_game:
     if run_clicked:
@@ -312,6 +345,41 @@ with tab_props:
                     load_props_frame_for_date.clear()
                     st.session_state["cbb_props_summary"] = summary
                     st.success("Props import completed.")
+                except Exception as exc:
+                    st.exception(exc)
+
+with tab_dk:
+    if upload_dk_slate_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before uploading DraftKings slate.")
+        elif uploaded_dk_slate is None:
+            st.error("Choose a DraftKings slate CSV file before uploading.")
+        else:
+            with st.spinner("Uploading DraftKings slate CSV to GCS..."):
+                try:
+                    csv_bytes = uploaded_dk_slate.getvalue()
+                    csv_text = csv_bytes.decode("utf-8-sig")
+                    if not csv_text.strip():
+                        st.error("Uploaded CSV is empty.")
+                    else:
+                        df = pd.read_csv(io.StringIO(csv_text))
+                        client = build_storage_client(
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                            project=gcp_project or None,
+                        )
+                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                        blob_name = store.write_dk_slate_csv(dk_slate_date, csv_text)
+                        load_dk_slate_frame_for_date.clear()
+                        st.session_state["cbb_dk_upload_summary"] = {
+                            "slate_date": dk_slate_date.isoformat(),
+                            "bucket_name": bucket_name,
+                            "dk_slate_blob": blob_name,
+                            "source_file_name": uploaded_dk_slate.name,
+                            "row_count": int(len(df)),
+                            "column_count": int(len(df.columns)),
+                        }
+                        st.success("DraftKings slate uploaded.")
                 except Exception as exc:
                     st.exception(exc)
 
@@ -428,6 +496,35 @@ with tab_backfill:
         b3.metric("Failed Dates", backfill_summary["failed_dates"])
         b4.metric("Cache Hits", backfill_summary["raw_cache_hits"])
         st.json(backfill_summary)
+
+with tab_dk:
+    if load_dk_slate_clicked:
+        load_dk_slate_frame_for_date.clear()
+
+    dk_upload_summary = st.session_state.get("cbb_dk_upload_summary")
+    if dk_upload_summary:
+        st.subheader("DK Upload Summary")
+        st.json(dk_upload_summary)
+
+    st.subheader("Cached DraftKings Slate")
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to load DraftKings slate data.")
+    else:
+        try:
+            dk_df = load_dk_slate_frame_for_date(
+                bucket_name=bucket_name,
+                selected_date=dk_slate_date,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if dk_df.empty:
+                st.warning("No cached DraftKings slate found for selected date. Upload a CSV first.")
+            else:
+                st.caption(f"Rows: {len(dk_df):,} | Columns: {len(dk_df.columns):,}")
+                st.dataframe(dk_df, hide_index=True, use_container_width=True)
+        except Exception as exc:
+            st.exception(exc)
 
 with tab_game:
     st.subheader("Game Odds")
