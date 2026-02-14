@@ -51,6 +51,8 @@ class CbbGcsStore:
     players_prefix: str = "cbb/players"
     odds_prefix: str = "cbb/odds"
     odds_games_prefix: str = "cbb/odds_games"
+    props_prefix: str = "cbb/props"
+    props_lines_prefix: str = "cbb/props_lines"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -73,6 +75,12 @@ class CbbGcsStore:
 
     def odds_games_blob_name(self, game_date: date) -> str:
         return f"{self.odds_games_prefix}/{game_date.isoformat()}_odds.csv"
+
+    def props_blob_name(self, game_date: date) -> str:
+        return f"{self.props_prefix}/{game_date.isoformat()}.json"
+
+    def props_lines_blob_name(self, game_date: date) -> str:
+        return f"{self.props_lines_prefix}/{game_date.isoformat()}_props.csv"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
@@ -119,6 +127,31 @@ class CbbGcsStore:
 
     def write_odds_games_csv(self, game_date: date, csv_text: str) -> str:
         blob_name = self.odds_games_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_props_json(self, game_date: date) -> dict[str, Any] | None:
+        blob = self.bucket.blob(self.props_blob_name(game_date))
+        if not blob.exists():
+            return None
+        text = blob.download_as_text(encoding="utf-8")
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected props payload type: {type(payload).__name__}")
+        return payload
+
+    def write_props_json(self, game_date: date, payload: dict[str, Any]) -> str:
+        blob_name = self.props_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(
+            json.dumps(payload, indent=2),
+            content_type="application/json",
+        )
+        return blob_name
+
+    def write_props_lines_csv(self, game_date: date, csv_text: str) -> str:
+        blob_name = self.props_lines_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name

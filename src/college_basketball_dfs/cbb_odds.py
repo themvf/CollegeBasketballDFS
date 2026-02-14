@@ -131,6 +131,45 @@ class OddsApiClient:
             raise OddsApiError(f"Unexpected odds payload type: {type(payload).__name__}")
         return [x for x in payload if isinstance(x, dict)]
 
+    def fetch_event_odds(
+        self,
+        event_id: str,
+        sport_key: str = "basketball_ncaab",
+        regions: str = "us",
+        markets: str = "player_points,player_rebounds,player_assists",
+        odds_format: str = "american",
+        date_format: str = "iso",
+        historical: bool = False,
+        historical_snapshot_time: str | None = None,
+    ) -> dict[str, Any]:
+        if historical:
+            if not historical_snapshot_time:
+                raise OddsApiError("historical_snapshot_time is required for historical event odds.")
+            payload = self.get(
+                path=f"/historical/sports/{sport_key}/events/{event_id}/odds",
+                params={
+                    "regions": regions,
+                    "markets": markets,
+                    "oddsFormat": odds_format,
+                    "dateFormat": date_format,
+                    "date": historical_snapshot_time,
+                },
+            )
+        else:
+            payload = self.get(
+                path=f"/sports/{sport_key}/events/{event_id}/odds",
+                params={
+                    "regions": regions,
+                    "markets": markets,
+                    "oddsFormat": odds_format,
+                    "dateFormat": date_format,
+                },
+            )
+
+        if not isinstance(payload, dict):
+            raise OddsApiError(f"Unexpected event odds payload type: {type(payload).__name__}")
+        return payload
+
 
 def flatten_odds_payload(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
     events = payload.get("events")
@@ -216,5 +255,95 @@ def flatten_odds_payload(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
             "total_samples": len([x for x in total_values if x is not None]),
         }
         rows.append(row)
+
+    return rows
+
+
+def flatten_player_props_payload(payload: Mapping[str, Any]) -> list[dict[str, Any]]:
+    events = payload.get("events")
+    if not isinstance(events, list):
+        return []
+
+    game_date = str(payload.get("game_date", ""))
+    rows: list[dict[str, Any]] = []
+
+    for event in events:
+        if not isinstance(event, Mapping):
+            continue
+        event_id = event.get("id")
+        home_team = event.get("home_team")
+        away_team = event.get("away_team")
+        commence_time = event.get("commence_time")
+
+        bookmakers = event.get("bookmakers")
+        if not isinstance(bookmakers, list):
+            continue
+
+        for bookmaker in bookmakers:
+            if not isinstance(bookmaker, Mapping):
+                continue
+            bookmaker_key = bookmaker.get("key")
+            markets = bookmaker.get("markets")
+            if not isinstance(markets, list):
+                continue
+
+            for market in markets:
+                if not isinstance(market, Mapping):
+                    continue
+                market_key = str(market.get("key") or "").strip().lower()
+                if not market_key.startswith("player_"):
+                    continue
+
+                outcomes = market.get("outcomes")
+                if not isinstance(outcomes, list):
+                    continue
+                typed_outcomes = [x for x in outcomes if isinstance(x, Mapping)]
+
+                by_player: dict[str, dict[str, Mapping[str, Any]]] = {}
+                for outcome in typed_outcomes:
+                    name = str(outcome.get("name") or "").strip()
+                    outcome_type = name.lower()
+                    player_name = str(outcome.get("description") or "").strip()
+                    if not player_name and outcome_type not in ("over", "under"):
+                        player_name = name
+                    if not player_name:
+                        continue
+                    by_player.setdefault(player_name, {})
+                    if outcome_type in ("over", "under"):
+                        by_player[player_name][outcome_type] = outcome
+                    else:
+                        by_player[player_name]["single"] = outcome
+
+                for player_name, player_outcomes in by_player.items():
+                    over_outcome = player_outcomes.get("over")
+                    under_outcome = player_outcomes.get("under")
+                    single_outcome = player_outcomes.get("single")
+
+                    line = _to_float((over_outcome or {}).get("point"))
+                    if line is None:
+                        line = _to_float((under_outcome or {}).get("point"))
+                    if line is None:
+                        line = _to_float((single_outcome or {}).get("point"))
+
+                    over_price = _to_float((over_outcome or {}).get("price"))
+                    under_price = _to_float((under_outcome or {}).get("price"))
+                    if over_price is None and single_outcome is not None:
+                        over_price = _to_float(single_outcome.get("price"))
+
+                    rows.append(
+                        {
+                            "game_date": game_date,
+                            "event_id": event_id,
+                            "commence_time": commence_time,
+                            "home_team": home_team,
+                            "away_team": away_team,
+                            "bookmaker": bookmaker_key,
+                            "market": market_key,
+                            "player_name": player_name,
+                            "line": line,
+                            "over_price": over_price,
+                            "under_price": under_price,
+                        }
+                    )
 
     return rows

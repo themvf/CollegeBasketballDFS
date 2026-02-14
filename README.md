@@ -76,6 +76,18 @@ Notes:
 - Odds season backfill uses The Odds API historical endpoint by default.
 - This requires a paid plan with historical access.
 
+## Player Props Import
+
+Import player prop lines (default markets: points/rebounds/assists):
+
+```bash
+python -m college_basketball_dfs.cbb_props_pipeline --date 2026-02-12 --bucket your-gcs-bucket --odds-api-key your_key --historical-mode
+```
+
+Writes:
+- raw props JSON: `cbb/props/YYYY-MM-DD.json`
+- normalized props lines CSV: `cbb/props_lines/YYYY-MM-DD_props.csv`
+
 ## Streamlit Admin App
 
 Run locally:
@@ -87,6 +99,7 @@ streamlit run dashboard/admin_app.py
 Use sidebar controls to:
 - run the cache pipeline
 - run The Odds API import for selected date
+- run player props import for selected date
 - run odds season backfill for a date range
 - run season backfill for a date range
 - preview cached raw JSON and player CSV from GCS
@@ -107,3 +120,5 @@ Secrets template:
 - Players CSV: `cbb/players/YYYY-MM-DD_players.csv`
 - Odds Raw JSON: `cbb/odds/YYYY-MM-DD.json`
 - Odds Games CSV: `cbb/odds_games/YYYY-MM-DD_odds.csv`
+- Props Raw JSON: `cbb/props/YYYY-MM-DD.json`
+- Props Lines CSV: `cbb/props_lines/YYYY-MM-DD_props.csv`
