@@ -15,6 +15,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
+from college_basketball_dfs.cbb_backfill import run_season_backfill, season_start_for_date
 from college_basketball_dfs.cbb_ncaa import prior_day
 from college_basketball_dfs.cbb_pipeline import run_cbb_cache_pipeline
 
@@ -48,11 +49,17 @@ default_project = os.getenv("GCP_PROJECT", "").strip() or (_secret("gcp_project"
 with st.sidebar:
     st.header("Pipeline Settings")
     selected_date = st.date_input("Slate Date", value=prior_day())
+    default_season_start = season_start_for_date(date.today())
+    backfill_start = st.date_input("Backfill Start", value=default_season_start)
+    backfill_end = st.date_input("Backfill End", value=prior_day())
     bucket_name = st.text_input("GCS Bucket", value=default_bucket)
     base_url = st.text_input("NCAA API Base URL", value=default_base_url)
     gcp_project = st.text_input("GCP Project (optional)", value=default_project)
     force_refresh = st.checkbox("Force API refresh (ignore cached raw JSON)", value=False)
+    backfill_sleep = st.number_input("Backfill Sleep Seconds", min_value=0.0, max_value=5.0, value=0.0, step=0.1)
+    stop_on_error = st.checkbox("Stop Backfill On Error", value=False)
     run_clicked = st.button("Run Cache Pipeline")
+    run_backfill_clicked = st.button("Run Season Backfill")
     preview_clicked = st.button("Load Cached Preview")
 
 cred_json = _resolve_credential_json()
@@ -84,6 +91,32 @@ if run_clicked:
             except Exception as exc:
                 st.exception(exc)
 
+if run_backfill_clicked:
+    if not bucket_name:
+        st.error("Set a GCS bucket before running backfill.")
+    elif backfill_start > backfill_end:
+        st.error("Backfill start date must be before or equal to end date.")
+    else:
+        with st.spinner("Running season backfill... this can take several minutes."):
+            try:
+                result = run_season_backfill(
+                    start_date=backfill_start,
+                    end_date=backfill_end,
+                    bucket_name=bucket_name,
+                    ncaa_base_url=base_url,
+                    force_refresh=force_refresh,
+                    gcp_project=gcp_project or None,
+                    gcp_service_account_json=cred_json,
+                    gcp_service_account_json_b64=cred_json_b64,
+                    sleep_seconds=float(backfill_sleep),
+                    stop_on_error=stop_on_error,
+                )
+                payload = result.as_dict()
+                st.session_state["cbb_backfill_summary"] = payload
+                st.success("Season backfill completed.")
+            except Exception as exc:
+                st.exception(exc)
+
 summary = st.session_state.get("cbb_last_summary")
 if summary:
     c1, c2, c3, c4 = st.columns(4)
@@ -92,6 +125,16 @@ if summary:
     c3.metric("Boxscores Failed", summary["boxscore_failure_count"])
     c4.metric("Player Rows", summary["player_row_count"])
     st.json(summary)
+
+backfill_summary = st.session_state.get("cbb_backfill_summary")
+if backfill_summary:
+    st.subheader("Season Backfill Summary")
+    b1, b2, b3, b4 = st.columns(4)
+    b1.metric("Total Dates", backfill_summary["total_dates"])
+    b2.metric("Success Dates", backfill_summary["success_dates"])
+    b3.metric("Failed Dates", backfill_summary["failed_dates"])
+    b4.metric("Cache Hits", backfill_summary["raw_cache_hits"])
+    st.json(backfill_summary)
 
 if preview_clicked:
     if not bucket_name:

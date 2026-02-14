@@ -40,6 +40,20 @@ python -m college_basketball_dfs.cbb_pipeline --date 2026-02-12 --bucket your-gc
 python -m college_basketball_dfs.cbb_pipeline --date 2026-02-12 --bucket your-gcs-bucket --force-refresh
 ```
 
+## Season Backfill To GCS
+
+Backfill an entire season date range into your bucket:
+
+```bash
+python -m college_basketball_dfs.cbb_backfill --start-date 2025-11-01 --end-date 2026-03-31 --bucket your-gcs-bucket
+```
+
+Optional throttling and fail-fast:
+
+```bash
+python -m college_basketball_dfs.cbb_backfill --start-date 2025-11-01 --end-date 2026-03-31 --bucket your-gcs-bucket --sleep-seconds 0.2 --stop-on-error
+```
+
 ## Streamlit Admin App
 
 Run locally:
@@ -50,6 +64,7 @@ streamlit run dashboard/admin_app.py
 
 Use sidebar controls to:
 - run the cache pipeline
+- run season backfill for a date range
 - preview cached raw JSON and player CSV from GCS
 
 For Streamlit Community Cloud, set entrypoint:
