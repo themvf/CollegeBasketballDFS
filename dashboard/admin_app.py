@@ -48,6 +48,30 @@ def _resolve_odds_api_key() -> str | None:
     return os.getenv("THE_ODDS_API_KEY") or _secret("the_odds_api_key")
 
 
+def _dk_slate_blob_name(slate_date: date) -> str:
+    return f"cbb/dk_slates/{slate_date.isoformat()}_dk_slate.csv"
+
+
+def _read_dk_slate_csv(store: CbbGcsStore, slate_date: date) -> str | None:
+    reader = getattr(store, "read_dk_slate_csv", None)
+    if callable(reader):
+        return reader(slate_date)
+    blob = store.bucket.blob(_dk_slate_blob_name(slate_date))
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _write_dk_slate_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> str:
+    writer = getattr(store, "write_dk_slate_csv", None)
+    if callable(writer):
+        return writer(slate_date, csv_text)
+    blob_name = _dk_slate_blob_name(slate_date)
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_team_lookup_frame(
     bucket_name: str,
@@ -151,7 +175,7 @@ def load_dk_slate_frame_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = store.read_dk_slate_csv(selected_date)
+    csv_text = _read_dk_slate_csv(store, selected_date)
     if not csv_text or not csv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(csv_text))
@@ -369,7 +393,7 @@ with tab_dk:
                             project=gcp_project or None,
                         )
                         store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                        blob_name = store.write_dk_slate_csv(dk_slate_date, csv_text)
+                        blob_name = _write_dk_slate_csv(store, dk_slate_date, csv_text)
                         load_dk_slate_frame_for_date.clear()
                         st.session_state["cbb_dk_upload_summary"] = {
                             "slate_date": dk_slate_date.isoformat(),
