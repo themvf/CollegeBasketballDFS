@@ -21,6 +21,8 @@ def run_cbb_odds_pipeline(
     sport_key: str = "basketball_ncaab",
     regions: str = "us",
     markets: str = "h2h,spreads,totals",
+    historical_mode: bool = False,
+    historical_snapshot_time: str | None = None,
     force_refresh: bool = False,
     local_output_dir: str | None = None,
     gcp_project: str | None = None,
@@ -58,6 +60,8 @@ def run_cbb_odds_pipeline(
                 sport_key=sport_key,
                 regions=regions,
                 markets=markets,
+                historical=historical_mode,
+                historical_snapshot_time=historical_snapshot_time,
             )
         finally:
             client.close()
@@ -67,6 +71,8 @@ def run_cbb_odds_pipeline(
             "sport_key": sport_key,
             "regions": regions,
             "markets": markets,
+            "historical_mode": historical_mode,
+            "historical_snapshot_time": historical_snapshot_time,
             "events": events,
         }
         odds_blob = store.write_odds_json(game_date, payload)
@@ -116,6 +122,8 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sport-key", type=str, default="basketball_ncaab")
     parser.add_argument("--regions", type=str, default="us")
     parser.add_argument("--markets", type=str, default="h2h,spreads,totals")
+    parser.add_argument("--historical-mode", action="store_true", help="Use /historical endpoint with date snapshot.")
+    parser.add_argument("--historical-snapshot-time", type=str, default=None, help="ISO UTC time for historical date param.")
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--local-output-dir", type=str, default=None)
     parser.add_argument("--gcp-project", type=str, default=os.getenv("GCP_PROJECT", ""))
@@ -134,6 +142,8 @@ def main() -> None:
         sport_key=args.sport_key,
         regions=args.regions,
         markets=args.markets,
+        historical_mode=args.historical_mode,
+        historical_snapshot_time=args.historical_snapshot_time,
         force_refresh=args.force_refresh,
         local_output_dir=args.local_output_dir,
         gcp_project=args.gcp_project or None,

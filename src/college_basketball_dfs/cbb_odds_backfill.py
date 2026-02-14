@@ -44,6 +44,7 @@ def run_odds_season_backfill(
     runner: Callable[..., dict[str, Any]] = run_cbb_odds_pipeline,
     sleep_seconds: float = 0.0,
     stop_on_error: bool = False,
+    historical_mode: bool = True,
     **pipeline_kwargs: Any,
 ) -> OddsBackfillResult:
     dates = iter_dates(start_date, end_date)
@@ -56,7 +57,12 @@ def run_odds_season_backfill(
 
     for idx, game_date in enumerate(dates):
         try:
-            summary = runner(game_date=game_date, **pipeline_kwargs)
+            summary = runner(
+                game_date=game_date,
+                historical_mode=historical_mode,
+                historical_snapshot_time=f"{game_date.isoformat()}T23:59:59Z" if historical_mode else None,
+                **pipeline_kwargs,
+            )
             success_dates += 1
             total_events += int(summary.get("event_count", 0))
             total_odds_game_rows += int(summary.get("odds_game_rows", 0))
@@ -99,6 +105,9 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--sport-key", type=str, default="basketball_ncaab")
     parser.add_argument("--regions", type=str, default="us")
     parser.add_argument("--markets", type=str, default="h2h,spreads,totals")
+    parser.add_argument("--historical-mode", action="store_true", dest="historical_mode")
+    parser.add_argument("--no-historical-mode", action="store_false", dest="historical_mode")
+    parser.set_defaults(historical_mode=True)
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--gcp-project", type=str, default=None)
     parser.add_argument("--sleep-seconds", type=float, default=0.0)
@@ -121,6 +130,7 @@ def main() -> None:
         sport_key=args.sport_key,
         regions=args.regions,
         markets=args.markets,
+        historical_mode=args.historical_mode,
         force_refresh=args.force_refresh,
         gcp_project=args.gcp_project,
         sleep_seconds=args.sleep_seconds,

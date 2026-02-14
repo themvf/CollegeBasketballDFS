@@ -1,4 +1,6 @@
-from college_basketball_dfs.cbb_odds import flatten_odds_payload
+from datetime import date
+
+from college_basketball_dfs.cbb_odds import OddsApiClient, flatten_odds_payload
 
 
 def test_flatten_odds_payload_builds_consensus_row() -> None:
@@ -83,3 +85,41 @@ def test_flatten_odds_payload_builds_consensus_row() -> None:
     assert row["moneyline_samples"] == 2
     assert row["spread_samples"] == 2
     assert row["total_samples"] == 2
+
+
+def test_flatten_odds_payload_handles_historical_wrapper_data() -> None:
+    payload = {
+        "game_date": "2026-02-12",
+        "events": [
+            {
+                "id": "evt-2",
+                "commence_time": "2026-02-12T22:00:00Z",
+                "home_team": "Team A",
+                "away_team": "Team B",
+                "bookmakers": [],
+            }
+        ],
+    }
+    rows = flatten_odds_payload(payload)
+    assert len(rows) == 1
+    assert rows[0]["home_team"] == "Team A"
+
+
+def test_fetch_game_odds_historical_reads_data_field(monkeypatch) -> None:
+    captured = {}
+
+    def fake_get(self, path, params):
+        captured["path"] = path
+        captured["params"] = params
+        return {"data": [{"id": "evt"}]}
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_odds.OddsApiClient.get", fake_get)
+    client = OddsApiClient(api_key="x")
+    try:
+        rows = client.fetch_game_odds(game_date=date(2026, 2, 12), historical=True)
+    finally:
+        client.close()
+
+    assert rows == [{"id": "evt"}]
+    assert captured["path"].endswith("/historical/sports/basketball_ncaab/odds")
+    assert "date" in captured["params"]

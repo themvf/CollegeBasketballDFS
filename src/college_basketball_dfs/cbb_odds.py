@@ -91,8 +91,31 @@ class OddsApiClient:
         markets: str = "h2h,spreads,totals",
         odds_format: str = "american",
         date_format: str = "iso",
+        historical: bool = False,
+        historical_snapshot_time: str | None = None,
     ) -> list[dict[str, Any]]:
         commence_from, commence_to = _day_window_utc(game_date)
+        if historical:
+            snapshot_time = historical_snapshot_time or f"{game_date.isoformat()}T23:59:59Z"
+            payload = self.get(
+                path=f"/historical/sports/{sport_key}/odds",
+                params={
+                    "regions": regions,
+                    "markets": markets,
+                    "oddsFormat": odds_format,
+                    "dateFormat": date_format,
+                    "date": snapshot_time,
+                    "commenceTimeFrom": commence_from,
+                    "commenceTimeTo": commence_to,
+                },
+            )
+            if not isinstance(payload, dict):
+                raise OddsApiError(f"Unexpected historical odds payload type: {type(payload).__name__}")
+            data = payload.get("data")
+            if not isinstance(data, list):
+                raise OddsApiError("Historical odds payload missing list field `data`.")
+            return [x for x in data if isinstance(x, dict)]
+
         payload = self.get(
             path=f"/sports/{sport_key}/odds",
             params={

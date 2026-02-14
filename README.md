@@ -72,6 +72,10 @@ Backfill odds across a season range:
 python -m college_basketball_dfs.cbb_odds_backfill --start-date 2025-11-01 --end-date 2026-03-31 --bucket your-gcs-bucket --odds-api-key your_key
 ```
 
+Notes:
+- Odds season backfill uses The Odds API historical endpoint by default.
+- This requires a paid plan with historical access.
+
 ## Streamlit Admin App
 
 Run locally:

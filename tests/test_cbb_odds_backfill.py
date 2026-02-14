@@ -7,7 +7,7 @@ def test_odds_backfill_aggregates_success() -> None:
     calls = []
 
     def stub_runner(*, game_date, **kwargs):
-        calls.append(game_date)
+        calls.append((game_date, kwargs))
         return {
             "event_count": 5,
             "odds_game_rows": 5,
@@ -21,6 +21,8 @@ def test_odds_backfill_aggregates_success() -> None:
     ).as_dict()
 
     assert len(calls) == 3
+    assert calls[0][1]["historical_mode"] is True
+    assert calls[0][1]["historical_snapshot_time"].startswith("2026-02-10T23:59:59")
     assert result["success_dates"] == 3
     assert result["failed_dates"] == 0
     assert result["total_events"] == 15
