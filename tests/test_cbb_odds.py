@@ -123,3 +123,27 @@ def test_fetch_game_odds_historical_reads_data_field(monkeypatch) -> None:
     assert rows == [{"id": "evt"}]
     assert captured["path"].endswith("/historical/sports/basketball_ncaab/odds")
     assert "date" in captured["params"]
+
+
+def test_fetch_event_odds_historical_reads_data_field(monkeypatch) -> None:
+    captured = {}
+
+    def fake_get(self, path, params):
+        captured["path"] = path
+        captured["params"] = params
+        return {"timestamp": "x", "data": {"id": "evt-1", "bookmakers": []}}
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_odds.OddsApiClient.get", fake_get)
+    client = OddsApiClient(api_key="x")
+    try:
+        event = client.fetch_event_odds(
+            event_id="evt-1",
+            historical=True,
+            historical_snapshot_time="2026-02-12T23:59:59Z",
+        )
+    finally:
+        client.close()
+
+    assert event == {"id": "evt-1", "bookmakers": []}
+    assert captured["path"].endswith("/historical/sports/basketball_ncaab/events/evt-1/odds")
+    assert captured["params"]["date"] == "2026-02-12T23:59:59Z"

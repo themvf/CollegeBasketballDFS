@@ -155,6 +155,12 @@ class OddsApiClient:
                     "date": historical_snapshot_time,
                 },
             )
+            if not isinstance(payload, dict):
+                raise OddsApiError(f"Unexpected historical event odds payload type: {type(payload).__name__}")
+            data = payload.get("data")
+            if isinstance(data, dict):
+                return data
+            raise OddsApiError("Historical event odds payload missing object field `data`.")
         else:
             payload = self.get(
                 path=f"/sports/{sport_key}/events/{event_id}/odds",
@@ -270,12 +276,17 @@ def flatten_player_props_payload(payload: Mapping[str, Any]) -> list[dict[str, A
     for event in events:
         if not isinstance(event, Mapping):
             continue
-        event_id = event.get("id")
-        home_team = event.get("home_team")
-        away_team = event.get("away_team")
-        commence_time = event.get("commence_time")
+        event_body: Mapping[str, Any] = event
+        wrapped_data = event.get("data")
+        if isinstance(wrapped_data, Mapping):
+            event_body = wrapped_data
 
-        bookmakers = event.get("bookmakers")
+        event_id = event_body.get("id") or event.get("id")
+        home_team = event_body.get("home_team") or event.get("home_team")
+        away_team = event_body.get("away_team") or event.get("away_team")
+        commence_time = event_body.get("commence_time") or event.get("commence_time")
+
+        bookmakers = event_body.get("bookmakers")
         if not isinstance(bookmakers, list):
             continue
 

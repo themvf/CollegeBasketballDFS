@@ -72,6 +72,16 @@ def test_flatten_player_props_payload() -> None:
     assert row["under_price"] == -110.0
 
 
+def test_flatten_player_props_payload_handles_wrapped_event_data() -> None:
+    wrapped = {
+        "game_date": "2026-02-12",
+        "events": [{"id": "evt-1", "home_team": "Home U", "away_team": "Away U", "data": _sample_props_payload()["events"][0]}],
+    }
+    rows = flatten_player_props_payload(wrapped)
+    assert len(rows) == 1
+    assert rows[0]["player_name"] == "John Doe"
+
+
 def test_props_pipeline_uses_cache_when_available() -> None:
     store = FakeStore(cached_props=_sample_props_payload())
     summary = run_cbb_props_pipeline(game_date=date(2026, 2, 12), store=store)
