@@ -164,3 +164,39 @@ def test_fetch_event_odds_historical_reads_data_field(monkeypatch) -> None:
     assert event == {"id": "evt-1", "bookmakers": []}
     assert captured["path"].endswith("/historical/sports/basketball_ncaab/events/evt-1/odds")
     assert captured["params"]["date"] == "2026-02-12T23:59:59Z"
+
+
+def test_get_retries_429_then_succeeds(monkeypatch) -> None:
+    class StubResponse:
+        def __init__(self, status_code: int, payload, text: str = "", headers: dict | None = None) -> None:
+            self.status_code = status_code
+            self._payload = payload
+            self.text = text
+            self.headers = headers or {}
+
+        def json(self):
+            return self._payload
+
+    responses = [
+        StubResponse(429, {"message": "rate limited"}, text='{"message":"rate limited"}', headers={"Retry-After": "0"}),
+        StubResponse(200, [{"id": "evt-1"}]),
+    ]
+
+    sleep_calls: list[float] = []
+
+    client = OddsApiClient(
+        api_key="x",
+        min_interval_seconds=0.0,
+        max_retries=2,
+        retry_backoff_seconds=0.01,
+        max_retry_backoff_seconds=0.01,
+    )
+    monkeypatch.setattr(client.session, "get", lambda *args, **kwargs: responses.pop(0))
+    monkeypatch.setattr("college_basketball_dfs.cbb_odds.time.sleep", lambda s: sleep_calls.append(float(s)))
+    try:
+        payload = client.get("/sports/basketball_ncaab/odds", {})
+    finally:
+        client.close()
+
+    assert payload == [{"id": "evt-1"}]
+    assert len(sleep_calls) >= 1

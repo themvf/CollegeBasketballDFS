@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import statistics
+import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
@@ -57,9 +58,14 @@ class OddsApiClient:
     api_key: str
     base_url: str = "https://api.the-odds-api.com/v4"
     timeout_seconds: int = 20
+    max_retries: int = 5
+    retry_backoff_seconds: float = 1.0
+    max_retry_backoff_seconds: float = 16.0
+    min_interval_seconds: float = 0.35
 
     def __post_init__(self) -> None:
         self.session = requests.Session()
+        self._last_request_monotonic = 0.0
 
     def close(self) -> None:
         self.session.close()
@@ -67,21 +73,71 @@ class OddsApiClient:
     def _url(self, path: str) -> str:
         return f"{self.base_url.rstrip('/')}/{path.lstrip('/')}"
 
+    def _enforce_min_interval(self) -> None:
+        if self.min_interval_seconds <= 0:
+            return
+        now = time.monotonic()
+        elapsed = now - self._last_request_monotonic
+        wait_seconds = self.min_interval_seconds - elapsed
+        if wait_seconds > 0:
+            time.sleep(wait_seconds)
+
+    def _mark_request(self) -> None:
+        self._last_request_monotonic = time.monotonic()
+
+    def _retry_delay_seconds(self, attempt: int, retry_after_raw: str | None = None) -> float:
+        backoff = min(self.max_retry_backoff_seconds, self.retry_backoff_seconds * (2**attempt))
+        if not retry_after_raw:
+            return backoff
+        try:
+            retry_after = float(retry_after_raw)
+        except (TypeError, ValueError):
+            retry_after = 0.0
+        return max(backoff, retry_after)
+
     def get(self, path: str, params: dict[str, Any]) -> Any:
         full_params = {"apiKey": self.api_key, **params}
-        try:
-            response = self.session.get(self._url(path), params=full_params, timeout=self.timeout_seconds)
-        except requests.RequestException as exc:
-            raise OddsApiError(f"GET {path} failed: {exc}") from exc
+        last_error: Exception | None = None
 
-        if response.status_code >= 400:
-            detail = response.text[:500]
-            raise OddsApiError(f"GET {path} failed ({response.status_code}): {detail}")
+        for attempt in range(self.max_retries + 1):
+            self._enforce_min_interval()
+            try:
+                response = self.session.get(self._url(path), params=full_params, timeout=self.timeout_seconds)
+                self._mark_request()
+            except requests.RequestException as exc:
+                last_error = exc
+                if attempt >= self.max_retries:
+                    raise OddsApiError(f"GET {path} failed after retries: {exc}") from exc
+                time.sleep(self._retry_delay_seconds(attempt))
+                continue
 
-        try:
-            return response.json()
-        except ValueError as exc:
-            raise OddsApiError(f"GET {path} returned invalid JSON") from exc
+            if response.status_code == 429:
+                detail = response.text[:500]
+                if attempt >= self.max_retries:
+                    raise OddsApiError(f"GET {path} failed ({response.status_code}): {detail}")
+                delay = self._retry_delay_seconds(attempt, response.headers.get("Retry-After"))
+                time.sleep(delay)
+                continue
+
+            if response.status_code >= 500:
+                detail = response.text[:500]
+                if attempt >= self.max_retries:
+                    raise OddsApiError(f"GET {path} failed ({response.status_code}): {detail}")
+                time.sleep(self._retry_delay_seconds(attempt))
+                continue
+
+            if response.status_code >= 400:
+                detail = response.text[:500]
+                raise OddsApiError(f"GET {path} failed ({response.status_code}): {detail}")
+
+            try:
+                return response.json()
+            except ValueError as exc:
+                raise OddsApiError(f"GET {path} returned invalid JSON") from exc
+
+        if last_error is not None:
+            raise OddsApiError(f"GET {path} failed after retries: {last_error}") from last_error
+        raise OddsApiError(f"GET {path} failed unexpectedly after retries.")
 
     def fetch_game_odds(
         self,

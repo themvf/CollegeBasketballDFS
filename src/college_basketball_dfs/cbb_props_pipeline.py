@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,7 @@ def run_cbb_props_pipeline(
     bookmakers: str | None = None,
     historical_mode: bool = False,
     historical_snapshot_time: str | None = None,
+    inter_event_sleep_seconds: float = 0.6,
     force_refresh: bool = False,
     local_output_dir: str | None = None,
     gcp_project: str | None = None,
@@ -180,7 +182,7 @@ def run_cbb_props_pipeline(
 
             event_summaries = _extract_event_summaries(events_seed)
             event_payloads: list[dict[str, Any]] = []
-            for event_summary in event_summaries:
+            for idx, event_summary in enumerate(event_summaries):
                 event_id = str(event_summary["id"])
                 event_snapshot_time = (
                     _resolve_event_snapshot_time(event_summary, game_date, historical_snapshot_time)
@@ -201,6 +203,9 @@ def run_cbb_props_pipeline(
                 props_event.setdefault("home_team", event_summary.get("home_team"))
                 props_event.setdefault("away_team", event_summary.get("away_team"))
                 event_payloads.append(props_event)
+                if inter_event_sleep_seconds > 0 and idx < len(event_summaries) - 1:
+                    # Event-level props calls can hit per-second API frequency caps without pacing.
+                    time.sleep(inter_event_sleep_seconds)
         finally:
             client.close()
 
@@ -212,6 +217,7 @@ def run_cbb_props_pipeline(
             "bookmakers": bookmakers,
             "historical_mode": historical_mode,
             "historical_snapshot_time": historical_snapshot_time,
+            "inter_event_sleep_seconds": inter_event_sleep_seconds,
             "events": event_payloads,
         }
         props_blob = store.write_props_json(game_date, payload)
@@ -241,6 +247,7 @@ def run_cbb_props_pipeline(
         "historical_mode": historical_mode,
         "markets": markets,
         "bookmakers": bookmakers,
+        "inter_event_sleep_seconds": inter_event_sleep_seconds,
         "bucket_name": store.bucket_name,
         "props_blob": props_blob,
         "props_lines_blob": props_lines_blob,
@@ -278,6 +285,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--historical-mode", action="store_true")
     parser.add_argument("--historical-snapshot-time", type=str, default=None)
+    parser.add_argument(
+        "--inter-event-sleep-seconds",
+        type=float,
+        default=float(os.getenv("CBB_ODDS_EVENT_SLEEP_SECONDS", "0.6")),
+        help="Delay between event-level props calls to reduce 429 frequency-limit errors.",
+    )
     parser.add_argument("--force-refresh", action="store_true")
     parser.add_argument("--local-output-dir", type=str, default=None)
     parser.add_argument("--gcp-project", type=str, default=os.getenv("GCP_PROJECT", ""))
@@ -299,6 +312,7 @@ def main() -> None:
         bookmakers=(args.bookmakers or None),
         historical_mode=args.historical_mode,
         historical_snapshot_time=args.historical_snapshot_time,
+        inter_event_sleep_seconds=float(args.inter_event_sleep_seconds),
         force_refresh=args.force_refresh,
         local_output_dir=args.local_output_dir,
         gcp_project=args.gcp_project or None,

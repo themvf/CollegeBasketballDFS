@@ -193,6 +193,14 @@ with st.sidebar:
         index=0,
         help="Use Pregame Live for today/tomorrow pulls prior to tip-off.",
     )
+    props_event_sleep_seconds = st.number_input(
+        "Props Event Sleep Seconds",
+        min_value=0.0,
+        max_value=5.0,
+        value=float(os.getenv("CBB_ODDS_EVENT_SLEEP_SECONDS", "0.6")),
+        step=0.1,
+        help="Delay between event-level props requests to avoid Odds API frequency limits (429).",
+    )
     st.caption("Run imports and backfills from the tabs below.")
 
 cred_json = _resolve_credential_json()
@@ -291,6 +299,7 @@ with tab_props:
                         "bookmakers": (bookmakers_filter.strip() or None),
                         "historical_mode": (props_fetch_mode == "Historical Snapshot"),
                         "historical_snapshot_time": None,
+                        "inter_event_sleep_seconds": float(props_event_sleep_seconds),
                         "force_refresh": force_refresh,
                         "gcp_project": gcp_project or None,
                         "gcp_service_account_json": cred_json,

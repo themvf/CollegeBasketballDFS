@@ -163,3 +163,37 @@ def test_props_pipeline_returns_diagnostics_fields() -> None:
     assert "total_bookmakers" in summary
     assert "total_requested_markets" in summary
     assert "total_outcomes" in summary
+
+
+def test_props_pipeline_applies_inter_event_sleep(monkeypatch) -> None:
+    store = FakeStore(
+        cached_props=None,
+        cached_odds={"events": [{"id": "evt-1"}, {"id": "evt-2"}]},
+    )
+    sleep_calls: list[float] = []
+
+    class StubOddsClient:
+        def __init__(self, api_key: str, base_url: str) -> None:
+            self.api_key = api_key
+            self.base_url = base_url
+
+        def close(self) -> None:
+            return
+
+        def fetch_game_odds(self, **kwargs):
+            return [{"id": "evt-1"}, {"id": "evt-2"}]
+
+        def fetch_event_odds(self, **kwargs):
+            payload = _sample_props_payload()["events"][0].copy()
+            payload["id"] = kwargs["event_id"]
+            return payload
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_props_pipeline.OddsApiClient", StubOddsClient)
+    monkeypatch.setattr("college_basketball_dfs.cbb_props_pipeline.time.sleep", lambda s: sleep_calls.append(float(s)))
+    run_cbb_props_pipeline(
+        game_date=date(2026, 2, 12),
+        odds_api_key="key",
+        inter_event_sleep_seconds=0.25,
+        store=store,
+    )
+    assert sleep_calls == [0.25]
