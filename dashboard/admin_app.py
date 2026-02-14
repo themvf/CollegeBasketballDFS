@@ -879,6 +879,15 @@ with tab_lineups:
                 if generate_lineups_clicked:
                     locked_ids = [label_to_id[x] for x in locked_labels]
                     excluded_ids = [label_to_id[x] for x in excluded_labels]
+                    progress_text = st.empty()
+                    progress_bar = st.progress(0, text="Starting lineup generation...")
+
+                    def _lineup_progress(done: int, total: int, status: str) -> None:
+                        pct = 0 if total <= 0 else int((done / total) * 100)
+                        pct = max(0, min(100, pct))
+                        progress_bar.progress(pct, text=status)
+                        progress_text.caption(f"{done}/{total}")
+
                     lineups, warnings = generate_lineups(
                         pool_df=pool_sorted,
                         num_lineups=lineup_count,
@@ -887,7 +896,10 @@ with tab_lineups:
                         excluded_ids=excluded_ids,
                         exposure_caps_pct=exposure_caps,
                         random_seed=lineup_seed,
+                        progress_callback=_lineup_progress,
                     )
+                    final_pct = 100 if lineups else 0
+                    progress_bar.progress(final_pct, text=f"Finished: {len(lineups)} lineups generated.")
                     st.session_state["cbb_generated_lineups"] = lineups
                     st.session_state["cbb_generated_lineups_warnings"] = warnings
 

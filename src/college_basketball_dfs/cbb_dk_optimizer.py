@@ -5,7 +5,7 @@ import io
 import math
 import random
 import re
-from typing import Any
+from typing import Any, Callable
 
 import pandas as pd
 
@@ -298,11 +298,15 @@ def generate_lineups(
     exposure_caps_pct: dict[str, float] | None = None,
     random_seed: int = 7,
     max_attempts_per_lineup: int = 1200,
+    progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if pool_df.empty:
         return [], ["Player pool is empty."]
     if num_lineups <= 0:
         return [], ["Number of lineups must be > 0."]
+
+    if progress_callback is not None:
+        progress_callback(0, num_lineups, "Starting lineup generation...")
 
     scored = apply_contest_objective(pool_df, contest_type)
     scored = scored.loc[scored["Salary"] > 0].copy()
@@ -352,6 +356,8 @@ def generate_lineups(
     player_cols = ["ID", "Name", "Name + ID", "TeamAbbrev", "PositionBase", "Salary", "game_key", "objective_score", "projected_dk_points", "projected_ownership"]
 
     for lineup_idx in range(num_lineups):
+        if progress_callback is not None:
+            progress_callback(lineup_idx, num_lineups, f"Generating lineup {lineup_idx + 1} of {num_lineups}...")
         best_lineup: list[dict[str, Any]] | None = None
         best_score = -10**12
 
@@ -414,6 +420,8 @@ def generate_lineups(
             warnings.append(
                 f"Stopped early at lineup {lineup_idx + 1}: could not satisfy constraints/exposure with current pool."
             )
+            if progress_callback is not None:
+                progress_callback(len(lineups), num_lineups, "Stopped early due to constraints.")
             break
 
         for p in best_lineup:
@@ -433,6 +441,9 @@ def generate_lineups(
                 "projected_ownership_sum": round(lineup_own, 2),
             }
         )
+
+        if progress_callback is not None:
+            progress_callback(len(lineups), num_lineups, f"Generated {len(lineups)} of {num_lineups} lineups.")
 
     return lineups, warnings
 
