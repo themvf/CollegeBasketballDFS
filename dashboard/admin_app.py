@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import inspect
 import os
 import sys
 from datetime import date, timedelta
@@ -263,19 +264,23 @@ if run_props_clicked:
     else:
         with st.spinner("Importing player props from The Odds API..."):
             try:
-                summary = run_cbb_props_pipeline(
-                    game_date=props_selected_date,
-                    bucket_name=bucket_name,
-                    odds_api_key=odds_api_key,
-                    markets=props_markets.strip(),
-                    bookmakers=(bookmakers_filter.strip() or None),
-                    historical_mode=(props_fetch_mode == "Historical Snapshot"),
-                    historical_snapshot_time=None,
-                    force_refresh=force_refresh,
-                    gcp_project=gcp_project or None,
-                    gcp_service_account_json=cred_json,
-                    gcp_service_account_json_b64=cred_json_b64,
-                )
+                props_kwargs = {
+                    "game_date": props_selected_date,
+                    "bucket_name": bucket_name,
+                    "odds_api_key": odds_api_key,
+                    "markets": props_markets.strip(),
+                    "bookmakers": (bookmakers_filter.strip() or None),
+                    "historical_mode": (props_fetch_mode == "Historical Snapshot"),
+                    "historical_snapshot_time": None,
+                    "force_refresh": force_refresh,
+                    "gcp_project": gcp_project or None,
+                    "gcp_service_account_json": cred_json,
+                    "gcp_service_account_json_b64": cred_json_b64,
+                }
+                # Backward-compat: if deployed pipeline is older, drop unknown kwargs.
+                allowed = set(inspect.signature(run_cbb_props_pipeline).parameters.keys())
+                filtered_props_kwargs = {k: v for k, v in props_kwargs.items() if k in allowed}
+                summary = run_cbb_props_pipeline(**filtered_props_kwargs)
                 load_props_frame_for_date.clear()
                 st.session_state["cbb_props_summary"] = summary
                 st.success("Props import completed.")
