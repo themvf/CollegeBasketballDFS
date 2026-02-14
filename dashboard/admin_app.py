@@ -330,6 +330,12 @@ with st.sidebar:
         index=0,
         help="Use Pregame Live for today/tomorrow pulls prior to tip-off.",
     )
+    props_import_mode = st.selectbox(
+        "Props Import Mode",
+        options=["Auto (Cache -> API)", "Cache Only", "Force API Refresh"],
+        index=0,
+        help="Choose whether props import can call API or only load from cached GCS data.",
+    )
     props_event_sleep_seconds = st.number_input(
         "Props Event Sleep Seconds",
         min_value=0.0,
@@ -438,32 +444,74 @@ with tab_props:
     if run_props_clicked:
         if not bucket_name:
             st.error("Set a GCS bucket before importing props.")
-        elif not odds_api_key:
+        elif props_import_mode != "Cache Only" and not odds_api_key:
             st.error("Set The Odds API key in Streamlit secrets (`the_odds_api_key`).")
         else:
-            with st.spinner("Importing player props from The Odds API..."):
+            with st.spinner("Loading player props..."):
                 try:
-                    props_kwargs = {
-                        "game_date": props_selected_date,
-                        "bucket_name": bucket_name,
-                        "odds_api_key": odds_api_key,
-                        "markets": props_markets.strip(),
-                        "bookmakers": (bookmakers_filter.strip() or None),
-                        "historical_mode": (props_fetch_mode == "Historical Snapshot"),
-                        "historical_snapshot_time": None,
-                        "inter_event_sleep_seconds": float(props_event_sleep_seconds),
-                        "force_refresh": force_refresh,
-                        "gcp_project": gcp_project or None,
-                        "gcp_service_account_json": cred_json,
-                        "gcp_service_account_json_b64": cred_json_b64,
-                    }
-                    # Backward-compat: if deployed pipeline is older, drop unknown kwargs.
-                    allowed = set(inspect.signature(run_cbb_props_pipeline).parameters.keys())
-                    filtered_props_kwargs = {k: v for k, v in props_kwargs.items() if k in allowed}
-                    summary = run_cbb_props_pipeline(**filtered_props_kwargs)
+                    if props_import_mode == "Cache Only":
+                        from college_basketball_dfs.cbb_odds import flatten_player_props_payload
+
+                        client = build_storage_client(
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                            project=gcp_project or None,
+                        )
+                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                        payload = store.read_props_json(props_selected_date)
+                        if payload is None:
+                            summary = {
+                                "game_date": props_selected_date.isoformat(),
+                                "props_cache_hit": False,
+                                "historical_mode": (props_fetch_mode == "Historical Snapshot"),
+                                "markets": props_markets.strip(),
+                                "bookmakers": (bookmakers_filter.strip() or None),
+                                "bucket_name": bucket_name,
+                                "props_blob": store.props_blob_name(props_selected_date),
+                                "props_lines_blob": store.props_lines_blob_name(props_selected_date),
+                                "event_count": 0,
+                                "prop_rows": 0,
+                                "cache_only": True,
+                            }
+                            st.warning("No cached props found for selected date.")
+                        else:
+                            rows = flatten_player_props_payload(payload)
+                            summary = {
+                                "game_date": props_selected_date.isoformat(),
+                                "props_cache_hit": True,
+                                "historical_mode": (props_fetch_mode == "Historical Snapshot"),
+                                "markets": props_markets.strip(),
+                                "bookmakers": (bookmakers_filter.strip() or None),
+                                "bucket_name": bucket_name,
+                                "props_blob": store.props_blob_name(props_selected_date),
+                                "props_lines_blob": store.props_lines_blob_name(props_selected_date),
+                                "event_count": len(payload.get("events", [])) if isinstance(payload.get("events"), list) else 0,
+                                "prop_rows": len(rows),
+                                "cache_only": True,
+                            }
+                            st.success("Props loaded from cache.")
+                    else:
+                        props_kwargs = {
+                            "game_date": props_selected_date,
+                            "bucket_name": bucket_name,
+                            "odds_api_key": odds_api_key,
+                            "markets": props_markets.strip(),
+                            "bookmakers": (bookmakers_filter.strip() or None),
+                            "historical_mode": (props_fetch_mode == "Historical Snapshot"),
+                            "historical_snapshot_time": None,
+                            "inter_event_sleep_seconds": float(props_event_sleep_seconds),
+                            "force_refresh": (True if props_import_mode == "Force API Refresh" else force_refresh),
+                            "gcp_project": gcp_project or None,
+                            "gcp_service_account_json": cred_json,
+                            "gcp_service_account_json_b64": cred_json_b64,
+                        }
+                        # Backward-compat: if deployed pipeline is older, drop unknown kwargs.
+                        allowed = set(inspect.signature(run_cbb_props_pipeline).parameters.keys())
+                        filtered_props_kwargs = {k: v for k, v in props_kwargs.items() if k in allowed}
+                        summary = run_cbb_props_pipeline(**filtered_props_kwargs)
+                        st.success("Props import completed.")
                     load_props_frame_for_date.clear()
                     st.session_state["cbb_props_summary"] = summary
-                    st.success("Props import completed.")
                 except Exception as exc:
                     st.exception(exc)
 
