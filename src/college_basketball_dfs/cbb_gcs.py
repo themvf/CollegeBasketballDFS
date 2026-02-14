@@ -76,6 +76,20 @@ class CbbGcsStore:
             raise ValueError(f"Unexpected cached payload type: {type(payload).__name__}")
         return payload
 
+    def list_raw_blob_names(self) -> list[str]:
+        blobs = self.bucket.list_blobs(prefix=f"{self.raw_prefix}/")
+        names = [blob.name for blob in blobs if blob.name.endswith(".json")]
+        names.sort()
+        return names
+
+    def read_raw_json_blob(self, blob_name: str) -> dict[str, Any]:
+        blob = self.bucket.blob(blob_name)
+        text = blob.download_as_text(encoding="utf-8")
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected cached payload type in {blob_name}: {type(payload).__name__}")
+        return payload
+
     def write_raw_json(self, game_date: date, payload: dict[str, Any]) -> str:
         blob_name = self.raw_blob_name(game_date)
         blob = self.bucket.blob(blob_name)

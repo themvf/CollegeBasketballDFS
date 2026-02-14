@@ -66,6 +66,8 @@ Use sidebar controls to:
 - run the cache pipeline
 - run season backfill for a date range
 - preview cached raw JSON and player CSV from GCS
+- lookup a team and view game-level results table:
+  - `Game Date`, `Venue`, `Home/Away`, `Team Score`, `Opponent`, `Opponent Score`, `W/L`
 
 For Streamlit Community Cloud, set entrypoint:
 - `streamlit run dashboard/admin_app.py`

@@ -18,6 +18,7 @@ from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_backfill import run_season_backfill, season_start_for_date
 from college_basketball_dfs.cbb_ncaa import prior_day
 from college_basketball_dfs.cbb_pipeline import run_cbb_cache_pipeline
+from college_basketball_dfs.cbb_team_lookup import rows_from_payloads
 
 
 def _secret(name: str) -> str | None:
@@ -36,6 +37,42 @@ def _resolve_credential_json() -> str | None:
 
 def _resolve_credential_json_b64() -> str | None:
     return os.getenv("GCP_SERVICE_ACCOUNT_JSON_B64") or _secret("gcp_service_account_json_b64")
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_team_lookup_frame(
+    bucket_name: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    blob_names = store.list_raw_blob_names()
+    payloads = [store.read_raw_json_blob(name) for name in blob_names]
+    rows = rows_from_payloads(payloads)
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "Team",
+                "Game Date",
+                "Venue",
+                "Home/Away",
+                "Team Score",
+                "Opponent",
+                "Opponent Score",
+                "W/L",
+            ]
+        )
+
+    frame = pd.DataFrame(rows)
+    frame["Game Date"] = pd.to_datetime(frame["Game Date"], errors="coerce")
+    frame = frame.dropna(subset=["Team", "Game Date"]).sort_values(["Game Date", "Team"], ascending=[False, True])
+    return frame
 
 
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
@@ -86,6 +123,7 @@ if run_clicked:
                     gcp_service_account_json=cred_json,
                     gcp_service_account_json_b64=cred_json_b64,
                 )
+                load_team_lookup_frame.clear()
                 st.session_state["cbb_last_summary"] = summary
                 st.success("Pipeline completed.")
             except Exception as exc:
@@ -111,6 +149,7 @@ if run_backfill_clicked:
                     sleep_seconds=float(backfill_sleep),
                     stop_on_error=stop_on_error,
                 )
+                load_team_lookup_frame.clear()
                 payload = result.as_dict()
                 st.session_state["cbb_backfill_summary"] = payload
                 st.success("Season backfill completed.")
@@ -135,6 +174,47 @@ if backfill_summary:
     b3.metric("Failed Dates", backfill_summary["failed_dates"])
     b4.metric("Cache Hits", backfill_summary["raw_cache_hits"])
     st.json(backfill_summary)
+
+st.subheader("Team Lookup")
+if not bucket_name:
+    st.info("Set a GCS bucket in sidebar to load team lookup data.")
+else:
+    try:
+        team_df = load_team_lookup_frame(
+            bucket_name=bucket_name,
+            gcp_project=gcp_project or None,
+            service_account_json=cred_json,
+            service_account_json_b64=cred_json_b64,
+        )
+        if team_df.empty:
+            st.warning("No cached raw game files found in bucket for team lookup.")
+        else:
+            min_date = team_df["Game Date"].min().date()
+            max_date = team_df["Game Date"].max().date()
+            c1, c2, c3 = st.columns([2, 1, 1])
+            teams = sorted(team_df["Team"].dropna().unique().tolist())
+            selected_team = c1.selectbox("Team", options=teams, index=0)
+            date_start = c2.date_input("From", value=min_date, min_value=min_date, max_value=max_date, key="team_from")
+            date_end = c3.date_input("To", value=max_date, min_value=min_date, max_value=max_date, key="team_to")
+
+            filtered = team_df.loc[team_df["Team"] == selected_team].copy()
+            filtered = filtered.loc[
+                (filtered["Game Date"].dt.date >= date_start) & (filtered["Game Date"].dt.date <= date_end)
+            ]
+            filtered = filtered.sort_values("Game Date", ascending=False)
+            filtered["Game Date"] = filtered["Game Date"].dt.strftime("%Y-%m-%d")
+            table_cols = [
+                "Game Date",
+                "Venue",
+                "Home/Away",
+                "Team Score",
+                "Opponent",
+                "Opponent Score",
+                "W/L",
+            ]
+            st.dataframe(filtered[table_cols], hide_index=True, use_container_width=True)
+    except Exception as exc:
+        st.exception(exc)
 
 if preview_clicked:
     if not bucket_name:
