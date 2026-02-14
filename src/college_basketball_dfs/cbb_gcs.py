@@ -49,6 +49,8 @@ class CbbGcsStore:
     client: Any
     raw_prefix: str = "cbb/raw"
     players_prefix: str = "cbb/players"
+    odds_prefix: str = "cbb/odds"
+    odds_games_prefix: str = "cbb/odds_games"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -65,6 +67,12 @@ class CbbGcsStore:
 
     def players_blob_name(self, game_date: date) -> str:
         return f"{self.players_prefix}/{game_date.isoformat()}_players.csv"
+
+    def odds_blob_name(self, game_date: date) -> str:
+        return f"{self.odds_prefix}/{game_date.isoformat()}.json"
+
+    def odds_games_blob_name(self, game_date: date) -> str:
+        return f"{self.odds_games_prefix}/{game_date.isoformat()}_odds.csv"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
@@ -89,6 +97,31 @@ class CbbGcsStore:
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected cached payload type in {blob_name}: {type(payload).__name__}")
         return payload
+
+    def read_odds_json(self, game_date: date) -> dict[str, Any] | None:
+        blob = self.bucket.blob(self.odds_blob_name(game_date))
+        if not blob.exists():
+            return None
+        text = blob.download_as_text(encoding="utf-8")
+        payload = json.loads(text)
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected odds payload type: {type(payload).__name__}")
+        return payload
+
+    def write_odds_json(self, game_date: date, payload: dict[str, Any]) -> str:
+        blob_name = self.odds_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(
+            json.dumps(payload, indent=2),
+            content_type="application/json",
+        )
+        return blob_name
+
+    def write_odds_games_csv(self, game_date: date, csv_text: str) -> str:
+        blob_name = self.odds_games_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
 
     def write_raw_json(self, game_date: date, payload: dict[str, Any]) -> str:
         blob_name = self.raw_blob_name(game_date)

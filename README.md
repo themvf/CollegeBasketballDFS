@@ -54,6 +54,18 @@ Optional throttling and fail-fast:
 python -m college_basketball_dfs.cbb_backfill --start-date 2025-11-01 --end-date 2026-03-31 --bucket your-gcs-bucket --sleep-seconds 0.2 --stop-on-error
 ```
 
+## Odds Import (Totals, Spread, Moneyline)
+
+Import game-level odds from The Odds API and cache to GCS:
+
+```bash
+python -m college_basketball_dfs.cbb_odds_pipeline --date 2026-02-12 --bucket your-gcs-bucket --odds-api-key your_key
+```
+
+The importer pulls `h2h,spreads,totals` for `basketball_ncaab` and writes:
+- raw odds JSON
+- normalized game-level odds CSV
+
 ## Streamlit Admin App
 
 Run locally:
@@ -64,10 +76,13 @@ streamlit run dashboard/admin_app.py
 
 Use sidebar controls to:
 - run the cache pipeline
+- run The Odds API import for selected date
 - run season backfill for a date range
 - preview cached raw JSON and player CSV from GCS
 - lookup a team and view game-level results table:
   - `Game Date`, `Venue`, `Home/Away`, `Team Score`, `Opponent`, `Opponent Score`, `W/L`
+- view a game-level odds table for selected date:
+  - spreads, totals, and moneylines
 
 For Streamlit Community Cloud, set entrypoint:
 - `streamlit run dashboard/admin_app.py`
@@ -79,3 +94,5 @@ Secrets template:
 
 - Raw JSON: `cbb/raw/YYYY-MM-DD.json`
 - Players CSV: `cbb/players/YYYY-MM-DD_players.csv`
+- Odds Raw JSON: `cbb/odds/YYYY-MM-DD.json`
+- Odds Games CSV: `cbb/odds_games/YYYY-MM-DD_odds.csv`

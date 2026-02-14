@@ -17,6 +17,8 @@ if str(SRC) not in sys.path:
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_backfill import run_season_backfill, season_start_for_date
 from college_basketball_dfs.cbb_ncaa import prior_day
+from college_basketball_dfs.cbb_odds import flatten_odds_payload
+from college_basketball_dfs.cbb_odds_pipeline import run_cbb_odds_pipeline
 from college_basketball_dfs.cbb_pipeline import run_cbb_cache_pipeline
 from college_basketball_dfs.cbb_team_lookup import rows_from_payloads
 
@@ -37,6 +39,10 @@ def _resolve_credential_json() -> str | None:
 
 def _resolve_credential_json_b64() -> str | None:
     return os.getenv("GCP_SERVICE_ACCOUNT_JSON_B64") or _secret("gcp_service_account_json_b64")
+
+
+def _resolve_odds_api_key() -> str | None:
+    return os.getenv("THE_ODDS_API_KEY") or _secret("the_odds_api_key")
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -75,6 +81,32 @@ def load_team_lookup_frame(
     return frame
 
 
+@st.cache_data(ttl=600, show_spinner=False)
+def load_odds_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    payload = store.read_odds_json(selected_date)
+    if payload is None:
+        return pd.DataFrame()
+
+    rows = flatten_odds_payload(payload)
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    frame["game_date"] = pd.to_datetime(frame["game_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return frame
+
+
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
 st.title("College Basketball Admin Cache")
 st.caption("Cache-first data pipeline backed by Google Cloud Storage.")
@@ -82,6 +114,7 @@ st.caption("Cache-first data pipeline backed by Google Cloud Storage.")
 default_bucket = os.getenv("CBB_GCS_BUCKET", "").strip() or (_secret("cbb_gcs_bucket") or "")
 default_base_url = os.getenv("NCAA_API_BASE_URL", "https://ncaa-api.henrygd.me").strip()
 default_project = os.getenv("GCP_PROJECT", "").strip() or (_secret("gcp_project") or "")
+default_odds_key = (_resolve_odds_api_key() or "").strip()
 
 with st.sidebar:
     st.header("Pipeline Settings")
@@ -92,10 +125,12 @@ with st.sidebar:
     bucket_name = st.text_input("GCS Bucket", value=default_bucket)
     base_url = st.text_input("NCAA API Base URL", value=default_base_url)
     gcp_project = st.text_input("GCP Project (optional)", value=default_project)
+    odds_api_key = st.text_input("The Odds API Key", value=default_odds_key, type="password")
     force_refresh = st.checkbox("Force API refresh (ignore cached raw JSON)", value=False)
     backfill_sleep = st.number_input("Backfill Sleep Seconds", min_value=0.0, max_value=5.0, value=0.0, step=0.1)
     stop_on_error = st.checkbox("Stop Backfill On Error", value=False)
     run_clicked = st.button("Run Cache Pipeline")
+    run_odds_clicked = st.button("Run Odds Import")
     run_backfill_clicked = st.button("Run Season Backfill")
     preview_clicked = st.button("Load Cached Preview")
 
@@ -126,6 +161,29 @@ if run_clicked:
                 load_team_lookup_frame.clear()
                 st.session_state["cbb_last_summary"] = summary
                 st.success("Pipeline completed.")
+            except Exception as exc:
+                st.exception(exc)
+
+if run_odds_clicked:
+    if not bucket_name:
+        st.error("Set a GCS bucket before importing odds.")
+    elif not odds_api_key:
+        st.error("Set The Odds API key in sidebar or Streamlit secrets (`the_odds_api_key`).")
+    else:
+        with st.spinner("Importing game odds from The Odds API..."):
+            try:
+                summary = run_cbb_odds_pipeline(
+                    game_date=selected_date,
+                    bucket_name=bucket_name,
+                    odds_api_key=odds_api_key,
+                    force_refresh=force_refresh,
+                    gcp_project=gcp_project or None,
+                    gcp_service_account_json=cred_json,
+                    gcp_service_account_json_b64=cred_json_b64,
+                )
+                load_odds_frame_for_date.clear()
+                st.session_state["cbb_odds_summary"] = summary
+                st.success("Odds import completed.")
             except Exception as exc:
                 st.exception(exc)
 
@@ -165,6 +223,15 @@ if summary:
     c4.metric("Player Rows", summary["player_row_count"])
     st.json(summary)
 
+odds_summary = st.session_state.get("cbb_odds_summary")
+if odds_summary:
+    st.subheader("Odds Import Summary")
+    o1, o2, o3 = st.columns(3)
+    o1.metric("Events", odds_summary["event_count"])
+    o2.metric("Game Rows", odds_summary["odds_game_rows"])
+    o3.metric("Cache Hit", "Yes" if odds_summary["odds_cache_hit"] else "No")
+    st.json(odds_summary)
+
 backfill_summary = st.session_state.get("cbb_backfill_summary")
 if backfill_summary:
     st.subheader("Season Backfill Summary")
@@ -174,6 +241,47 @@ if backfill_summary:
     b3.metric("Failed Dates", backfill_summary["failed_dates"])
     b4.metric("Cache Hits", backfill_summary["raw_cache_hits"])
     st.json(backfill_summary)
+
+st.subheader("Game Odds")
+if not bucket_name:
+    st.info("Set a GCS bucket in sidebar to load game odds.")
+else:
+    try:
+        odds_df = load_odds_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=selected_date,
+            gcp_project=gcp_project or None,
+            service_account_json=cred_json,
+            service_account_json_b64=cred_json_b64,
+        )
+        if odds_df.empty:
+            st.warning("No cached odds found for selected date. Run `Run Odds Import` first.")
+        else:
+            display = odds_df.rename(
+                columns={
+                    "game_date": "Game Date",
+                    "home_team": "Home Team",
+                    "away_team": "Away Team",
+                    "spread_home": "Spread (Home)",
+                    "spread_away": "Spread (Away)",
+                    "total_points": "Total",
+                    "moneyline_home": "Moneyline (Home)",
+                    "moneyline_away": "Moneyline (Away)",
+                }
+            )
+            table_cols = [
+                "Game Date",
+                "Home Team",
+                "Away Team",
+                "Spread (Home)",
+                "Spread (Away)",
+                "Total",
+                "Moneyline (Home)",
+                "Moneyline (Away)",
+            ]
+            st.dataframe(display[table_cols], hide_index=True, use_container_width=True)
+    except Exception as exc:
+        st.exception(exc)
 
 st.subheader("Team Lookup")
 if not bucket_name:
