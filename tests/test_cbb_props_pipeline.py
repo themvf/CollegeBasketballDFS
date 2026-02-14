@@ -120,3 +120,36 @@ def test_props_pipeline_fetches_when_cache_missing(monkeypatch) -> None:
     assert summary["prop_rows"] == 1
     assert len(store.props_writes) == 1
     assert len(store.props_csv_writes) == 1
+
+
+def test_props_pipeline_historical_uses_pregame_snapshot(monkeypatch) -> None:
+    store = FakeStore(
+        cached_props=None,
+        cached_odds={"events": [{"id": "evt-1", "commence_time": "2026-02-12T23:00:00Z"}]},
+    )
+    seen = {}
+
+    class StubOddsClient:
+        def __init__(self, api_key: str, base_url: str) -> None:
+            self.api_key = api_key
+            self.base_url = base_url
+
+        def close(self) -> None:
+            return
+
+        def fetch_game_odds(self, **kwargs):
+            return [{"id": "evt-1", "commence_time": "2026-02-12T23:00:00Z"}]
+
+        def fetch_event_odds(self, **kwargs):
+            seen["snapshot"] = kwargs.get("historical_snapshot_time")
+            return _sample_props_payload()["events"][0]
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_props_pipeline.OddsApiClient", StubOddsClient)
+    run_cbb_props_pipeline(
+        game_date=date(2026, 2, 12),
+        odds_api_key="key",
+        historical_mode=True,
+        historical_snapshot_time=None,
+        store=store,
+    )
+    assert seen["snapshot"] == "2026-02-12T19:00:00Z"

@@ -3,7 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from datetime import date
+from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +28,28 @@ def _extract_event_summaries(events: list[dict[str, Any]]) -> list[dict[str, Any
             }
         )
     return summaries
+
+
+def _resolve_event_snapshot_time(
+    event_summary: dict[str, Any],
+    game_date: date,
+    explicit_snapshot_time: str | None,
+) -> str:
+    if explicit_snapshot_time:
+        return explicit_snapshot_time
+
+    commence_raw = str(event_summary.get("commence_time") or "").strip()
+    if commence_raw:
+        try:
+            parsed = datetime.fromisoformat(commence_raw.replace("Z", "+00:00"))
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            snapshot = parsed.astimezone(timezone.utc) - timedelta(hours=4)
+            return snapshot.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+        except ValueError:
+            pass
+
+    return f"{game_date.isoformat()}T16:00:00Z"
 
 
 def run_cbb_props_pipeline(
@@ -90,13 +112,18 @@ def run_cbb_props_pipeline(
             event_payloads: list[dict[str, Any]] = []
             for event_summary in event_summaries:
                 event_id = str(event_summary["id"])
+                event_snapshot_time = (
+                    _resolve_event_snapshot_time(event_summary, game_date, historical_snapshot_time)
+                    if historical_mode
+                    else None
+                )
                 props_event = client.fetch_event_odds(
                     event_id=event_id,
                     sport_key=sport_key,
                     regions=regions,
                     markets=markets,
                     historical=historical_mode,
-                    historical_snapshot_time=historical_snapshot_time,
+                    historical_snapshot_time=event_snapshot_time,
                 )
                 props_event.setdefault("id", event_summary.get("id"))
                 props_event.setdefault("commence_time", event_summary.get("commence_time"))
