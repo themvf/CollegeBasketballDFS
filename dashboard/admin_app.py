@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import inspect
 import os
+import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     build_dk_upload_csv,
     build_player_pool,
     generate_lineups,
+    lineups_slots_frame,
     lineups_summary_frame,
     normalize_injuries_frame,
     remove_injured_players,
@@ -102,6 +104,38 @@ def _write_injuries_csv(store: CbbGcsStore, csv_text: str) -> str:
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
+
+
+def _projections_blob_name(slate_date: date) -> str:
+    return f"cbb/projections/{slate_date.isoformat()}_projections.csv"
+
+
+def _write_projections_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> str:
+    writer = getattr(store, "write_projections_csv", None)
+    if callable(writer):
+        return writer(slate_date, csv_text)
+    blob_name = _projections_blob_name(slate_date)
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
+def _list_players_blob_names(store: CbbGcsStore) -> list[str]:
+    list_fn = getattr(store, "list_players_blob_names", None)
+    if callable(list_fn):
+        return list_fn()
+    blobs = store.bucket.list_blobs(prefix="cbb/players/")
+    names = [blob.name for blob in blobs if blob.name.endswith("_players.csv")]
+    names.sort()
+    return names
+
+
+def _read_players_csv_blob(store: CbbGcsStore, blob_name: str) -> str:
+    read_fn = getattr(store, "read_players_csv_blob", None)
+    if callable(read_fn):
+        return read_fn(blob_name)
+    blob = store.bucket.blob(blob_name)
+    return blob.download_as_text(encoding="utf-8")
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -233,6 +267,62 @@ def load_injuries_frame(
     return normalize_injuries_frame(frame)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_season_player_history_frame(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    season_start = season_start_for_date(selected_date)
+    selected_iso = selected_date.isoformat()
+    blob_names = _list_players_blob_names(store)
+
+    frames: list[pd.DataFrame] = []
+    for blob_name in blob_names:
+        match = re.search(r"(\d{4}-\d{2}-\d{2})_players\.csv$", blob_name)
+        if not match:
+            continue
+        blob_date = match.group(1)
+        if blob_date < season_start.isoformat() or blob_date > selected_iso:
+            continue
+        csv_text = _read_players_csv_blob(store, blob_name)
+        if not csv_text.strip():
+            continue
+        df = pd.read_csv(io.StringIO(csv_text))
+        needed = [
+            "game_date",
+            "player_name",
+            "team_name",
+            "minutes_played",
+            "points",
+            "rebounds",
+            "assists",
+            "steals",
+            "blocks",
+            "turnovers",
+            "tpm",
+            "fga",
+            "fta",
+            "dk_fpts",
+        ]
+        cols = [c for c in needed if c in df.columns]
+        if not cols:
+            continue
+        frames.append(df[cols].copy())
+
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
 def build_optimizer_pool_for_date(
     bucket_name: str,
     slate_date: date,
@@ -240,7 +330,7 @@ def build_optimizer_pool_for_date(
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     slate_df = load_dk_slate_frame_for_date(
         bucket_name=bucket_name,
         selected_date=slate_date,
@@ -255,9 +345,16 @@ def build_optimizer_pool_for_date(
         service_account_json_b64=service_account_json_b64,
     )
     if slate_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df
+        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame()
 
     filtered_slate, removed_injured = remove_injured_players(slate_df, injuries_df)
+    season_history_df = load_season_player_history_frame(
+        bucket_name=bucket_name,
+        selected_date=slate_date,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
     props_df = load_props_frame_for_date(
         bucket_name=bucket_name,
         selected_date=slate_date,
@@ -268,9 +365,10 @@ def build_optimizer_pool_for_date(
     pool_df = build_player_pool(
         slate_df=filtered_slate,
         props_df=props_df,
+        season_stats_df=season_history_df,
         bookmaker_filter=(bookmaker or None),
     )
-    return pool_df, removed_injured, slate_df, injuries_df
+    return pool_df, removed_injured, slate_df, injuries_df, season_history_df
 
 
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
@@ -798,12 +896,13 @@ with tab_slate_vegas:
         load_dk_slate_frame_for_date.clear()
         load_props_frame_for_date.clear()
         load_injuries_frame.clear()
+        load_season_player_history_frame.clear()
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to build the slate player pool.")
     else:
         try:
-            pool_df, removed_injured_df, raw_slate_df, _ = build_optimizer_pool_for_date(
+            pool_df, removed_injured_df, raw_slate_df, _, season_history_df = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
                 slate_date=optimizer_slate_date,
                 bookmaker=(vegas_bookmaker.strip() or None),
@@ -818,6 +917,12 @@ with tab_slate_vegas:
                 m1.metric("Raw Slate Players", int(len(raw_slate_df)))
                 m2.metric("Removed (Out/Doubtful)", int(len(removed_injured_df)))
                 m3.metric("Active Pool Players", int(len(pool_df)))
+                mins_pct = pd.to_numeric(pool_df.get("our_minutes_avg", pd.Series(dtype=float)), errors="coerce")
+                avg_mins = float(mins_pct.mean()) if len(mins_pct) and mins_pct.notna().any() else 0.0
+                st.caption(
+                    f"Season stats rows used: `{len(season_history_df):,}` | "
+                    f"Average projected minutes: `{avg_mins:.1f}`"
+                )
 
                 if not removed_injured_df.empty:
                     st.subheader("Removed Injured Players")
@@ -834,18 +939,43 @@ with tab_slate_vegas:
                         "TeamAbbrev",
                         "Position",
                         "Salary",
+                        "our_minutes_avg",
+                        "our_usage_proxy",
+                        "our_points_proj",
+                        "our_rebounds_proj",
+                        "our_assists_proj",
+                        "our_threes_proj",
+                        "our_dk_projection",
                         "projected_dk_points",
                         "projected_ownership",
                         "leverage_score",
+                        "blend_points_proj",
+                        "blend_rebounds_proj",
+                        "blend_assists_proj",
+                        "blend_threes_proj",
                         "vegas_points_line",
                         "vegas_rebounds_line",
                         "vegas_assists_line",
                         "vegas_threes_line",
-                        "AvgPointsPerGame",
+                        "vegas_dk_projection",
                     ]
                     existing_cols = [c for c in show_cols if c in pool_df.columns]
                     display_pool = pool_df[existing_cols].sort_values("projected_dk_points", ascending=False)
                     st.dataframe(display_pool, hide_index=True, use_container_width=True)
+                    save_proj_clicked = st.button("Save Projections Snapshot to GCS", key="save_proj_snapshot")
+                    if save_proj_clicked:
+                        client = build_storage_client(
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                            project=gcp_project or None,
+                        )
+                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                        blob_name = _write_projections_csv(
+                            store,
+                            optimizer_slate_date,
+                            display_pool.to_csv(index=False),
+                        )
+                        st.success(f"Saved projections to `{blob_name}` (same date overwrites).")
                     st.download_button(
                         "Download Active Pool CSV",
                         data=display_pool.to_csv(index=False),
@@ -872,7 +1002,7 @@ with tab_lineups:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
     else:
         try:
-            pool_df, removed_injured_df, raw_slate_df, _ = build_optimizer_pool_for_date(
+            pool_df, removed_injured_df, raw_slate_df, _, _ = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
                 slate_date=optimizer_slate_date,
                 bookmaker=(lineup_bookmaker.strip() or None),
@@ -950,6 +1080,7 @@ with tab_lineups:
                     progress_bar.progress(final_pct, text=f"Finished: {len(lineups)} lineups generated.")
                     st.session_state["cbb_generated_lineups"] = lineups
                     st.session_state["cbb_generated_lineups_warnings"] = warnings
+                    st.session_state["cbb_generated_upload_csv"] = build_dk_upload_csv(lineups) if lineups else ""
 
                 generated = st.session_state.get("cbb_generated_lineups", [])
                 warnings = st.session_state.get("cbb_generated_lineups_warnings", [])
@@ -965,7 +1096,12 @@ with tab_lineups:
                     summary_df = lineups_summary_frame(generated)
                     st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
-                    upload_csv = build_dk_upload_csv(generated)
+                    slots_df = lineups_slots_frame(generated)
+                    if not slots_df.empty:
+                        st.subheader("Generated Lineups (Slot View)")
+                        st.dataframe(slots_df, hide_index=True, use_container_width=True)
+
+                    upload_csv = st.session_state.get("cbb_generated_upload_csv", "")
                     st.download_button(
                         "Download DK Upload CSV",
                         data=upload_csv,
@@ -973,6 +1109,8 @@ with tab_lineups:
                         mime="text/csv",
                         key="download_dk_upload_csv",
                     )
+                elif generate_lineups_clicked:
+                    st.error("No lineups were generated. Adjust locks/exclusions/exposure settings and retry.")
         except Exception as exc:
             st.exception(exc)
 

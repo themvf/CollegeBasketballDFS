@@ -53,6 +53,45 @@ def _sample_props() -> pd.DataFrame:
     )
 
 
+def _sample_season_stats() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "game_date": "2026-02-01",
+                "player_name": "Guard 1",
+                "team_name": "CCC",
+                "minutes_played": 34,
+                "points": 20,
+                "rebounds": 4,
+                "assists": 6,
+                "steals": 2,
+                "blocks": 0,
+                "turnovers": 3,
+                "tpm": 2,
+                "fga": 14,
+                "fta": 5,
+                "dk_fpts": 36.5,
+            },
+            {
+                "game_date": "2026-02-03",
+                "player_name": "Forward 1",
+                "team_name": "DDD",
+                "minutes_played": 32,
+                "points": 16,
+                "rebounds": 9,
+                "assists": 2,
+                "steals": 1,
+                "blocks": 1,
+                "turnovers": 2,
+                "tpm": 1,
+                "fga": 12,
+                "fta": 4,
+                "dk_fpts": 31.25,
+            },
+        ]
+    )
+
+
 def test_remove_injured_players_filters_out_and_doubtful() -> None:
     slate = _sample_slate()
     injuries = pd.DataFrame(
@@ -105,3 +144,19 @@ def test_generate_lineups_respects_locks_and_excludes() -> None:
 
     upload_csv = build_dk_upload_csv(lineups)
     assert upload_csv.startswith("G,G,G,F,F,F,UTIL,UTIL")
+
+
+def test_build_player_pool_blends_our_and_vegas_stats() -> None:
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        bookmaker_filter="fanduel",
+    )
+    g1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
+    # Our points=20, Vegas points=18.5 => blend=19.25
+    assert round(float(g1["blend_points_proj"]), 2) == 19.25
+    # Rebounds missing in vegas for Guard 1, so blended should keep our rebounds=4
+    assert round(float(g1["blend_rebounds_proj"]), 2) == 4.0
+    assert float(g1["our_minutes_avg"]) > 0
+    assert float(g1["our_usage_proxy"]) > 0

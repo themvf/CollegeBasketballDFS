@@ -55,6 +55,7 @@ class CbbGcsStore:
     props_lines_prefix: str = "cbb/props_lines"
     dk_slates_prefix: str = "cbb/dk_slates"
     injuries_prefix: str = "cbb/injuries"
+    projections_prefix: str = "cbb/projections"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -90,6 +91,9 @@ class CbbGcsStore:
     def injuries_blob_name(self) -> str:
         return f"{self.injuries_prefix}/injuries_master.csv"
 
+    def projections_blob_name(self, game_date: date) -> str:
+        return f"{self.projections_prefix}/{game_date.isoformat()}_projections.csv"
+
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
         if not blob.exists():
@@ -106,6 +110,12 @@ class CbbGcsStore:
         names.sort()
         return names
 
+    def list_players_blob_names(self) -> list[str]:
+        blobs = self.bucket.list_blobs(prefix=f"{self.players_prefix}/")
+        names = [blob.name for blob in blobs if blob.name.endswith("_players.csv")]
+        names.sort()
+        return names
+
     def read_raw_json_blob(self, blob_name: str) -> dict[str, Any]:
         blob = self.bucket.blob(blob_name)
         text = blob.download_as_text(encoding="utf-8")
@@ -113,6 +123,10 @@ class CbbGcsStore:
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected cached payload type in {blob_name}: {type(payload).__name__}")
         return payload
+
+    def read_players_csv_blob(self, blob_name: str) -> str:
+        blob = self.bucket.blob(blob_name)
+        return blob.download_as_text(encoding="utf-8")
 
     def read_odds_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.odds_blob_name(game_date))
@@ -184,6 +198,18 @@ class CbbGcsStore:
 
     def write_injuries_csv(self, csv_text: str) -> str:
         blob_name = self.injuries_blob_name()
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_projections_csv(self, game_date: date) -> str | None:
+        blob = self.bucket.blob(self.projections_blob_name(game_date))
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_projections_csv(self, game_date: date, csv_text: str) -> str:
+        blob_name = self.projections_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name

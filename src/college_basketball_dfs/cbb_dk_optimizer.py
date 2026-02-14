@@ -139,9 +139,23 @@ def _market_alias(market_key: str) -> str:
     return f"vegas_{mk}_line"
 
 
+def _blend_stat(our_series: pd.Series, vegas_series: pd.Series) -> pd.Series:
+    our = pd.to_numeric(our_series, errors="coerce")
+    vegas = pd.to_numeric(vegas_series, errors="coerce")
+    both = our.notna() & vegas.notna()
+    only_our = our.notna() & ~vegas.notna()
+    only_vegas = ~our.notna() & vegas.notna()
+    out = pd.Series([0.0] * len(our), index=our.index, dtype="float64")
+    out.loc[both] = (our.loc[both] + vegas.loc[both]) / 2.0
+    out.loc[only_our] = our.loc[only_our]
+    out.loc[only_vegas] = vegas.loc[only_vegas]
+    return out
+
+
 def build_player_pool(
     slate_df: pd.DataFrame,
     props_df: pd.DataFrame | None,
+    season_stats_df: pd.DataFrame | None = None,
     bookmaker_filter: str | None = None,
 ) -> pd.DataFrame:
     if slate_df.empty:
@@ -157,6 +171,118 @@ def build_player_pool(
     out["AvgPointsPerGame"] = pd.to_numeric(out.get("AvgPointsPerGame"), errors="coerce")
     out["game_key"] = out.get("Game Info", "").map(_game_key)
     out["_name_norm"] = out["Name"].map(_normalize_text)
+    out["_team_norm"] = out["TeamAbbrev"].map(_normalize_text)
+
+    # Our V1 projection source: season averages from cached NCAA player stats.
+    if season_stats_df is not None and not season_stats_df.empty:
+        s = season_stats_df.copy()
+        s = s.rename(columns={"team_name": "team_name_hist"})
+        s["player_name"] = s.get("player_name", "").astype(str).str.strip()
+        s["team_name_hist"] = s.get("team_name_hist", "").astype(str).str.strip()
+        s["_name_norm"] = s["player_name"].map(_normalize_text)
+        s["_team_norm"] = s["team_name_hist"].map(_normalize_text)
+
+        numeric_cols = [
+            "points",
+            "rebounds",
+            "assists",
+            "tpm",
+            "steals",
+            "blocks",
+            "turnovers",
+            "minutes_played",
+            "fga",
+            "fta",
+            "dk_fpts",
+        ]
+        for col in numeric_cols:
+            if col in s.columns:
+                s[col] = pd.to_numeric(s[col], errors="coerce")
+            else:
+                s[col] = pd.NA
+
+        # Primary key: player+team (if team labels align). Fallback: player-only.
+        agg_team = (
+            s.groupby(["_name_norm", "_team_norm"], as_index=False)[numeric_cols]
+            .mean(numeric_only=True)
+            .rename(
+                columns={
+                    "points": "our_points_avg_team",
+                    "rebounds": "our_rebounds_avg_team",
+                    "assists": "our_assists_avg_team",
+                    "tpm": "our_threes_avg_team",
+                    "steals": "our_steals_avg_team",
+                    "blocks": "our_blocks_avg_team",
+                    "turnovers": "our_turnovers_avg_team",
+                    "minutes_played": "our_minutes_avg_team",
+                    "fga": "our_fga_avg_team",
+                    "fta": "our_fta_avg_team",
+                    "dk_fpts": "our_dk_fpts_avg_team",
+                }
+            )
+        )
+        agg_name = (
+            s.groupby(["_name_norm"], as_index=False)[numeric_cols]
+            .mean(numeric_only=True)
+            .rename(
+                columns={
+                    "points": "our_points_avg_name",
+                    "rebounds": "our_rebounds_avg_name",
+                    "assists": "our_assists_avg_name",
+                    "tpm": "our_threes_avg_name",
+                    "steals": "our_steals_avg_name",
+                    "blocks": "our_blocks_avg_name",
+                    "turnovers": "our_turnovers_avg_name",
+                    "minutes_played": "our_minutes_avg_name",
+                    "fga": "our_fga_avg_name",
+                    "fta": "our_fta_avg_name",
+                    "dk_fpts": "our_dk_fpts_avg_name",
+                }
+            )
+        )
+
+        out = out.merge(agg_team, on=["_name_norm", "_team_norm"], how="left")
+        out = out.merge(agg_name, on=["_name_norm"], how="left")
+
+        for base in [
+            "our_points_avg",
+            "our_rebounds_avg",
+            "our_assists_avg",
+            "our_threes_avg",
+            "our_steals_avg",
+            "our_blocks_avg",
+            "our_turnovers_avg",
+            "our_minutes_avg",
+            "our_fga_avg",
+            "our_fta_avg",
+            "our_dk_fpts_avg",
+        ]:
+            team_col = f"{base}_team"
+            name_col = f"{base}_name"
+            out[base] = pd.to_numeric(out.get(team_col), errors="coerce")
+            out[base] = out[base].where(out[base].notna(), pd.to_numeric(out.get(name_col), errors="coerce"))
+
+        # Usage proxy: possession involvement estimate per minute.
+        out["our_usage_proxy"] = (
+            (out["our_fga_avg"].fillna(0) + (0.44 * out["our_fta_avg"].fillna(0)) + out["our_turnovers_avg"].fillna(0))
+            / out["our_minutes_avg"].replace(0, pd.NA)
+        )
+    else:
+        for col in [
+            "our_points_avg",
+            "our_rebounds_avg",
+            "our_assists_avg",
+            "our_threes_avg",
+            "our_steals_avg",
+            "our_blocks_avg",
+            "our_turnovers_avg",
+            "our_minutes_avg",
+            "our_fga_avg",
+            "our_fta_avg",
+            "our_dk_fpts_avg",
+            "our_usage_proxy",
+        ]:
+            out[col] = pd.NA
 
     if props_df is not None and not props_df.empty:
         p = props_df.copy()
@@ -184,30 +310,62 @@ def build_player_pool(
             out[col] = pd.NA
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    vegas_core = (
+    # Our projection stat line (season averages), with DK Avg fallback for points only.
+    out["our_points_proj"] = pd.to_numeric(out["our_points_avg"], errors="coerce")
+    out["our_points_proj"] = out["our_points_proj"].where(out["our_points_proj"].notna(), out["AvgPointsPerGame"])
+    out["our_rebounds_proj"] = pd.to_numeric(out["our_rebounds_avg"], errors="coerce")
+    out["our_assists_proj"] = pd.to_numeric(out["our_assists_avg"], errors="coerce")
+    out["our_threes_proj"] = pd.to_numeric(out["our_threes_avg"], errors="coerce")
+    out["our_steals_proj"] = pd.to_numeric(out["our_steals_avg"], errors="coerce")
+    out["our_blocks_proj"] = pd.to_numeric(out["our_blocks_avg"], errors="coerce")
+    out["our_turnovers_proj"] = pd.to_numeric(out["our_turnovers_avg"], errors="coerce")
+
+    # Blended guard-rail stat line. If Vegas is missing a stat, keep our projection.
+    out["blend_points_proj"] = _blend_stat(out["our_points_proj"], out["vegas_points_line"])
+    out["blend_rebounds_proj"] = _blend_stat(out["our_rebounds_proj"], out["vegas_rebounds_line"])
+    out["blend_assists_proj"] = _blend_stat(out["our_assists_proj"], out["vegas_assists_line"])
+    out["blend_threes_proj"] = _blend_stat(out["our_threes_proj"], out["vegas_threes_line"])
+
+    # Reference projections: pure "our" and pure "vegas-ish"
+    out["our_dk_projection"] = (
+        out["our_points_proj"].fillna(0)
+        + (1.25 * out["our_rebounds_proj"].fillna(0))
+        + (1.5 * out["our_assists_proj"].fillna(0))
+        + (2.0 * out["our_steals_proj"].fillna(0))
+        + (2.0 * out["our_blocks_proj"].fillna(0))
+        - (0.5 * out["our_turnovers_proj"].fillna(0))
+        + (0.5 * out["our_threes_proj"].fillna(0))
+    )
+    out["vegas_dk_projection"] = (
         out["vegas_points_line"].fillna(0)
         + (1.25 * out["vegas_rebounds_line"].fillna(0))
         + (1.5 * out["vegas_assists_line"].fillna(0))
         + (0.5 * out["vegas_threes_line"].fillna(0))
+        + (2.0 * out["our_steals_proj"].fillna(0))
+        + (2.0 * out["our_blocks_proj"].fillna(0))
+        - (0.5 * out["our_turnovers_proj"].fillna(0))
     )
+
+    # Final V1 projected fantasy points: DK scoring from blended stat line + our defensive/TO estimates.
     dd_count = (
-        (out["vegas_points_line"].fillna(-1) >= 9.5).astype(int)
-        + (out["vegas_rebounds_line"].fillna(-1) >= 9.5).astype(int)
-        + (out["vegas_assists_line"].fillna(-1) >= 9.5).astype(int)
+        (out["blend_points_proj"] >= 9.5).astype(int)
+        + (out["blend_rebounds_proj"] >= 9.5).astype(int)
+        + (out["blend_assists_proj"] >= 9.5).astype(int)
+        + (out["our_blocks_proj"].fillna(-1) >= 9.5).astype(int)
+        + (out["our_steals_proj"].fillna(-1) >= 9.5).astype(int)
     )
     bonus = (dd_count >= 2).astype(int) * 1.5 + (dd_count >= 3).astype(int) * 3.0
-    has_vegas = out[["vegas_points_line", "vegas_rebounds_line", "vegas_assists_line", "vegas_threes_line"]].notna().any(axis=1)
-    out["vegas_dk_projection"] = (vegas_core + bonus).where(has_vegas, pd.NA)
+    out["projected_dk_points"] = (
+        out["blend_points_proj"].fillna(0)
+        + (1.25 * out["blend_rebounds_proj"].fillna(0))
+        + (1.5 * out["blend_assists_proj"].fillna(0))
+        + (0.5 * out["blend_threes_proj"].fillna(0))
+        + (2.0 * out["our_steals_proj"].fillna(0))
+        + (2.0 * out["our_blocks_proj"].fillna(0))
+        - (0.5 * out["our_turnovers_proj"].fillna(0))
+        + bonus
+    ).astype(float)
 
-    out["model_projection"] = pd.to_numeric(out["AvgPointsPerGame"], errors="coerce")
-    out["projected_dk_points"] = out["model_projection"].astype(float)
-    both_mask = out["vegas_dk_projection"].notna() & out["model_projection"].notna()
-    vegas_only_mask = out["vegas_dk_projection"].notna() & ~out["model_projection"].notna()
-    out.loc[both_mask, "projected_dk_points"] = (
-        (0.65 * out.loc[both_mask, "vegas_dk_projection"]) + (0.35 * out.loc[both_mask, "model_projection"])
-    )
-    out.loc[vegas_only_mask, "projected_dk_points"] = out.loc[vegas_only_mask, "vegas_dk_projection"]
-    out["projected_dk_points"] = out["projected_dk_points"].fillna(0.0)
     out["value_per_1k"] = out["projected_dk_points"] / (out["Salary"].replace(0, pd.NA) / 1000.0)
 
     proj_pct = out["projected_dk_points"].rank(method="average", pct=True).fillna(0.0)
@@ -216,7 +374,34 @@ def build_player_pool(
     out["projected_ownership"] = (2.0 + 38.0 * ((0.5 * proj_pct) + (0.3 * sal_pct) + (0.2 * val_pct))).round(2)
     out["leverage_score"] = (out["projected_dk_points"] - (0.15 * out["projected_ownership"])).round(3)
 
-    return out.drop(columns=["_name_norm"])
+    drop_cols = [
+        "_name_norm",
+        "_team_norm",
+        "our_points_avg_team",
+        "our_rebounds_avg_team",
+        "our_assists_avg_team",
+        "our_threes_avg_team",
+        "our_steals_avg_team",
+        "our_blocks_avg_team",
+        "our_turnovers_avg_team",
+        "our_minutes_avg_team",
+        "our_fga_avg_team",
+        "our_fta_avg_team",
+        "our_dk_fpts_avg_team",
+        "our_points_avg_name",
+        "our_rebounds_avg_name",
+        "our_assists_avg_name",
+        "our_threes_avg_name",
+        "our_steals_avg_name",
+        "our_blocks_avg_name",
+        "our_turnovers_avg_name",
+        "our_minutes_avg_name",
+        "our_fga_avg_name",
+        "our_fta_avg_name",
+        "our_dk_fpts_avg_name",
+    ]
+    existing_drop = [c for c in drop_cols if c in out.columns]
+    return out.drop(columns=existing_drop)
 
 
 def apply_contest_objective(pool_df: pd.DataFrame, contest_type: str) -> pd.DataFrame:
@@ -461,6 +646,30 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
                 "Players": " | ".join(str(p.get("Name + ID") or p.get("Name")) for p in players),
             }
         )
+    return pd.DataFrame(rows)
+
+
+def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
+    rows: list[dict[str, Any]] = []
+    for lineup in lineups:
+        slots = _assign_dk_slots(lineup["players"])
+        if slots is None:
+            continue
+        row = {
+            "Lineup": lineup["lineup_number"],
+            "Salary": lineup["salary"],
+            "Projected Points": lineup["projected_points"],
+            "Projected Ownership Sum": lineup["projected_ownership_sum"],
+            "G1": slots[0].get("Name + ID") or slots[0].get("Name"),
+            "G2": slots[1].get("Name + ID") or slots[1].get("Name"),
+            "G3": slots[2].get("Name + ID") or slots[2].get("Name"),
+            "F1": slots[3].get("Name + ID") or slots[3].get("Name"),
+            "F2": slots[4].get("Name + ID") or slots[4].get("Name"),
+            "F3": slots[5].get("Name + ID") or slots[5].get("Name"),
+            "UTIL1": slots[6].get("Name + ID") or slots[6].get("Name"),
+            "UTIL2": slots[7].get("Name + ID") or slots[7].get("Name"),
+        }
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
