@@ -120,6 +120,40 @@ def _write_projections_csv(store: CbbGcsStore, slate_date: date, csv_text: str) 
     return blob_name
 
 
+def _read_projections_csv(store: CbbGcsStore, slate_date: date) -> str | None:
+    reader = getattr(store, "read_projections_csv", None)
+    if callable(reader):
+        return reader(slate_date)
+    blob = store.bucket.blob(_projections_blob_name(slate_date))
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _ownership_blob_name(slate_date: date) -> str:
+    return f"cbb/ownership/{slate_date.isoformat()}_ownership.csv"
+
+
+def _read_ownership_csv(store: CbbGcsStore, slate_date: date) -> str | None:
+    reader = getattr(store, "read_ownership_csv", None)
+    if callable(reader):
+        return reader(slate_date)
+    blob = store.bucket.blob(_ownership_blob_name(slate_date))
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _write_ownership_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> str:
+    writer = getattr(store, "write_ownership_csv", None)
+    if callable(writer):
+        return writer(slate_date, csv_text)
+    blob_name = _ownership_blob_name(slate_date)
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
 def _list_players_blob_names(store: CbbGcsStore) -> list[str]:
     list_fn = getattr(store, "list_players_blob_names", None)
     if callable(list_fn):
@@ -323,6 +357,181 @@ def load_season_player_history_frame(
     return pd.concat(frames, ignore_index=True)
 
 
+def _ownership_to_float(value: object) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace("%", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def normalize_ownership_frame(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership"])
+    out = df.copy()
+    rename_map = {
+        "id": "ID",
+        "player_id": "ID",
+        "name": "Name",
+        "player_name": "Name",
+        "team": "TeamAbbrev",
+        "team_abbrev": "TeamAbbrev",
+        "teamabbrev": "TeamAbbrev",
+        "ownership": "actual_ownership",
+        "own%": "actual_ownership",
+        "own_pct": "actual_ownership",
+        "actual_own": "actual_ownership",
+    }
+    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
+    for col in ["ID", "Name", "TeamAbbrev", "actual_ownership"]:
+        if col not in out.columns:
+            out[col] = ""
+    out["ID"] = out["ID"].astype(str).str.strip()
+    out["Name"] = out["Name"].astype(str).str.strip()
+    out["TeamAbbrev"] = out["TeamAbbrev"].astype(str).str.strip().str.upper()
+    out["actual_ownership"] = out["actual_ownership"].map(_ownership_to_float)
+    out = out.loc[(out["ID"] != "") | (out["Name"] != "")]
+    return out[["ID", "Name", "TeamAbbrev", "actual_ownership"]].reset_index(drop=True)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_projection_snapshot_frame(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = _read_projections_csv(store, selected_date)
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+    return pd.read_csv(io.StringIO(csv_text))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_ownership_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = _read_ownership_csv(store, selected_date)
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership"])
+    df = pd.read_csv(io.StringIO(csv_text))
+    return normalize_ownership_frame(df)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_actual_results_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    blob_name = f"cbb/players/{selected_date.isoformat()}_players.csv"
+    try:
+        csv_text = _read_players_csv_blob(store, blob_name)
+    except Exception:
+        return pd.DataFrame()
+    if not csv_text.strip():
+        return pd.DataFrame()
+    df = pd.read_csv(io.StringIO(csv_text))
+    needed = [
+        "player_id",
+        "player_name",
+        "team_name",
+        "minutes_played",
+        "points",
+        "rebounds",
+        "assists",
+        "steals",
+        "blocks",
+        "turnovers",
+        "tpm",
+    ]
+    cols = [c for c in needed if c in df.columns]
+    if not cols:
+        return pd.DataFrame()
+    out = df[cols].copy()
+    out = out.rename(
+        columns={
+            "player_id": "ID",
+            "player_name": "Name",
+            "team_name": "team_name",
+            "minutes_played": "actual_minutes",
+            "points": "actual_points",
+            "rebounds": "actual_rebounds",
+            "assists": "actual_assists",
+            "steals": "actual_steals",
+            "blocks": "actual_blocks",
+            "turnovers": "actual_turnovers",
+            "tpm": "actual_threes",
+        }
+    )
+    for c in [
+        "actual_minutes",
+        "actual_points",
+        "actual_rebounds",
+        "actual_assists",
+        "actual_steals",
+        "actual_blocks",
+        "actual_turnovers",
+        "actual_threes",
+    ]:
+        if c in out.columns:
+            out[c] = pd.to_numeric(out[c], errors="coerce")
+        else:
+            out[c] = 0.0
+
+    dd_count = (
+        (out["actual_points"].fillna(-1) >= 10).astype(int)
+        + (out["actual_rebounds"].fillna(-1) >= 10).astype(int)
+        + (out["actual_assists"].fillna(-1) >= 10).astype(int)
+        + (out["actual_steals"].fillna(-1) >= 10).astype(int)
+        + (out["actual_blocks"].fillna(-1) >= 10).astype(int)
+    )
+    bonus = (dd_count >= 2).astype(int) * 1.5 + (dd_count >= 3).astype(int) * 3.0
+    out["actual_dk_points"] = (
+        out["actual_points"].fillna(0)
+        + (1.25 * out["actual_rebounds"].fillna(0))
+        + (1.5 * out["actual_assists"].fillna(0))
+        + (2.0 * out["actual_steals"].fillna(0))
+        + (2.0 * out["actual_blocks"].fillna(0))
+        - (0.5 * out["actual_turnovers"].fillna(0))
+        + (0.5 * out["actual_threes"].fillna(0))
+        + bonus
+    )
+    out["ID"] = out["ID"].astype(str).str.strip()
+    out["Name"] = out["Name"].astype(str).str.strip()
+    out["team_name"] = out["team_name"].astype(str).str.strip()
+    return out
+
+
 def build_optimizer_pool_for_date(
     bucket_name: str,
     slate_date: date,
@@ -453,8 +662,8 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups = st.tabs(
-    ["Game Data", "Prop Data", "Backfill", "DK Slate", "Injuries", "Slate + Vegas", "Lineup Generator"]
+tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review = st.tabs(
+    ["Game Data", "Prop Data", "Backfill", "DK Slate", "Injuries", "Slate + Vegas", "Lineup Generator", "Projection Review"]
 )
 
 with tab_game:
@@ -1145,6 +1354,175 @@ with tab_lineups:
                     )
                 elif generate_lineups_clicked:
                     st.error("No lineups were generated. Adjust locks/exclusions/exposure settings and retry.")
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_projection_review:
+    st.subheader("Projection Review")
+    review_date = st.date_input("Review Date", value=optimizer_slate_date, key="projection_review_date")
+    refresh_review_clicked = st.button("Refresh Review Data", key="refresh_projection_review")
+    if refresh_review_clicked:
+        load_projection_snapshot_frame.clear()
+        load_actual_results_frame_for_date.clear()
+        load_ownership_frame_for_date.clear()
+
+    ownership_upload = st.file_uploader(
+        "Upload Actual Ownership CSV (optional)",
+        type=["csv"],
+        key="review_ownership_upload",
+        help="Upload contest ownership export to compare projected ownership vs actual.",
+    )
+    upload_ownership_clicked = st.button("Save Ownership CSV to GCS", key="save_ownership_csv")
+
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to run projection review.")
+    else:
+        try:
+            if upload_ownership_clicked:
+                if ownership_upload is None:
+                    st.error("Choose an ownership CSV file first.")
+                else:
+                    csv_text = ownership_upload.getvalue().decode("utf-8-sig")
+                    raw_df = pd.read_csv(io.StringIO(csv_text))
+                    normalized_own = normalize_ownership_frame(raw_df)
+                    if normalized_own.empty:
+                        st.error("Could not find ownership rows. Include player ID/name and ownership columns.")
+                    else:
+                        client = build_storage_client(
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                            project=gcp_project or None,
+                        )
+                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                        blob_name = _write_ownership_csv(store, review_date, normalized_own.to_csv(index=False))
+                        load_ownership_frame_for_date.clear()
+                        st.success(f"Saved ownership file to `{blob_name}`")
+
+            proj_df = load_projection_snapshot_frame(
+                bucket_name=bucket_name,
+                selected_date=review_date,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if proj_df.empty:
+                st.warning("No projections snapshot found. Save one from `Slate + Vegas` first.")
+            else:
+                actual_df = load_actual_results_frame_for_date(
+                    bucket_name=bucket_name,
+                    selected_date=review_date,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                own_df = load_ownership_frame_for_date(
+                    bucket_name=bucket_name,
+                    selected_date=review_date,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+
+                proj = proj_df.copy()
+                if "ID" in proj.columns:
+                    proj["ID"] = proj["ID"].astype(str).str.strip()
+                if "Name" in proj.columns:
+                    proj["Name"] = proj["Name"].astype(str).str.strip()
+                if "TeamAbbrev" in proj.columns:
+                    proj["TeamAbbrev"] = proj["TeamAbbrev"].astype(str).str.strip().str.upper()
+
+                review = proj.copy()
+                if not actual_df.empty and "ID" in review.columns:
+                    review = review.merge(actual_df, on="ID", how="left", suffixes=("", "_actual"))
+                elif not actual_df.empty and "Name" in review.columns:
+                    review = review.merge(actual_df, on="Name", how="left", suffixes=("", "_actual"))
+
+                if not own_df.empty:
+                    if "ID" in review.columns:
+                        review = review.merge(own_df[["ID", "actual_ownership"]], on="ID", how="left")
+                    elif "Name" in review.columns:
+                        review = review.merge(own_df[["Name", "actual_ownership"]], on="Name", how="left")
+                else:
+                    review["actual_ownership"] = pd.NA
+
+                for col in [
+                    "blended_projection",
+                    "projected_dk_points",
+                    "our_dk_projection",
+                    "vegas_dk_projection",
+                    "actual_dk_points",
+                    "projected_ownership",
+                    "actual_ownership",
+                    "actual_points",
+                    "actual_rebounds",
+                    "actual_assists",
+                    "actual_threes",
+                    "actual_minutes",
+                ]:
+                    if col in review.columns:
+                        review[col] = pd.to_numeric(review[col], errors="coerce")
+
+                if "blended_projection" not in review.columns and "projected_dk_points" in review.columns:
+                    review["blended_projection"] = review["projected_dk_points"]
+
+                review["blend_error"] = review["actual_dk_points"] - review["blended_projection"]
+                review["our_error"] = review["actual_dk_points"] - review.get("our_dk_projection")
+                review["vegas_error"] = review["actual_dk_points"] - review.get("vegas_dk_projection")
+                review["ownership_error"] = review["actual_ownership"] - review.get("projected_ownership")
+
+                matched_actual = int(review["actual_dk_points"].notna().sum()) if "actual_dk_points" in review.columns else 0
+                mae_blend = float(review["blend_error"].abs().mean()) if matched_actual else 0.0
+                mae_our = float(review["our_error"].abs().mean()) if matched_actual else 0.0
+                mae_vegas = float(review["vegas_error"].abs().mean()) if matched_actual else 0.0
+                own_rows = int(review["actual_ownership"].notna().sum()) if "actual_ownership" in review.columns else 0
+                own_mae = float(review["ownership_error"].abs().mean()) if own_rows else 0.0
+
+                m1, m2, m3, m4, m5 = st.columns(5)
+                m1.metric("Projection Rows", int(len(review)))
+                m2.metric("Actual Matched", matched_actual)
+                m3.metric("Blend MAE", f"{mae_blend:.2f}")
+                m4.metric("Our MAE", f"{mae_our:.2f}")
+                m5.metric("Vegas MAE", f"{mae_vegas:.2f}")
+                if own_rows:
+                    st.metric("Ownership MAE", f"{own_mae:.2f}")
+                else:
+                    st.caption("Ownership MAE unavailable: upload ownership CSV for this date.")
+
+                cols = [
+                    "ID",
+                    "Name + ID",
+                    "Name",
+                    "TeamAbbrev",
+                    "Salary",
+                    "blended_projection",
+                    "our_dk_projection",
+                    "vegas_dk_projection",
+                    "actual_dk_points",
+                    "blend_error",
+                    "our_error",
+                    "vegas_error",
+                    "projected_ownership",
+                    "actual_ownership",
+                    "ownership_error",
+                    "actual_minutes",
+                    "actual_points",
+                    "actual_rebounds",
+                    "actual_assists",
+                    "actual_threes",
+                ]
+                show_cols = [c for c in cols if c in review.columns]
+                view_df = review[show_cols].copy()
+                sort_cols = [c for c in ["actual_dk_points", "blended_projection"] if c in show_cols]
+                if sort_cols:
+                    view_df = view_df.sort_values(by=sort_cols, ascending=False)
+                st.dataframe(view_df, hide_index=True, use_container_width=True)
+                st.download_button(
+                    "Download Projection Review CSV",
+                    data=view_df.to_csv(index=False),
+                    file_name=f"projection_review_{review_date.isoformat()}.csv",
+                    mime="text/csv",
+                    key="download_projection_review_csv",
+                )
         except Exception as exc:
             st.exception(exc)
 

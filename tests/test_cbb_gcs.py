@@ -72,3 +72,13 @@ def test_projections_blob_name_and_rw() -> None:
     written = store.write_projections_csv(d, "id,proj\n1,25.5\n")
     assert written == expected_blob
     assert "25.5" in (store.read_projections_csv(d) or "")
+
+
+def test_ownership_blob_name_and_rw() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    expected_blob = "cbb/ownership/2026-02-14_ownership.csv"
+    assert store.ownership_blob_name(d) == expected_blob
+    written = store.write_ownership_csv(d, "id,actual_ownership\n1,12.5\n")
+    assert written == expected_blob
+    assert "12.5" in (store.read_ownership_csv(d) or "")

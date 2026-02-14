@@ -56,6 +56,7 @@ class CbbGcsStore:
     dk_slates_prefix: str = "cbb/dk_slates"
     injuries_prefix: str = "cbb/injuries"
     projections_prefix: str = "cbb/projections"
+    ownership_prefix: str = "cbb/ownership"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -93,6 +94,9 @@ class CbbGcsStore:
 
     def projections_blob_name(self, game_date: date) -> str:
         return f"{self.projections_prefix}/{game_date.isoformat()}_projections.csv"
+
+    def ownership_blob_name(self, game_date: date) -> str:
+        return f"{self.ownership_prefix}/{game_date.isoformat()}_ownership.csv"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
@@ -210,6 +214,18 @@ class CbbGcsStore:
 
     def write_projections_csv(self, game_date: date, csv_text: str) -> str:
         blob_name = self.projections_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_ownership_csv(self, game_date: date) -> str | None:
+        blob = self.bucket.blob(self.ownership_blob_name(game_date))
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_ownership_csv(self, game_date: date, csv_text: str) -> str:
+        blob_name = self.ownership_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
