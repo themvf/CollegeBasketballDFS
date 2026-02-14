@@ -114,7 +114,7 @@ st.caption("Cache-first data pipeline backed by Google Cloud Storage.")
 default_bucket = os.getenv("CBB_GCS_BUCKET", "").strip() or (_secret("cbb_gcs_bucket") or "")
 default_base_url = os.getenv("NCAA_API_BASE_URL", "https://ncaa-api.henrygd.me").strip()
 default_project = os.getenv("GCP_PROJECT", "").strip() or (_secret("gcp_project") or "")
-default_odds_key = (_resolve_odds_api_key() or "").strip()
+odds_api_key = (_resolve_odds_api_key() or "").strip()
 
 with st.sidebar:
     st.header("Pipeline Settings")
@@ -125,7 +125,10 @@ with st.sidebar:
     bucket_name = st.text_input("GCS Bucket", value=default_bucket)
     base_url = st.text_input("NCAA API Base URL", value=default_base_url)
     gcp_project = st.text_input("GCP Project (optional)", value=default_project)
-    odds_api_key = st.text_input("The Odds API Key", value=default_odds_key, type="password")
+    st.caption(
+        "The Odds API key source: "
+        + ("loaded from secrets/env" if odds_api_key else "missing (`the_odds_api_key`)")
+    )
     force_refresh = st.checkbox("Force API refresh (ignore cached raw JSON)", value=False)
     backfill_sleep = st.number_input("Backfill Sleep Seconds", min_value=0.0, max_value=5.0, value=0.0, step=0.1)
     stop_on_error = st.checkbox("Stop Backfill On Error", value=False)
