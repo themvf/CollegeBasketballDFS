@@ -193,12 +193,7 @@ with st.sidebar:
         index=0,
         help="Use Pregame Live for today/tomorrow pulls prior to tip-off.",
     )
-    run_clicked = st.button("Run Cache Pipeline")
-    run_odds_clicked = st.button("Run Odds Import")
-    run_props_clicked = st.button("Run Props Import")
-    run_backfill_clicked = st.button("Run Season Backfill")
-    run_odds_backfill_clicked = st.button("Run Odds Season Backfill")
-    preview_clicked = st.button("Load Cached Preview")
+    st.caption("Run imports and backfills from the tabs below.")
 
 cred_json = _resolve_credential_json()
 cred_json_b64 = _resolve_credential_json_b64()
@@ -209,354 +204,393 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-if run_clicked:
-    if not bucket_name:
-        st.error("Set a GCS bucket before running.")
-    else:
-        with st.spinner("Running CBB cache pipeline..."):
-            try:
-                summary = run_cbb_cache_pipeline(
-                    game_date=selected_date,
-                    bucket_name=bucket_name,
-                    ncaa_base_url=base_url,
-                    force_refresh=force_refresh,
-                    gcp_project=gcp_project or None,
-                    gcp_service_account_json=cred_json,
-                    gcp_service_account_json_b64=cred_json_b64,
-                )
-                load_team_lookup_frame.clear()
-                st.session_state["cbb_last_summary"] = summary
-                st.success("Pipeline completed.")
-            except Exception as exc:
-                st.exception(exc)
+tab_game, tab_props, tab_backfill = st.tabs(["Game Data", "Prop Data", "Backfill"])
 
-if run_odds_clicked:
-    if not bucket_name:
-        st.error("Set a GCS bucket before importing odds.")
-    elif not odds_api_key:
-        st.error("Set The Odds API key in sidebar or Streamlit secrets (`the_odds_api_key`).")
-    else:
-        with st.spinner("Importing game odds from The Odds API..."):
-            try:
-                summary = run_cbb_odds_pipeline(
-                    game_date=selected_date,
-                    bucket_name=bucket_name,
-                    odds_api_key=odds_api_key,
-                    bookmakers=(bookmakers_filter.strip() or None),
-                    historical_mode=(selected_date < date.today()),
-                    historical_snapshot_time=f"{selected_date.isoformat()}T23:59:59Z" if selected_date < date.today() else None,
-                    force_refresh=force_refresh,
-                    gcp_project=gcp_project or None,
-                    gcp_service_account_json=cred_json,
-                    gcp_service_account_json_b64=cred_json_b64,
-                )
-                load_odds_frame_for_date.clear()
-                st.session_state["cbb_odds_summary"] = summary
-                st.success("Odds import completed.")
-            except Exception as exc:
-                st.exception(exc)
+with tab_game:
+    st.subheader("Game Imports")
+    c1, c2, c3 = st.columns(3)
+    run_clicked = c1.button("Run Cache Pipeline", key="run_cache_pipeline")
+    run_odds_clicked = c2.button("Run Odds Import", key="run_odds_import")
+    preview_clicked = c3.button("Load Cached Preview", key="preview_cached_data")
 
-if run_props_clicked:
-    if not bucket_name:
-        st.error("Set a GCS bucket before importing props.")
-    elif not odds_api_key:
-        st.error("Set The Odds API key in Streamlit secrets (`the_odds_api_key`).")
-    else:
-        with st.spinner("Importing player props from The Odds API..."):
-            try:
-                props_kwargs = {
-                    "game_date": props_selected_date,
-                    "bucket_name": bucket_name,
-                    "odds_api_key": odds_api_key,
-                    "markets": props_markets.strip(),
-                    "bookmakers": (bookmakers_filter.strip() or None),
-                    "historical_mode": (props_fetch_mode == "Historical Snapshot"),
-                    "historical_snapshot_time": None,
-                    "force_refresh": force_refresh,
-                    "gcp_project": gcp_project or None,
-                    "gcp_service_account_json": cred_json,
-                    "gcp_service_account_json_b64": cred_json_b64,
-                }
-                # Backward-compat: if deployed pipeline is older, drop unknown kwargs.
-                allowed = set(inspect.signature(run_cbb_props_pipeline).parameters.keys())
-                filtered_props_kwargs = {k: v for k, v in props_kwargs.items() if k in allowed}
-                summary = run_cbb_props_pipeline(**filtered_props_kwargs)
-                load_props_frame_for_date.clear()
-                st.session_state["cbb_props_summary"] = summary
-                st.success("Props import completed.")
-            except Exception as exc:
-                st.exception(exc)
+with tab_props:
+    st.subheader("Prop Imports")
+    run_props_clicked = st.button("Run Props Import", key="run_props_import")
 
-if run_backfill_clicked:
-    if not bucket_name:
-        st.error("Set a GCS bucket before running backfill.")
-    elif backfill_start > backfill_end:
-        st.error("Backfill start date must be before or equal to end date.")
-    else:
-        with st.spinner("Running season backfill... this can take several minutes."):
-            try:
-                result = run_season_backfill(
-                    start_date=backfill_start,
-                    end_date=backfill_end,
-                    bucket_name=bucket_name,
-                    ncaa_base_url=base_url,
-                    force_refresh=force_refresh,
-                    gcp_project=gcp_project or None,
-                    gcp_service_account_json=cred_json,
-                    gcp_service_account_json_b64=cred_json_b64,
-                    sleep_seconds=float(backfill_sleep),
-                    stop_on_error=stop_on_error,
-                )
-                load_team_lookup_frame.clear()
-                payload = result.as_dict()
-                st.session_state["cbb_backfill_summary"] = payload
-                st.success("Season backfill completed.")
-            except Exception as exc:
-                st.exception(exc)
+with tab_backfill:
+    st.subheader("Backfill Jobs")
+    c4, c5 = st.columns(2)
+    run_backfill_clicked = c4.button("Run Season Backfill", key="run_season_backfill")
+    run_odds_backfill_clicked = c5.button("Run Odds Season Backfill", key="run_odds_season_backfill")
 
-if run_odds_backfill_clicked:
-    if not bucket_name:
-        st.error("Set a GCS bucket before running odds backfill.")
-    elif not odds_api_key:
-        st.error("Set The Odds API key in Streamlit secrets (`the_odds_api_key`).")
-    elif backfill_start > backfill_end:
-        st.error("Backfill start date must be before or equal to end date.")
-    else:
-        with st.spinner("Running odds season backfill..."):
-            try:
-                result = run_odds_season_backfill(
-                    start_date=backfill_start,
-                    end_date=backfill_end,
-                    bucket_name=bucket_name,
-                    odds_api_key=odds_api_key,
-                    bookmakers=(bookmakers_filter.strip() or None),
-                    historical_mode=True,
-                    force_refresh=force_refresh,
-                    gcp_project=gcp_project or None,
-                    gcp_service_account_json=cred_json,
-                    gcp_service_account_json_b64=cred_json_b64,
-                    sleep_seconds=float(backfill_sleep),
-                    stop_on_error=stop_on_error,
-                )
-                load_odds_frame_for_date.clear()
-                st.session_state["cbb_odds_backfill_summary"] = result.as_dict()
-                st.success("Odds season backfill completed.")
-            except Exception as exc:
-                st.exception(exc)
-
-summary = st.session_state.get("cbb_last_summary")
-if summary:
-    c1, c2, c3, c4 = st.columns(4)
-    c1.metric("Games", summary["game_count"])
-    c2.metric("Boxscores OK", summary["boxscore_success_count"])
-    c3.metric("Boxscores Failed", summary["boxscore_failure_count"])
-    c4.metric("Player Rows", summary["player_row_count"])
-    st.json(summary)
-
-odds_summary = st.session_state.get("cbb_odds_summary")
-if odds_summary:
-    st.subheader("Odds Import Summary")
-    o1, o2, o3 = st.columns(3)
-    o1.metric("Events", odds_summary["event_count"])
-    o2.metric("Game Rows", odds_summary["odds_game_rows"])
-    o3.metric("Cache Hit", "Yes" if odds_summary["odds_cache_hit"] else "No")
-    st.json(odds_summary)
-
-props_summary = st.session_state.get("cbb_props_summary")
-if props_summary:
-    st.subheader("Props Import Summary")
-    p1, p2, p3, p4, p5, p6 = st.columns(6)
-    p1.metric("Events", props_summary["event_count"])
-    p2.metric("Prop Rows", props_summary["prop_rows"])
-    p3.metric("Cache Hit", "Yes" if props_summary["props_cache_hit"] else "No")
-    p4.metric("Events w/ Books", props_summary.get("events_with_bookmakers", 0))
-    p5.metric("Events w/ Markets", props_summary.get("events_with_requested_markets", 0))
-    p6.metric("Mode", "Historical" if props_summary.get("historical_mode") else "Live")
-    st.json(props_summary)
-
-odds_backfill_summary = st.session_state.get("cbb_odds_backfill_summary")
-if odds_backfill_summary:
-    st.subheader("Odds Season Backfill Summary")
-    ob1, ob2, ob3, ob4 = st.columns(4)
-    ob1.metric("Total Dates", odds_backfill_summary["total_dates"])
-    ob2.metric("Success Dates", odds_backfill_summary["success_dates"])
-    ob3.metric("Failed Dates", odds_backfill_summary["failed_dates"])
-    ob4.metric("Cache Hits", odds_backfill_summary["odds_cache_hits"])
-    st.json(odds_backfill_summary)
-
-backfill_summary = st.session_state.get("cbb_backfill_summary")
-if backfill_summary:
-    st.subheader("Season Backfill Summary")
-    b1, b2, b3, b4 = st.columns(4)
-    b1.metric("Total Dates", backfill_summary["total_dates"])
-    b2.metric("Success Dates", backfill_summary["success_dates"])
-    b3.metric("Failed Dates", backfill_summary["failed_dates"])
-    b4.metric("Cache Hits", backfill_summary["raw_cache_hits"])
-    st.json(backfill_summary)
-
-st.subheader("Game Odds")
-if not bucket_name:
-    st.info("Set a GCS bucket in sidebar to load game odds.")
-else:
-    try:
-        odds_df = load_odds_frame_for_date(
-            bucket_name=bucket_name,
-            selected_date=selected_date,
-            gcp_project=gcp_project or None,
-            service_account_json=cred_json,
-            service_account_json_b64=cred_json_b64,
-        )
-        if odds_df.empty:
-            st.warning("No cached odds found for selected date. Run `Run Odds Import` first.")
+with tab_game:
+    if run_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before running.")
         else:
-            display = odds_df.rename(
-                columns={
-                    "game_date": "Game Date",
-                    "home_team": "Home Team",
-                    "away_team": "Away Team",
-                    "spread_home": "Spread (Home)",
-                    "spread_away": "Spread (Away)",
-                    "total_points": "Total",
-                    "moneyline_home": "Moneyline (Home)",
-                    "moneyline_away": "Moneyline (Away)",
-                }
-            )
-            table_cols = [
-                "Game Date",
-                "Home Team",
-                "Away Team",
-                "Spread (Home)",
-                "Spread (Away)",
-                "Total",
-                "Moneyline (Home)",
-                "Moneyline (Away)",
-            ]
-            st.dataframe(display[table_cols], hide_index=True, use_container_width=True)
-    except Exception as exc:
-        st.exception(exc)
-
-st.subheader("Player Props")
-if not bucket_name:
-    st.info("Set a GCS bucket in sidebar to load player props.")
-else:
-    try:
-        props_df = load_props_frame_for_date(
-            bucket_name=bucket_name,
-            selected_date=props_selected_date,
-            gcp_project=gcp_project or None,
-            service_account_json=cred_json,
-            service_account_json_b64=cred_json_b64,
-        )
-        if props_df.empty:
-            st.warning("No cached props found for selected date. Run `Run Props Import` first.")
-        else:
-            display = props_df.rename(
-                columns={
-                    "game_date": "Game Date",
-                    "home_team": "Home Team",
-                    "away_team": "Away Team",
-                    "bookmaker": "Bookmaker",
-                    "market": "Market",
-                    "player_name": "Player",
-                    "line": "Line",
-                    "over_price": "Over Price",
-                    "under_price": "Under Price",
-                }
-            )
-            table_cols = [
-                "Game Date",
-                "Home Team",
-                "Away Team",
-                "Bookmaker",
-                "Market",
-                "Player",
-                "Line",
-                "Over Price",
-                "Under Price",
-            ]
-            st.dataframe(display[table_cols], hide_index=True, use_container_width=True)
-    except Exception as exc:
-        st.exception(exc)
-
-st.subheader("Team Lookup")
-if not bucket_name:
-    st.info("Set a GCS bucket in sidebar to load team lookup data.")
-else:
-    try:
-        team_df = load_team_lookup_frame(
-            bucket_name=bucket_name,
-            gcp_project=gcp_project or None,
-            service_account_json=cred_json,
-            service_account_json_b64=cred_json_b64,
-        )
-        if team_df.empty:
-            st.warning("No cached raw game files found in bucket for team lookup.")
-        else:
-            min_date = team_df["Game Date"].min().date()
-            max_date = team_df["Game Date"].max().date()
-            c1, c2, c3 = st.columns([2, 1, 1])
-            teams = sorted(team_df["Team"].dropna().unique().tolist())
-            selected_team = c1.selectbox("Team", options=teams, index=0)
-            date_start = c2.date_input("From", value=min_date, min_value=min_date, max_value=max_date, key="team_from")
-            date_end = c3.date_input("To", value=max_date, min_value=min_date, max_value=max_date, key="team_to")
-
-            filtered = team_df.loc[team_df["Team"] == selected_team].copy()
-            filtered = filtered.loc[
-                (filtered["Game Date"].dt.date >= date_start) & (filtered["Game Date"].dt.date <= date_end)
-            ]
-            filtered = filtered.sort_values("Game Date", ascending=False)
-            filtered["Game Date"] = filtered["Game Date"].dt.strftime("%Y-%m-%d")
-            table_cols = [
-                "Game Date",
-                "Venue",
-                "Home/Away",
-                "Team Score",
-                "Opponent",
-                "Opponent Score",
-                "W/L",
-            ]
-            st.dataframe(filtered[table_cols], hide_index=True, use_container_width=True)
-    except Exception as exc:
-        st.exception(exc)
-
-if preview_clicked:
-    if not bucket_name:
-        st.error("Set a GCS bucket before previewing.")
-    else:
-        with st.spinner("Loading cached files from GCS..."):
-            try:
-                client = build_storage_client(
-                    service_account_json=cred_json,
-                    service_account_json_b64=cred_json_b64,
-                    project=gcp_project or None,
-                )
-                store = CbbGcsStore(bucket_name=bucket_name, client=client)
-
-                raw_payload = store.read_raw_json(selected_date)
-                if raw_payload is None:
-                    st.warning("No raw JSON cache found for this date.")
-                else:
-                    st.subheader("Raw JSON Snapshot")
-                    st.json(
-                        {
-                            "game_date": raw_payload.get("game_date"),
-                            "game_count": raw_payload.get("game_count"),
-                            "boxscore_success_count": raw_payload.get("boxscore_success_count"),
-                            "boxscore_failure_count": raw_payload.get("boxscore_failure_count"),
-                        }
+            with st.spinner("Running CBB cache pipeline..."):
+                try:
+                    summary = run_cbb_cache_pipeline(
+                        game_date=selected_date,
+                        bucket_name=bucket_name,
+                        ncaa_base_url=base_url,
+                        force_refresh=force_refresh,
+                        gcp_project=gcp_project or None,
+                        gcp_service_account_json=cred_json,
+                        gcp_service_account_json_b64=cred_json_b64,
                     )
+                    load_team_lookup_frame.clear()
+                    st.session_state["cbb_last_summary"] = summary
+                    st.success("Pipeline completed.")
+                except Exception as exc:
+                    st.exception(exc)
 
-                players_blob = store.players_blob_name(selected_date)
-                blob = store.bucket.blob(players_blob)
-                if not blob.exists():
-                    st.warning("No player CSV cache found for this date.")
-                else:
-                    csv_text = blob.download_as_text(encoding="utf-8")
-                    if not csv_text.strip():
-                        st.warning("Cached player CSV is empty.")
+with tab_game:
+    if run_odds_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before importing odds.")
+        elif not odds_api_key:
+            st.error("Set The Odds API key in sidebar or Streamlit secrets (`the_odds_api_key`).")
+        else:
+            with st.spinner("Importing game odds from The Odds API..."):
+                try:
+                    summary = run_cbb_odds_pipeline(
+                        game_date=selected_date,
+                        bucket_name=bucket_name,
+                        odds_api_key=odds_api_key,
+                        bookmakers=(bookmakers_filter.strip() or None),
+                        historical_mode=(selected_date < date.today()),
+                        historical_snapshot_time=f"{selected_date.isoformat()}T23:59:59Z"
+                        if selected_date < date.today()
+                        else None,
+                        force_refresh=force_refresh,
+                        gcp_project=gcp_project or None,
+                        gcp_service_account_json=cred_json,
+                        gcp_service_account_json_b64=cred_json_b64,
+                    )
+                    load_odds_frame_for_date.clear()
+                    st.session_state["cbb_odds_summary"] = summary
+                    st.success("Odds import completed.")
+                except Exception as exc:
+                    st.exception(exc)
+
+with tab_props:
+    if run_props_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before importing props.")
+        elif not odds_api_key:
+            st.error("Set The Odds API key in Streamlit secrets (`the_odds_api_key`).")
+        else:
+            with st.spinner("Importing player props from The Odds API..."):
+                try:
+                    props_kwargs = {
+                        "game_date": props_selected_date,
+                        "bucket_name": bucket_name,
+                        "odds_api_key": odds_api_key,
+                        "markets": props_markets.strip(),
+                        "bookmakers": (bookmakers_filter.strip() or None),
+                        "historical_mode": (props_fetch_mode == "Historical Snapshot"),
+                        "historical_snapshot_time": None,
+                        "force_refresh": force_refresh,
+                        "gcp_project": gcp_project or None,
+                        "gcp_service_account_json": cred_json,
+                        "gcp_service_account_json_b64": cred_json_b64,
+                    }
+                    # Backward-compat: if deployed pipeline is older, drop unknown kwargs.
+                    allowed = set(inspect.signature(run_cbb_props_pipeline).parameters.keys())
+                    filtered_props_kwargs = {k: v for k, v in props_kwargs.items() if k in allowed}
+                    summary = run_cbb_props_pipeline(**filtered_props_kwargs)
+                    load_props_frame_for_date.clear()
+                    st.session_state["cbb_props_summary"] = summary
+                    st.success("Props import completed.")
+                except Exception as exc:
+                    st.exception(exc)
+
+with tab_backfill:
+    if run_backfill_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before running backfill.")
+        elif backfill_start > backfill_end:
+            st.error("Backfill start date must be before or equal to end date.")
+        else:
+            with st.spinner("Running season backfill... this can take several minutes."):
+                try:
+                    result = run_season_backfill(
+                        start_date=backfill_start,
+                        end_date=backfill_end,
+                        bucket_name=bucket_name,
+                        ncaa_base_url=base_url,
+                        force_refresh=force_refresh,
+                        gcp_project=gcp_project or None,
+                        gcp_service_account_json=cred_json,
+                        gcp_service_account_json_b64=cred_json_b64,
+                        sleep_seconds=float(backfill_sleep),
+                        stop_on_error=stop_on_error,
+                    )
+                    load_team_lookup_frame.clear()
+                    payload = result.as_dict()
+                    st.session_state["cbb_backfill_summary"] = payload
+                    st.success("Season backfill completed.")
+                except Exception as exc:
+                    st.exception(exc)
+
+with tab_backfill:
+    if run_odds_backfill_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before running odds backfill.")
+        elif not odds_api_key:
+            st.error("Set The Odds API key in Streamlit secrets (`the_odds_api_key`).")
+        elif backfill_start > backfill_end:
+            st.error("Backfill start date must be before or equal to end date.")
+        else:
+            with st.spinner("Running odds season backfill..."):
+                try:
+                    result = run_odds_season_backfill(
+                        start_date=backfill_start,
+                        end_date=backfill_end,
+                        bucket_name=bucket_name,
+                        odds_api_key=odds_api_key,
+                        bookmakers=(bookmakers_filter.strip() or None),
+                        historical_mode=True,
+                        force_refresh=force_refresh,
+                        gcp_project=gcp_project or None,
+                        gcp_service_account_json=cred_json,
+                        gcp_service_account_json_b64=cred_json_b64,
+                        sleep_seconds=float(backfill_sleep),
+                        stop_on_error=stop_on_error,
+                    )
+                    load_odds_frame_for_date.clear()
+                    st.session_state["cbb_odds_backfill_summary"] = result.as_dict()
+                    st.success("Odds season backfill completed.")
+                except Exception as exc:
+                    st.exception(exc)
+
+with tab_game:
+    summary = st.session_state.get("cbb_last_summary")
+    if summary:
+        c1, c2, c3, c4 = st.columns(4)
+        c1.metric("Games", summary["game_count"])
+        c2.metric("Boxscores OK", summary["boxscore_success_count"])
+        c3.metric("Boxscores Failed", summary["boxscore_failure_count"])
+        c4.metric("Player Rows", summary["player_row_count"])
+        st.json(summary)
+
+with tab_game:
+    odds_summary = st.session_state.get("cbb_odds_summary")
+    if odds_summary:
+        st.subheader("Odds Import Summary")
+        o1, o2, o3 = st.columns(3)
+        o1.metric("Events", odds_summary["event_count"])
+        o2.metric("Game Rows", odds_summary["odds_game_rows"])
+        o3.metric("Cache Hit", "Yes" if odds_summary["odds_cache_hit"] else "No")
+        st.json(odds_summary)
+
+with tab_props:
+    props_summary = st.session_state.get("cbb_props_summary")
+    if props_summary:
+        st.subheader("Props Import Summary")
+        p1, p2, p3, p4, p5, p6 = st.columns(6)
+        p1.metric("Events", props_summary["event_count"])
+        p2.metric("Prop Rows", props_summary["prop_rows"])
+        p3.metric("Cache Hit", "Yes" if props_summary["props_cache_hit"] else "No")
+        p4.metric("Events w/ Books", props_summary.get("events_with_bookmakers", 0))
+        p5.metric("Events w/ Markets", props_summary.get("events_with_requested_markets", 0))
+        p6.metric("Mode", "Historical" if props_summary.get("historical_mode") else "Live")
+        st.json(props_summary)
+
+with tab_backfill:
+    odds_backfill_summary = st.session_state.get("cbb_odds_backfill_summary")
+    if odds_backfill_summary:
+        st.subheader("Odds Season Backfill Summary")
+        ob1, ob2, ob3, ob4 = st.columns(4)
+        ob1.metric("Total Dates", odds_backfill_summary["total_dates"])
+        ob2.metric("Success Dates", odds_backfill_summary["success_dates"])
+        ob3.metric("Failed Dates", odds_backfill_summary["failed_dates"])
+        ob4.metric("Cache Hits", odds_backfill_summary["odds_cache_hits"])
+        st.json(odds_backfill_summary)
+
+with tab_backfill:
+    backfill_summary = st.session_state.get("cbb_backfill_summary")
+    if backfill_summary:
+        st.subheader("Season Backfill Summary")
+        b1, b2, b3, b4 = st.columns(4)
+        b1.metric("Total Dates", backfill_summary["total_dates"])
+        b2.metric("Success Dates", backfill_summary["success_dates"])
+        b3.metric("Failed Dates", backfill_summary["failed_dates"])
+        b4.metric("Cache Hits", backfill_summary["raw_cache_hits"])
+        st.json(backfill_summary)
+
+with tab_game:
+    st.subheader("Game Odds")
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to load game odds.")
+    else:
+        try:
+            odds_df = load_odds_frame_for_date(
+                bucket_name=bucket_name,
+                selected_date=selected_date,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if odds_df.empty:
+                st.warning("No cached odds found for selected date. Run `Run Odds Import` first.")
+            else:
+                display = odds_df.rename(
+                    columns={
+                        "game_date": "Game Date",
+                        "home_team": "Home Team",
+                        "away_team": "Away Team",
+                        "spread_home": "Spread (Home)",
+                        "spread_away": "Spread (Away)",
+                        "total_points": "Total",
+                        "moneyline_home": "Moneyline (Home)",
+                        "moneyline_away": "Moneyline (Away)",
+                    }
+                )
+                table_cols = [
+                    "Game Date",
+                    "Home Team",
+                    "Away Team",
+                    "Spread (Home)",
+                    "Spread (Away)",
+                    "Total",
+                    "Moneyline (Home)",
+                    "Moneyline (Away)",
+                ]
+                st.dataframe(display[table_cols], hide_index=True, use_container_width=True)
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_props:
+    st.caption(
+        f"Props Date: `{props_selected_date.isoformat()}` | Mode: "
+        + ("Historical Snapshot" if props_fetch_mode == "Historical Snapshot" else "Pregame Live")
+    )
+    st.subheader("Player Props")
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to load player props.")
+    else:
+        try:
+            props_df = load_props_frame_for_date(
+                bucket_name=bucket_name,
+                selected_date=props_selected_date,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if props_df.empty:
+                st.warning("No cached props found for selected date. Run `Run Props Import` first.")
+            else:
+                display = props_df.rename(
+                    columns={
+                        "game_date": "Game Date",
+                        "home_team": "Home Team",
+                        "away_team": "Away Team",
+                        "bookmaker": "Bookmaker",
+                        "market": "Market",
+                        "player_name": "Player",
+                        "line": "Line",
+                        "over_price": "Over Price",
+                        "under_price": "Under Price",
+                    }
+                )
+                table_cols = [
+                    "Game Date",
+                    "Home Team",
+                    "Away Team",
+                    "Bookmaker",
+                    "Market",
+                    "Player",
+                    "Line",
+                    "Over Price",
+                    "Under Price",
+                ]
+                st.dataframe(display[table_cols], hide_index=True, use_container_width=True)
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_game:
+    st.subheader("Team Lookup")
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to load team lookup data.")
+    else:
+        try:
+            team_df = load_team_lookup_frame(
+                bucket_name=bucket_name,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if team_df.empty:
+                st.warning("No cached raw game files found in bucket for team lookup.")
+            else:
+                min_date = team_df["Game Date"].min().date()
+                max_date = team_df["Game Date"].max().date()
+                c1, c2, c3 = st.columns([2, 1, 1])
+                teams = sorted(team_df["Team"].dropna().unique().tolist())
+                selected_team = c1.selectbox("Team", options=teams, index=0)
+                date_start = c2.date_input("From", value=min_date, min_value=min_date, max_value=max_date, key="team_from")
+                date_end = c3.date_input("To", value=max_date, min_value=min_date, max_value=max_date, key="team_to")
+
+                filtered = team_df.loc[team_df["Team"] == selected_team].copy()
+                filtered = filtered.loc[
+                    (filtered["Game Date"].dt.date >= date_start) & (filtered["Game Date"].dt.date <= date_end)
+                ]
+                filtered = filtered.sort_values("Game Date", ascending=False)
+                filtered["Game Date"] = filtered["Game Date"].dt.strftime("%Y-%m-%d")
+                table_cols = [
+                    "Game Date",
+                    "Venue",
+                    "Home/Away",
+                    "Team Score",
+                    "Opponent",
+                    "Opponent Score",
+                    "W/L",
+                ]
+                st.dataframe(filtered[table_cols], hide_index=True, use_container_width=True)
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_game:
+    if preview_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before previewing.")
+        else:
+            with st.spinner("Loading cached files from GCS..."):
+                try:
+                    client = build_storage_client(
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                        project=gcp_project or None,
+                    )
+                    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+
+                    raw_payload = store.read_raw_json(selected_date)
+                    if raw_payload is None:
+                        st.warning("No raw JSON cache found for this date.")
                     else:
-                        df = pd.read_csv(io.StringIO(csv_text))
-                        st.subheader("Player CSV Preview")
-                        st.dataframe(df.head(200), hide_index=True, use_container_width=True)
-            except Exception as exc:
-                st.exception(exc)
+                        st.subheader("Raw JSON Snapshot")
+                        st.json(
+                            {
+                                "game_date": raw_payload.get("game_date"),
+                                "game_count": raw_payload.get("game_count"),
+                                "boxscore_success_count": raw_payload.get("boxscore_success_count"),
+                                "boxscore_failure_count": raw_payload.get("boxscore_failure_count"),
+                            }
+                        )
+
+                    players_blob = store.players_blob_name(selected_date)
+                    blob = store.bucket.blob(players_blob)
+                    if not blob.exists():
+                        st.warning("No player CSV cache found for this date.")
+                    else:
+                        csv_text = blob.download_as_text(encoding="utf-8")
+                        if not csv_text.strip():
+                            st.warning("Cached player CSV is empty.")
+                        else:
+                            df = pd.read_csv(io.StringIO(csv_text))
+                            st.subheader("Player CSV Preview")
+                            st.dataframe(df.head(200), hide_index=True, use_container_width=True)
+                except Exception as exc:
+                    st.exception(exc)
