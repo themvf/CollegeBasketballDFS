@@ -366,12 +366,32 @@ def build_player_pool(
         + bonus
     ).astype(float)
 
-    out["value_per_1k"] = out["projected_dk_points"] / (out["Salary"].replace(0, pd.NA) / 1000.0)
+    out["blended_projection"] = out["projected_dk_points"]
+    out["projection_per_dollar"] = out["projected_dk_points"] / out["Salary"].replace(0, pd.NA)
+    out["value_per_1k"] = out["projection_per_dollar"] * 1000.0
+
+    our = pd.to_numeric(out["our_dk_projection"], errors="coerce")
+    vegas = pd.to_numeric(out["vegas_dk_projection"], errors="coerce")
+    out["vegas_vs_our_delta_pct"] = ((vegas - our) / our.replace(0, pd.NA)) * 100.0
+    out["vegas_over_our_flag"] = (
+        ((our > 0) & (vegas >= (our * 1.10)))
+        .map(lambda x: "📈" if bool(x) else "")
+        .astype(str)
+    )
 
     proj_pct = out["projected_dk_points"].rank(method="average", pct=True).fillna(0.0)
     sal_pct = out["Salary"].rank(method="average", pct=True).fillna(0.0)
     val_pct = out["value_per_1k"].rank(method="average", pct=True).fillna(0.0)
     out["projected_ownership"] = (2.0 + 38.0 * ((0.5 * proj_pct) + (0.3 * sal_pct) + (0.2 * val_pct))).round(2)
+    out["low_own_ceiling_flag"] = (
+        (
+            (pd.to_numeric(out["projected_ownership"], errors="coerce") < 10.0)
+            & (our >= 20.0)
+            & (vegas >= 20.0)
+        )
+        .map(lambda x: "🔥" if bool(x) else "")
+        .astype(str)
+    )
     out["leverage_score"] = (out["projected_dk_points"] - (0.15 * out["projected_ownership"])).round(3)
 
     drop_cols = [

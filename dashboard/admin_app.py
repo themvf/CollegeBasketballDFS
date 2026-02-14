@@ -885,6 +885,7 @@ with tab_injuries:
 
 with tab_slate_vegas:
     st.subheader("Slate + Vegas Player Pool")
+    st.caption("Lineup Generator uses the `blended_projection` (Projected DK Points) from this table.")
     vegas_bookmaker = st.text_input(
         "Vegas Bookmaker Source",
         value=(bookmakers_filter.strip() or "fanduel"),
@@ -939,6 +940,8 @@ with tab_slate_vegas:
                         "TeamAbbrev",
                         "Position",
                         "Salary",
+                        "projection_per_dollar",
+                        "blended_projection",
                         "our_minutes_avg",
                         "our_usage_proxy",
                         "our_points_proj",
@@ -949,6 +952,9 @@ with tab_slate_vegas:
                         "projected_dk_points",
                         "projected_ownership",
                         "leverage_score",
+                        "vegas_over_our_flag",
+                        "low_own_ceiling_flag",
+                        "vegas_vs_our_delta_pct",
                         "blend_points_proj",
                         "blend_rebounds_proj",
                         "blend_assists_proj",
@@ -961,6 +967,34 @@ with tab_slate_vegas:
                     ]
                     existing_cols = [c for c in show_cols if c in pool_df.columns]
                     display_pool = pool_df[existing_cols].sort_values("projected_dk_points", ascending=False)
+                    numeric_cols = [
+                        "Salary",
+                        "projection_per_dollar",
+                        "blended_projection",
+                        "our_minutes_avg",
+                        "our_usage_proxy",
+                        "our_points_proj",
+                        "our_rebounds_proj",
+                        "our_assists_proj",
+                        "our_threes_proj",
+                        "our_dk_projection",
+                        "projected_dk_points",
+                        "projected_ownership",
+                        "leverage_score",
+                        "vegas_vs_our_delta_pct",
+                        "blend_points_proj",
+                        "blend_rebounds_proj",
+                        "blend_assists_proj",
+                        "blend_threes_proj",
+                        "vegas_points_line",
+                        "vegas_rebounds_line",
+                        "vegas_assists_line",
+                        "vegas_threes_line",
+                        "vegas_dk_projection",
+                    ]
+                    for col in numeric_cols:
+                        if col in display_pool.columns:
+                            display_pool[col] = pd.to_numeric(display_pool[col], errors="coerce")
                     st.dataframe(display_pool, hide_index=True, use_container_width=True)
                     save_proj_clicked = st.button("Save Projections Snapshot to GCS", key="save_proj_snapshot")
                     if save_proj_clicked:

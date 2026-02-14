@@ -160,3 +160,10 @@ def test_build_player_pool_blends_our_and_vegas_stats() -> None:
     assert round(float(g1["blend_rebounds_proj"]), 2) == 4.0
     assert float(g1["our_minutes_avg"]) > 0
     assert float(g1["our_usage_proxy"]) > 0
+    assert round(float(g1["blended_projection"]), 3) == round(float(g1["projected_dk_points"]), 3)
+    assert float(g1["projection_per_dollar"]) > 0
+
+    # Forward 1 has vegas line support and should produce vegas delta + potential signal columns
+    f1 = pool.loc[pool["Name"] == "Forward 1"].iloc[0]
+    assert "vegas_over_our_flag" in f1.index
+    assert "low_own_ceiling_flag" in f1.index
