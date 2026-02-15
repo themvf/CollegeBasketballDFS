@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from difflib import SequenceMatcher
 import math
 import re
 from typing import Any, Iterable, Mapping
@@ -47,6 +48,19 @@ def _winner_from_margin(home_margin: float | int | None) -> str:
     if float(home_margin) < 0:
         return "away"
     return "push"
+
+
+def _team_name_similarity(a_norm: str, b_norm: str) -> float:
+    a = str(a_norm or "").strip()
+    b = str(b_norm or "").strip()
+    if not a or not b:
+        return 0.0
+    if a == b:
+        return 1.0
+    shorter, longer = (a, b) if len(a) <= len(b) else (b, a)
+    if len(shorter) >= 4 and shorter in longer:
+        return 0.94
+    return float(SequenceMatcher(a=a, b=b).ratio())
 
 
 def build_results_frame(raw_payloads: Iterable[Mapping[str, Any]]) -> pd.DataFrame:
@@ -212,6 +226,65 @@ def _oriented_odds_frame(odds_df: pd.DataFrame) -> pd.DataFrame:
     return out.drop(columns=[c for c in ["_join_key", "_quality"] if c in out.columns]).reset_index(drop=True)
 
 
+def _odds_assignable_columns(odds_df: pd.DataFrame) -> list[str]:
+    preferred = [
+        "event_id",
+        "bookmakers_count",
+        "moneyline_home",
+        "moneyline_away",
+        "spread_home",
+        "spread_away",
+        "total_points",
+        "over_price",
+        "under_price",
+        "moneyline_samples",
+        "spread_samples",
+        "total_samples",
+        "vegas_home_margin",
+    ]
+    return [c for c in preferred if c in odds_df.columns]
+
+
+def _match_odds_row(
+    result_row: pd.Series,
+    date_odds: pd.DataFrame,
+    used_event_ids: set[str],
+) -> tuple[dict[str, Any] | None, float, str]:
+    if date_odds.empty:
+        return None, 0.0, "none"
+
+    home_norm = str(result_row.get("_home_norm") or "")
+    away_norm = str(result_row.get("_away_norm") or "")
+    best_row: dict[str, Any] | None = None
+    best_score = 0.0
+    best_min_component = 0.0
+
+    for _, odds_row in date_odds.iterrows():
+        event_id = str(odds_row.get("event_id") or "").strip()
+        if event_id and event_id in used_event_ids:
+            continue
+        sim_home = _team_name_similarity(home_norm, str(odds_row.get("_home_norm") or ""))
+        sim_away = _team_name_similarity(away_norm, str(odds_row.get("_away_norm") or ""))
+        min_component = min(sim_home, sim_away)
+        avg_score = (sim_home + sim_away) / 2.0
+
+        if sim_home == 1.0 and sim_away == 1.0:
+            return odds_row.to_dict(), 1.0, "exact"
+
+        if avg_score > best_score or (avg_score == best_score and min_component > best_min_component):
+            best_row = odds_row.to_dict()
+            best_score = avg_score
+            best_min_component = min_component
+
+    if best_row is None:
+        return None, 0.0, "none"
+
+    # Conservative acceptance threshold to avoid cross-game mismatches.
+    if best_score >= 0.84 or (best_score >= 0.72 and best_min_component >= 0.52):
+        return best_row, float(best_score), "fuzzy"
+    return None, float(best_score), "none"
+
+
 def build_vegas_review_games_frame(
     raw_payloads: Iterable[Mapping[str, Any]],
     odds_payloads: Iterable[Mapping[str, Any]],
@@ -242,13 +315,34 @@ def build_vegas_review_games_frame(
             out[col] = pd.NA
         return compute_vegas_accuracy_columns(out)
 
-    merged = results_df.merge(
-        oriented_odds,
-        on=["game_date", "_home_norm", "_away_norm"],
-        how="left",
-        suffixes=("", "_odds"),
-    )
-    return compute_vegas_accuracy_columns(merged)
+    out = results_df.copy()
+    assign_cols = _odds_assignable_columns(oriented_odds)
+    for col in assign_cols:
+        out[col] = pd.NA
+    out["odds_match_type"] = "none"
+    out["odds_match_score"] = 0.0
+
+    used_event_ids_by_date: dict[str, set[str]] = {}
+    date_groups = {str(d): df for d, df in oriented_odds.groupby("game_date", sort=False)}
+
+    for idx, result_row in out.iterrows():
+        game_date = str(result_row.get("game_date") or "")
+        date_odds = date_groups.get(game_date, pd.DataFrame())
+        used_event_ids = used_event_ids_by_date.setdefault(game_date, set())
+        matched_row, match_score, match_type = _match_odds_row(result_row, date_odds, used_event_ids)
+        if matched_row is None:
+            continue
+
+        event_id = str(matched_row.get("event_id") or "").strip()
+        if event_id:
+            used_event_ids.add(event_id)
+
+        for col in assign_cols:
+            out.at[idx, col] = matched_row.get(col)
+        out.at[idx, "odds_match_type"] = match_type
+        out.at[idx, "odds_match_score"] = float(match_score)
+
+    return compute_vegas_accuracy_columns(out)
 
 
 def compute_vegas_accuracy_columns(games_df: pd.DataFrame) -> pd.DataFrame:

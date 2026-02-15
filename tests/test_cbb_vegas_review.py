@@ -166,3 +166,37 @@ def test_summarize_vegas_accuracy_and_models() -> None:
     spread_buckets = build_spread_buckets_frame(games_df)
     assert not total_buckets.empty
     assert not spread_buckets.empty
+
+
+def test_build_vegas_review_games_frame_fuzzy_name_match() -> None:
+    raw_payloads = [
+        {
+            "game_date": "2026-01-11",
+            "games": [
+                {"home_team": "Duke", "away_team": "North Carolina", "home_score": 82, "away_score": 78, "status": "final"},
+            ],
+        }
+    ]
+    odds_payloads = [
+        {
+            "game_date": "2026-01-11",
+            "events": [
+                _event_payload(
+                    event_id="e3",
+                    home_team="Duke Blue Devils",
+                    away_team="North Carolina Tar Heels",
+                    home_ml=-140,
+                    away_ml=120,
+                    home_spread=-2.0,
+                    away_spread=2.0,
+                    total=154.0,
+                )
+            ],
+        }
+    ]
+    games_df = build_vegas_review_games_frame(raw_payloads=raw_payloads, odds_payloads=odds_payloads)
+    assert len(games_df) == 1
+    row = games_df.iloc[0]
+    assert str(row["event_id"]) == "e3"
+    assert str(row["odds_match_type"]) == "fuzzy"
+    assert float(row["odds_match_score"]) >= 0.72
