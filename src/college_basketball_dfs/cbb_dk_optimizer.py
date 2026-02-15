@@ -5,6 +5,7 @@ import io
 import math
 import random
 import re
+from collections import Counter
 from typing import Any, Callable
 
 import pandas as pd
@@ -494,6 +495,24 @@ def _assign_dk_slots(players: list[dict[str, Any]]) -> list[dict[str, Any]] | No
     return g_slots + f_slots + util
 
 
+def _lineup_game_counts(players: list[dict[str, Any]]) -> Counter[str]:
+    keys = [str(p.get("game_key") or "") for p in players if str(p.get("game_key") or "")]
+    return Counter(keys)
+
+
+def _primary_game_from_counts(game_counts: Counter[str]) -> str:
+    if not game_counts:
+        return ""
+    return game_counts.most_common(1)[0][0]
+
+
+def _stack_bonus_from_counts(game_counts: Counter[str]) -> float:
+    # Reward concentrated lineup stories for GPP ceiling.
+    if not game_counts:
+        return 0.0
+    return float(sum(max(0, n - 1) for n in game_counts.values()))
+
+
 def generate_lineups(
     pool_df: pd.DataFrame,
     num_lineups: int,
@@ -503,6 +522,8 @@ def generate_lineups(
     exposure_caps_pct: dict[str, float] | None = None,
     global_max_exposure_pct: float = 100.0,
     max_salary_left: int | None = None,
+    lineup_strategy: str = "standard",
+    spike_max_pair_overlap: int = 4,
     random_seed: int = 7,
     max_attempts_per_lineup: int = 1200,
     progress_callback: Callable[[int, int, str], None] | None = None,
@@ -570,10 +591,35 @@ def generate_lineups(
 
     min_salary_any = int(scored["Salary"].min())
     player_cols = ["ID", "Name", "Name + ID", "TeamAbbrev", "PositionBase", "Salary", "game_key", "objective_score", "projected_dk_points", "projected_ownership"]
+    strategy_norm = str(lineup_strategy or "standard").strip().lower()
+    spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
+    spike_pair_overlap_cap = max(0, min(ROSTER_SIZE, int(spike_max_pair_overlap)))
 
     for lineup_idx in range(num_lineups):
+        anchor_ids: set[str] = set()
+        anchor_games: set[str] = set()
+        anchor_primary_game = ""
+        pair_overlap_limit = ROSTER_SIZE
+        if spike_mode and (lineup_idx % 2 == 1) and lineups:
+            anchor = lineups[lineup_idx - 1]
+            anchor_ids = {str(pid) for pid in anchor.get("player_ids", [])}
+            anchor_games = {
+                str(p.get("game_key") or "")
+                for p in anchor.get("players", [])
+                if str(p.get("game_key") or "")
+            }
+            anchor_primary_game = _primary_game_from_counts(_lineup_game_counts(anchor.get("players", [])))
+            minimum_overlap_required = len(anchor_ids & locked_set)
+            pair_overlap_limit = max(spike_pair_overlap_cap, minimum_overlap_required)
+
         if progress_callback is not None:
-            progress_callback(lineup_idx, num_lineups, f"Generating lineup {lineup_idx + 1} of {num_lineups}...")
+            if spike_mode:
+                pair_number = (lineup_idx // 2) + 1
+                pair_role = "A" if lineup_idx % 2 == 0 else "B"
+                status = f"Generating lineup {lineup_idx + 1} of {num_lineups} (Pair {pair_number}-{pair_role})..."
+            else:
+                status = f"Generating lineup {lineup_idx + 1} of {num_lineups}..."
+            progress_callback(lineup_idx, num_lineups, status)
         best_lineup: list[dict[str, Any]] | None = None
         best_score = -10**12
 
@@ -601,6 +647,10 @@ def generate_lineups(
                         continue
                     if next_salary + (rem_after_pick * max_salary_any) < min_salary_used:
                         continue
+                    if anchor_ids:
+                        next_selected_ids = selected_ids | {pid}
+                        if len(next_selected_ids & anchor_ids) > pair_overlap_limit:
+                            continue
 
                     partial = selected + [p]
                     if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
@@ -626,12 +676,27 @@ def generate_lineups(
             final_salary = int(sum(int(p["Salary"]) for p in selected))
             if final_salary < min_salary_used:
                 continue
+            current_ids = {str(p["ID"]) for p in selected}
+            if anchor_ids and len(current_ids & anchor_ids) > pair_overlap_limit:
+                continue
 
             selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
+            game_counts = _lineup_game_counts(selected)
+            if spike_mode:
+                selected_score += 1.25 * _stack_bonus_from_counts(game_counts)
+
             if lineups:
-                current_ids = {str(p["ID"]) for p in selected}
                 max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)
                 selected_score -= max(0, max_overlap - 6) * 2.0
+            if anchor_ids:
+                overlap_count = len(current_ids & anchor_ids)
+                selected_score -= 1.4 * float(overlap_count * overlap_count)
+                current_games = set(game_counts.keys())
+                overlap_games = len(current_games & anchor_games)
+                selected_score -= 0.9 * float(overlap_games)
+                primary_game = _primary_game_from_counts(game_counts)
+                if anchor_primary_game and primary_game and primary_game != anchor_primary_game:
+                    selected_score += 2.5
 
             if selected_score > best_score:
                 best_score = selected_score
@@ -651,6 +716,8 @@ def generate_lineups(
         lineup_salary = int(sum(int(p["Salary"]) for p in best_lineup))
         lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
         lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
+        pair_id = ((lineup_idx // 2) + 1) if spike_mode else None
+        pair_role = ("A" if (lineup_idx % 2 == 0) else "B") if spike_mode else None
 
         lineups.append(
             {
@@ -660,6 +727,9 @@ def generate_lineups(
                 "salary": lineup_salary,
                 "projected_points": round(lineup_proj, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
+                "lineup_strategy": "spike" if spike_mode else "standard",
+                "pair_id": pair_id,
+                "pair_role": pair_role,
             }
         )
 
@@ -673,15 +743,18 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for lineup in lineups:
         players = lineup["players"]
-        rows.append(
-            {
-                "Lineup": lineup["lineup_number"],
-                "Salary": lineup["salary"],
-                "Projected Points": lineup["projected_points"],
-                "Projected Ownership Sum": lineup["projected_ownership_sum"],
-                "Players": " | ".join(str(p.get("Name + ID") or p.get("Name")) for p in players),
-            }
-        )
+        row = {
+            "Lineup": lineup["lineup_number"],
+            "Salary": lineup["salary"],
+            "Projected Points": lineup["projected_points"],
+            "Projected Ownership Sum": lineup["projected_ownership_sum"],
+            "Players": " | ".join(str(p.get("Name + ID") or p.get("Name")) for p in players),
+        }
+        if lineup.get("pair_id") is not None and lineup.get("pair_role"):
+            row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
+        if lineup.get("lineup_strategy"):
+            row["Strategy"] = str(lineup.get("lineup_strategy"))
+        rows.append(row)
     return pd.DataFrame(rows)
 
 
@@ -705,6 +778,10 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             "UTIL1": slots[6].get("Name + ID") or slots[6].get("Name"),
             "UTIL2": slots[7].get("Name + ID") or slots[7].get("Name"),
         }
+        if lineup.get("pair_id") is not None and lineup.get("pair_role"):
+            row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
+        if lineup.get("lineup_strategy"):
+            row["Strategy"] = str(lineup.get("lineup_strategy"))
         rows.append(row)
     return pd.DataFrame(rows)
 

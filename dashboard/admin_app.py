@@ -1301,13 +1301,23 @@ with tab_lineups:
         value=(bookmakers_filter.strip() or "fanduel"),
         key="lineup_bookmaker_source",
     )
-    c1, c2, c3 = st.columns(3)
+    c1, c2, c3, c4 = st.columns(4)
     lineup_count = int(c1.slider("Lineups", min_value=1, max_value=150, value=20, step=1))
     contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=1)
     lineup_seed = int(c3.number_input("Random Seed", min_value=1, max_value=999999, value=7, step=1))
-    c4, c5 = st.columns(2)
+    lineup_strategy_label = c4.selectbox(
+        "Lineup Strategy",
+        options=["Standard", "Lineup Spike (A/B Pairs)"],
+        index=0,
+        help=(
+            "Spike mode builds lineups in A/B pairs: each lineup still targets ceiling, "
+            "while B is intentionally de-correlated from A."
+        ),
+    )
+    lineup_strategy = "spike" if lineup_strategy_label.startswith("Lineup Spike") else "standard"
+    c5, c6 = st.columns(2)
     max_salary_left = int(
-        c4.slider(
+        c5.slider(
             "Max Salary Left Per Lineup",
             min_value=0,
             max_value=10000,
@@ -1317,7 +1327,7 @@ with tab_lineups:
         )
     )
     global_max_exposure_pct = float(
-        c5.slider(
+        c6.slider(
             "Global Max Player Exposure %",
             min_value=0,
             max_value=100,
@@ -1326,6 +1336,21 @@ with tab_lineups:
             help="Caps every player's max lineup rate across the run (locks override this cap).",
         )
     )
+    spike_max_pair_overlap = 4
+    if lineup_strategy == "spike":
+        spike_max_pair_overlap = int(
+            st.slider(
+                "Spike Max Shared Players (A vs B)",
+                min_value=0,
+                max_value=8,
+                value=4,
+                step=1,
+                help=(
+                    "Within each A/B pair, lineup B can share at most this many players with lineup A "
+                    "(locks can force overlap)."
+                ),
+            )
+        )
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
@@ -1404,6 +1429,8 @@ with tab_lineups:
                         exposure_caps_pct=exposure_caps,
                         global_max_exposure_pct=global_max_exposure_pct,
                         max_salary_left=max_salary_left,
+                        lineup_strategy=lineup_strategy,
+                        spike_max_pair_overlap=spike_max_pair_overlap,
                         random_seed=lineup_seed,
                         progress_callback=_lineup_progress,
                     )
