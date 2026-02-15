@@ -1528,9 +1528,12 @@ with tab_slate_vegas:
                 m3.metric("Active Pool Players", int(len(pool_df)))
                 mins_pct = pd.to_numeric(pool_df.get("our_minutes_avg", pd.Series(dtype=float)), errors="coerce")
                 avg_mins = float(mins_pct.mean()) if len(mins_pct) and mins_pct.notna().any() else 0.0
+                mins_last7 = pd.to_numeric(pool_df.get("our_minutes_last7", pd.Series(dtype=float)), errors="coerce")
+                avg_mins_last7 = float(mins_last7.mean()) if len(mins_last7) and mins_last7.notna().any() else 0.0
                 st.caption(
                     f"Season stats rows used: `{len(season_history_df):,}` | "
-                    f"Average projected minutes: `{avg_mins:.1f}`"
+                    f"Average projected minutes: `{avg_mins:.1f}` | "
+                    f"Average last-7 minutes: `{avg_mins_last7:.1f}`"
                 )
 
                 if not removed_injured_df.empty:
@@ -1551,6 +1554,7 @@ with tab_slate_vegas:
                         "projection_per_dollar",
                         "blended_projection",
                         "our_minutes_avg",
+                        "our_minutes_last7",
                         "our_usage_proxy",
                         "our_points_proj",
                         "our_rebounds_proj",
@@ -1591,6 +1595,7 @@ with tab_slate_vegas:
                         "projection_per_dollar",
                         "blended_projection",
                         "our_minutes_avg",
+                        "our_minutes_last7",
                         "our_usage_proxy",
                         "our_points_proj",
                         "our_rebounds_proj",

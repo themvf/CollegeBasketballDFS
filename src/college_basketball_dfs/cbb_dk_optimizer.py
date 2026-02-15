@@ -189,6 +189,7 @@ def build_player_pool(
         s = s.rename(columns={"team_name": "team_name_hist"})
         s["player_name"] = s.get("player_name", "").astype(str).str.strip()
         s["team_name_hist"] = s.get("team_name_hist", "").astype(str).str.strip()
+        s["game_date"] = pd.to_datetime(s.get("game_date"), errors="coerce")
         s["_name_norm"] = s["player_name"].map(_normalize_text)
         s["_team_norm"] = s["team_name_hist"].map(_normalize_text)
 
@@ -251,8 +252,28 @@ def build_player_pool(
             )
         )
 
+        # Rolling form signal: average minutes over each player's most recent 7 games.
+        recent_team = (
+            s.sort_values(["_name_norm", "_team_norm", "game_date"])
+            .groupby(["_name_norm", "_team_norm"], as_index=False, group_keys=False)
+            .tail(7)
+            .groupby(["_name_norm", "_team_norm"], as_index=False)["minutes_played"]
+            .mean(numeric_only=True)
+            .rename(columns={"minutes_played": "our_minutes_last7_team"})
+        )
+        recent_name = (
+            s.sort_values(["_name_norm", "game_date"])
+            .groupby(["_name_norm"], as_index=False, group_keys=False)
+            .tail(7)
+            .groupby(["_name_norm"], as_index=False)["minutes_played"]
+            .mean(numeric_only=True)
+            .rename(columns={"minutes_played": "our_minutes_last7_name"})
+        )
+
         out = out.merge(agg_team, on=["_name_norm", "_team_norm"], how="left")
         out = out.merge(agg_name, on=["_name_norm"], how="left")
+        out = out.merge(recent_team, on=["_name_norm", "_team_norm"], how="left")
+        out = out.merge(recent_name, on=["_name_norm"], how="left")
 
         for base in [
             "our_points_avg",
@@ -272,6 +293,16 @@ def build_player_pool(
             out[base] = pd.to_numeric(out.get(team_col), errors="coerce")
             out[base] = out[base].where(out[base].notna(), pd.to_numeric(out.get(name_col), errors="coerce"))
 
+        out["our_minutes_last7"] = pd.to_numeric(out.get("our_minutes_last7_team"), errors="coerce")
+        out["our_minutes_last7"] = out["our_minutes_last7"].where(
+            out["our_minutes_last7"].notna(),
+            pd.to_numeric(out.get("our_minutes_last7_name"), errors="coerce"),
+        )
+        out["our_minutes_last7"] = out["our_minutes_last7"].where(
+            out["our_minutes_last7"].notna(),
+            pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"),
+        )
+
         # Usage proxy: possession involvement estimate per minute.
         out["our_usage_proxy"] = (
             (out["our_fga_avg"].fillna(0) + (0.44 * out["our_fta_avg"].fillna(0)) + out["our_turnovers_avg"].fillna(0))
@@ -290,6 +321,7 @@ def build_player_pool(
             "our_fga_avg",
             "our_fta_avg",
             "our_dk_fpts_avg",
+            "our_minutes_last7",
             "our_usage_proxy",
         ]:
             out[col] = pd.NA
@@ -450,6 +482,8 @@ def build_player_pool(
         "our_fga_avg_name",
         "our_fta_avg_name",
         "our_dk_fpts_avg_name",
+        "our_minutes_last7_team",
+        "our_minutes_last7_name",
     ]
     existing_drop = [c for c in drop_cols if c in out.columns]
     return out.drop(columns=existing_drop)
