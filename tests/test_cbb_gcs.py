@@ -142,3 +142,24 @@ def test_list_lineup_run_ids() -> None:
 
     run_ids = store.list_lineup_run_ids(d)
     assert run_ids == ["run_b", "run_a"]
+
+
+def test_phantom_review_blob_names_and_rw() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    run_id = "run_xyz"
+    version_key = "spike_v2_tail"
+
+    expected_csv_blob = "cbb/phantom_reviews/2026-02-14/run_xyz/spike_v2_tail.csv"
+    expected_summary_blob = "cbb/phantom_reviews/2026-02-14/run_xyz/summary.json"
+    assert store.phantom_review_csv_blob_name(d, run_id, version_key) == expected_csv_blob
+    assert store.phantom_review_summary_blob_name(d, run_id) == expected_summary_blob
+
+    written_csv = store.write_phantom_review_csv(d, run_id, version_key, "lineup_number,actual_points\n1,210.5\n")
+    assert written_csv == expected_csv_blob
+    assert "210.5" in (store.read_phantom_review_csv(d, run_id, version_key) or "")
+
+    summary_payload = {"run_id": run_id, "models": 1}
+    written_summary = store.write_phantom_review_summary_json(d, run_id, summary_payload)
+    assert written_summary == expected_summary_blob
+    assert store.read_phantom_review_summary_json(d, run_id) == summary_payload

@@ -60,6 +60,7 @@ class CbbGcsStore:
     ownership_prefix: str = "cbb/ownership"
     contest_standings_prefix: str = "cbb/contest_standings"
     lineup_runs_prefix: str = "cbb/lineup_runs"
+    phantom_reviews_prefix: str = "cbb/phantom_reviews"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -128,6 +129,15 @@ class CbbGcsStore:
     def lineup_version_upload_blob_name(self, game_date: date, run_id: str, version_key: str) -> str:
         safe_version = self._safe_key(version_key, "version")
         return f"{self.lineup_run_prefix(game_date, run_id)}/{safe_version}/dk_upload.csv"
+
+    def phantom_review_csv_blob_name(self, game_date: date, run_id: str, version_key: str) -> str:
+        run_key = self._safe_key(run_id, "run")
+        version = self._safe_key(version_key, "version")
+        return f"{self.phantom_reviews_prefix}/{game_date.isoformat()}/{run_key}/{version}.csv"
+
+    def phantom_review_summary_blob_name(self, game_date: date, run_id: str) -> str:
+        run_key = self._safe_key(run_id, "run")
+        return f"{self.phantom_reviews_prefix}/{game_date.isoformat()}/{run_key}/summary.json"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
@@ -346,6 +356,33 @@ class CbbGcsStore:
                 run_ids.add(run_id)
         out = sorted(run_ids, reverse=True)
         return out
+
+    def read_phantom_review_csv(self, game_date: date, run_id: str, version_key: str) -> str | None:
+        blob = self.bucket.blob(self.phantom_review_csv_blob_name(game_date, run_id, version_key))
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_phantom_review_csv(self, game_date: date, run_id: str, version_key: str, csv_text: str) -> str:
+        blob_name = self.phantom_review_csv_blob_name(game_date, run_id, version_key)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_phantom_review_summary_json(self, game_date: date, run_id: str) -> dict[str, Any] | None:
+        blob = self.bucket.blob(self.phantom_review_summary_blob_name(game_date, run_id))
+        if not blob.exists():
+            return None
+        payload = json.loads(blob.download_as_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected phantom-review summary payload type: {type(payload).__name__}")
+        return payload
+
+    def write_phantom_review_summary_json(self, game_date: date, run_id: str, payload: dict[str, Any]) -> str:
+        blob_name = self.phantom_review_summary_blob_name(game_date, run_id)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+        return blob_name
 
     def write_raw_json(self, game_date: date, payload: dict[str, Any]) -> str:
         blob_name = self.raw_blob_name(game_date)

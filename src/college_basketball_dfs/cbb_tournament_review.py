@@ -280,3 +280,194 @@ def summarize_generated_lineups(generated_lineups: list[dict[str, Any]]) -> pd.D
             }
         )
     return pd.DataFrame(rows)
+
+
+def score_generated_lineups_against_actuals(
+    generated_lineups: list[dict[str, Any]],
+    actual_results_df: pd.DataFrame | None,
+    version_key: str = "",
+    version_label: str = "",
+) -> pd.DataFrame:
+    cols = [
+        "version_key",
+        "version_label",
+        "lineup_number",
+        "lineup_strategy",
+        "pair_id",
+        "pair_role",
+        "salary_used",
+        "salary_left",
+        "projected_points",
+        "projected_ownership_sum",
+        "actual_points",
+        "actual_minus_projected",
+        "matched_players",
+        "missing_players",
+        "coverage_pct",
+        "missing_names",
+    ]
+    if not generated_lineups:
+        return pd.DataFrame(columns=cols)
+
+    actual = actual_results_df.copy() if isinstance(actual_results_df, pd.DataFrame) else pd.DataFrame()
+    if actual.empty:
+        actual = pd.DataFrame(columns=["ID", "Name", "actual_dk_points"])
+    if "ID" not in actual.columns:
+        actual["ID"] = ""
+    if "Name" not in actual.columns:
+        actual["Name"] = ""
+    if "actual_dk_points" not in actual.columns:
+        actual["actual_dk_points"] = pd.NA
+    actual["ID"] = actual["ID"].astype(str).str.strip()
+    actual["Name"] = actual["Name"].astype(str).str.strip()
+    actual["actual_dk_points"] = pd.to_numeric(actual["actual_dk_points"], errors="coerce")
+
+    by_id = (
+        actual.loc[actual["ID"] != "", ["ID", "actual_dk_points"]]
+        .dropna(subset=["actual_dk_points"])
+        .drop_duplicates("ID")
+        .set_index("ID")["actual_dk_points"]
+        .to_dict()
+    )
+    by_name = (
+        actual.assign(name_key=actual["Name"].map(_norm))
+        .loc[lambda x: x["name_key"] != ""]
+        .groupby("name_key", as_index=False)["actual_dk_points"]
+        .mean(numeric_only=True)
+        .set_index("name_key")["actual_dk_points"]
+        .to_dict()
+    )
+
+    rows: list[dict[str, Any]] = []
+    for lineup in generated_lineups:
+        players = lineup.get("players") or []
+        total_actual = 0.0
+        matched = 0
+        missing_names: list[str] = []
+        for p in players:
+            pid = str(p.get("ID") or "").strip()
+            player_name = str(p.get("Name") or "").strip()
+            actual_points = None
+            if pid and pid in by_id:
+                actual_points = by_id.get(pid)
+            elif player_name:
+                actual_points = by_name.get(_norm(player_name))
+            if actual_points is None or pd.isna(actual_points):
+                missing_names.append(player_name or pid or "unknown")
+                continue
+            total_actual += float(actual_points)
+            matched += 1
+
+        salary_used = float(lineup.get("salary") or 0.0)
+        projected = float(lineup.get("projected_points") or 0.0)
+        total_slots = max(1, len(players))
+        coverage_pct = 100.0 * float(matched) / float(total_slots)
+        rows.append(
+            {
+                "version_key": version_key,
+                "version_label": version_label,
+                "lineup_number": lineup.get("lineup_number"),
+                "lineup_strategy": lineup.get("lineup_strategy"),
+                "pair_id": lineup.get("pair_id"),
+                "pair_role": lineup.get("pair_role"),
+                "salary_used": salary_used,
+                "salary_left": SALARY_CAP - salary_used,
+                "projected_points": projected,
+                "projected_ownership_sum": float(lineup.get("projected_ownership_sum") or 0.0),
+                "actual_points": total_actual,
+                "actual_minus_projected": total_actual - projected,
+                "matched_players": int(matched),
+                "missing_players": int(max(0, total_slots - matched)),
+                "coverage_pct": coverage_pct,
+                "missing_names": " | ".join(missing_names),
+            }
+        )
+
+    out = pd.DataFrame(rows, columns=cols)
+    if out.empty:
+        return out
+    out = out.sort_values(["actual_points", "lineup_number"], ascending=[False, True]).reset_index(drop=True)
+    return out
+
+
+def compare_phantom_entries_to_field(
+    phantom_df: pd.DataFrame,
+    field_entries_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if phantom_df is None or phantom_df.empty:
+        return pd.DataFrame()
+    out = phantom_df.copy()
+    if field_entries_df is None or field_entries_df.empty or "Points" not in field_entries_df.columns:
+        out["field_size"] = 0
+        out["would_rank"] = pd.NA
+        out["would_beat_pct"] = pd.NA
+        return out
+
+    field_points = pd.to_numeric(field_entries_df["Points"], errors="coerce").dropna()
+    field_n = int(len(field_points))
+    if field_n <= 0:
+        out["field_size"] = 0
+        out["would_rank"] = pd.NA
+        out["would_beat_pct"] = pd.NA
+        return out
+
+    ranks: list[int] = []
+    beats: list[float] = []
+    for _, row in out.iterrows():
+        score = float(pd.to_numeric(row.get("actual_points"), errors="coerce") or 0.0)
+        strictly_better = int((field_points > score).sum())
+        strictly_worse = int((field_points < score).sum())
+        ties = int((field_points == score).sum())
+        rank_if_entered = 1 + strictly_better
+        beat_pct = 100.0 * (strictly_worse + (0.5 * ties)) / float(field_n)
+        ranks.append(rank_if_entered)
+        beats.append(beat_pct)
+
+    out["field_size"] = field_n
+    out["would_rank"] = ranks
+    out["would_beat_pct"] = beats
+    return out
+
+
+def summarize_phantom_entries(phantom_df: pd.DataFrame) -> pd.DataFrame:
+    if phantom_df is None or phantom_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "version_key",
+                "version_label",
+                "lineups",
+                "avg_actual_points",
+                "p90_actual_points",
+                "best_actual_points",
+                "avg_projected_points",
+                "avg_actual_minus_projected",
+                "avg_coverage_pct",
+                "avg_salary_left",
+                "avg_would_beat_pct",
+                "best_would_rank",
+            ]
+        )
+
+    group_cols = [c for c in ["version_key", "version_label"] if c in phantom_df.columns]
+    if not group_cols:
+        group_cols = ["version_key"]
+        phantom_df = phantom_df.copy()
+        phantom_df["version_key"] = "unknown"
+
+    out = (
+        phantom_df.groupby(group_cols, as_index=False)
+        .agg(
+            lineups=("lineup_number", "count"),
+            avg_actual_points=("actual_points", "mean"),
+            p90_actual_points=("actual_points", lambda s: float(pd.to_numeric(s, errors="coerce").quantile(0.90))),
+            best_actual_points=("actual_points", "max"),
+            avg_projected_points=("projected_points", "mean"),
+            avg_actual_minus_projected=("actual_minus_projected", "mean"),
+            avg_coverage_pct=("coverage_pct", "mean"),
+            avg_salary_left=("salary_left", "mean"),
+            avg_would_beat_pct=("would_beat_pct", "mean"),
+            best_would_rank=("would_rank", "min"),
+        )
+    )
+    out = out.sort_values(["best_actual_points", "avg_actual_points"], ascending=[False, False]).reset_index(drop=True)
+    return out

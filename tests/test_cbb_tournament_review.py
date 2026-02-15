@@ -3,8 +3,11 @@ import pandas as pd
 from college_basketball_dfs.cbb_tournament_review import (
     build_field_entries_and_players,
     build_player_exposure_comparison,
+    compare_phantom_entries_to_field,
     build_user_strategy_summary,
     parse_lineup_players,
+    score_generated_lineups_against_actuals,
+    summarize_phantom_entries,
 )
 
 
@@ -81,3 +84,69 @@ def test_player_exposure_and_user_summary() -> None:
     users = build_user_strategy_summary(entries)
     assert len(users) == 2
     assert "entries" in users.columns
+
+
+def test_score_generated_lineups_against_actuals_and_field_compare() -> None:
+    generated_lineups = [
+        {
+            "lineup_number": 1,
+            "lineup_strategy": "spike",
+            "pair_id": 1,
+            "pair_role": "A",
+            "salary": 49600,
+            "projected_points": 210.0,
+            "projected_ownership_sum": 160.0,
+            "players": [
+                {"ID": "1", "Name": "Alpha One"},
+                {"ID": "2", "Name": "Bravo Two"},
+                {"ID": "3", "Name": "Charlie Three"},
+                {"ID": "4", "Name": "Delta Four"},
+                {"ID": "5", "Name": "Echo Five"},
+                {"ID": "6", "Name": "Foxtrot Six"},
+                {"ID": "7", "Name": "Gamma Seven"},
+                {"ID": "8", "Name": "Hotel Eight"},
+            ],
+        }
+    ]
+    actual_df = pd.DataFrame(
+        [
+            {"ID": "1", "Name": "Alpha One", "actual_dk_points": 30.0},
+            {"ID": "2", "Name": "Bravo Two", "actual_dk_points": 28.0},
+            {"ID": "3", "Name": "Charlie Three", "actual_dk_points": 26.0},
+            {"ID": "4", "Name": "Delta Four", "actual_dk_points": 24.0},
+            {"ID": "5", "Name": "Echo Five", "actual_dk_points": 22.0},
+            {"ID": "6", "Name": "Foxtrot Six", "actual_dk_points": 20.0},
+            {"ID": "7", "Name": "Gamma Seven", "actual_dk_points": 18.0},
+            {"ID": "8", "Name": "Hotel Eight", "actual_dk_points": 16.0},
+        ]
+    )
+
+    phantom = score_generated_lineups_against_actuals(
+        generated_lineups=generated_lineups,
+        actual_results_df=actual_df,
+        version_key="spike_v2_tail",
+        version_label="Spike v2",
+    )
+    assert len(phantom) == 1
+    row = phantom.iloc[0]
+    assert float(row["actual_points"]) == 184.0
+    assert int(row["matched_players"]) == 8
+    assert float(row["coverage_pct"]) == 100.0
+
+    field_entries = pd.DataFrame(
+        [
+            {"EntryId": "a", "Points": 170.0},
+            {"EntryId": "b", "Points": 190.0},
+            {"EntryId": "c", "Points": 150.0},
+        ]
+    )
+    compared = compare_phantom_entries_to_field(phantom, field_entries)
+    assert len(compared) == 1
+    assert int(compared.iloc[0]["field_size"]) == 3
+    assert int(compared.iloc[0]["would_rank"]) == 2
+    assert round(float(compared.iloc[0]["would_beat_pct"]), 2) == round((2 / 3) * 100.0, 2)
+
+    summary = summarize_phantom_entries(compared)
+    assert len(summary) == 1
+    assert int(summary.iloc[0]["lineups"]) == 1
+    assert float(summary.iloc[0]["best_actual_points"]) == 184.0

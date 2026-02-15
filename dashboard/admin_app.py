@@ -40,7 +40,10 @@ from college_basketball_dfs.cbb_tail_model import fit_total_tail_model, score_od
 from college_basketball_dfs.cbb_tournament_review import (
     build_field_entries_and_players,
     build_player_exposure_comparison,
+    compare_phantom_entries_to_field,
     build_user_strategy_summary,
+    score_generated_lineups_against_actuals,
+    summarize_phantom_entries,
     summarize_generated_lineups,
     normalize_contest_standings_frame,
     extract_actual_ownership_from_standings,
@@ -2187,6 +2190,7 @@ with tab_tournament_review:
                     service_account_json_b64=cred_json_b64,
                 )
 
+            field_entries_df = pd.DataFrame()
             if standings_df.empty:
                 st.warning("No contest standings loaded. Upload a CSV or save/load one from GCS.")
             else:
@@ -2221,6 +2225,7 @@ with tab_tournament_review:
                 if entries_df.empty:
                     st.warning("Could not parse lineup strings from this standings file.")
                 else:
+                    field_entries_df = entries_df.copy()
                     actual_own_df = extract_actual_ownership_from_standings(normalized_standings)
                     exposure_df = build_player_exposure_comparison(
                         expanded_players_df=expanded_df,
@@ -2306,6 +2311,257 @@ with tab_tournament_review:
                         mime="text/csv",
                         key="download_tournament_exposure",
                     )
+
+            st.markdown("---")
+            st.subheader("Phantom Entries (Saved Runs)")
+            st.caption(
+                "Score saved generated lineups against actual player results for this date. "
+                "Optional field comparison uses the loaded contest standings."
+            )
+
+            p1, p2 = st.columns(2)
+            phantom_refresh = p1.button("Refresh Saved Runs for Phantom Review", key="refresh_phantom_runs")
+            save_phantom_outputs = p2.checkbox(
+                "Save phantom outputs to GCS",
+                value=True,
+                key="save_phantom_outputs_to_gcs",
+            )
+            if phantom_refresh:
+                load_saved_lineup_run_manifests.clear()
+                load_saved_lineup_version_payload.clear()
+                load_actual_results_frame_for_date.clear()
+
+            phantom_manifests = load_saved_lineup_run_manifests(
+                bucket_name=bucket_name,
+                selected_date=tr_date,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if not phantom_manifests:
+                st.info("No saved lineup runs found for this date.")
+            else:
+                run_option_map: dict[str, dict[str, Any]] = {}
+                run_options: list[str] = []
+                for manifest in phantom_manifests:
+                    run_id = str(manifest.get("run_id") or "")
+                    generated_at = str(manifest.get("generated_at_utc") or "")
+                    run_mode = str(manifest.get("run_mode") or "single")
+                    label = f"{generated_at} | {run_id} | {run_mode}"
+                    run_options.append(label)
+                    run_option_map[label] = manifest
+
+                selected_run_label = st.selectbox(
+                    "Saved Run for Phantom Review",
+                    options=run_options,
+                    index=0,
+                    key="tournament_phantom_run_picker",
+                )
+                selected_manifest = run_option_map[selected_run_label]
+                selected_run_id = str(selected_manifest.get("run_id") or "")
+                version_meta_list = selected_manifest.get("versions") or []
+                version_meta_map = {str(v.get("version_key") or ""): v for v in version_meta_list}
+                available_version_keys = [k for k in version_meta_map.keys() if k]
+                if not available_version_keys:
+                    st.info("Selected run has no saved versions.")
+                else:
+                    selected_versions = st.multiselect(
+                        "Versions to Score",
+                        options=available_version_keys,
+                        default=available_version_keys,
+                        format_func=lambda k: (
+                            f"{version_meta_map[k].get('version_label', k)} "
+                            f"[{k}]"
+                        ),
+                        key="tournament_phantom_versions",
+                    )
+                    compare_to_field = st.checkbox(
+                        "Compare phantom scores to field standings",
+                        value=not field_entries_df.empty,
+                        disabled=field_entries_df.empty,
+                        key="tournament_phantom_compare_to_field",
+                    )
+                    if field_entries_df.empty:
+                        st.caption("Field comparison disabled until a contest standings CSV is loaded.")
+
+                    run_phantom_clicked = st.button("Run Phantom Review", key="run_phantom_review")
+                    if run_phantom_clicked:
+                        if not selected_versions:
+                            st.error("Choose at least one run version to score.")
+                        else:
+                            actual_df = load_actual_results_frame_for_date(
+                                bucket_name=bucket_name,
+                                selected_date=tr_date,
+                                gcp_project=gcp_project or None,
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                            )
+                            if actual_df.empty:
+                                st.error(
+                                    "No actual player stats found for this date. "
+                                    "Run game import/backfill so `cbb/players/<date>_players.csv` exists."
+                                )
+                            else:
+                                phantom_parts: list[pd.DataFrame] = []
+                                skipped_versions: list[str] = []
+                                for version_key in selected_versions:
+                                    payload = load_saved_lineup_version_payload(
+                                        bucket_name=bucket_name,
+                                        selected_date=tr_date,
+                                        run_id=selected_run_id,
+                                        version_key=version_key,
+                                        gcp_project=gcp_project or None,
+                                        service_account_json=cred_json,
+                                        service_account_json_b64=cred_json_b64,
+                                    )
+                                    if not isinstance(payload, dict):
+                                        skipped_versions.append(version_key)
+                                        continue
+                                    lineups = payload.get("lineups") or []
+                                    version_label = str(
+                                        payload.get("version_label")
+                                        or version_meta_map.get(version_key, {}).get("version_label")
+                                        or version_key
+                                    )
+                                    scored_df = score_generated_lineups_against_actuals(
+                                        generated_lineups=lineups,
+                                        actual_results_df=actual_df,
+                                        version_key=version_key,
+                                        version_label=version_label,
+                                    )
+                                    if scored_df.empty:
+                                        skipped_versions.append(version_key)
+                                        continue
+                                    phantom_parts.append(scored_df)
+
+                                if not phantom_parts:
+                                    st.error("No phantom lineups were scored from the selected versions.")
+                                else:
+                                    phantom_df = pd.concat(phantom_parts, ignore_index=True)
+                                    field_for_compare = field_entries_df if compare_to_field else pd.DataFrame()
+                                    phantom_df = compare_phantom_entries_to_field(phantom_df, field_for_compare)
+                                    phantom_summary_df = summarize_phantom_entries(phantom_df)
+
+                                    st.session_state["cbb_phantom_review_df"] = phantom_df
+                                    st.session_state["cbb_phantom_summary_df"] = phantom_summary_df
+                                    st.session_state["cbb_phantom_review_meta"] = {
+                                        "date": tr_date.isoformat(),
+                                        "run_id": selected_run_id,
+                                        "contest_id": tr_contest_id,
+                                        "versions": list(selected_versions),
+                                        "compared_to_field": bool(compare_to_field and not field_entries_df.empty),
+                                    }
+                                    if skipped_versions:
+                                        st.warning(
+                                            "Skipped versions with no saved payload/lineups: "
+                                            + ", ".join(sorted(set(skipped_versions)))
+                                        )
+
+                                    if save_phantom_outputs:
+                                        client = build_storage_client(
+                                            service_account_json=cred_json,
+                                            service_account_json_b64=cred_json_b64,
+                                            project=gcp_project or None,
+                                        )
+                                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                                        version_blobs: list[dict[str, Any]] = []
+                                        for version_key in selected_versions:
+                                            version_slice = phantom_df.loc[phantom_df["version_key"] == version_key].copy()
+                                            if version_slice.empty:
+                                                continue
+                                            blob_name = store.write_phantom_review_csv(
+                                                tr_date,
+                                                selected_run_id,
+                                                version_key,
+                                                version_slice.to_csv(index=False),
+                                            )
+                                            version_blobs.append(
+                                                {
+                                                    "version_key": version_key,
+                                                    "row_count": int(len(version_slice)),
+                                                    "blob_name": blob_name,
+                                                }
+                                            )
+                                        summary_payload = {
+                                            "game_date": tr_date.isoformat(),
+                                            "run_id": selected_run_id,
+                                            "contest_id": tr_contest_id,
+                                            "generated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                                            "compared_to_field": bool(compare_to_field and not field_entries_df.empty),
+                                            "field_entry_count": int(len(field_entries_df)),
+                                            "lineup_count": int(len(phantom_df)),
+                                            "version_count": int(phantom_df["version_key"].nunique()),
+                                            "version_csv_blobs": version_blobs,
+                                            "summary_rows": _json_safe(phantom_summary_df.to_dict(orient="records")),
+                                        }
+                                        summary_blob = store.write_phantom_review_summary_json(
+                                            tr_date,
+                                            selected_run_id,
+                                            summary_payload,
+                                        )
+                                        st.success(
+                                            f"Saved phantom review summary to `{summary_blob}` "
+                                            f"with {len(version_blobs)} version CSV file(s)."
+                                        )
+
+            phantom_df_state = st.session_state.get("cbb_phantom_review_df")
+            phantom_summary_state = st.session_state.get("cbb_phantom_summary_df")
+            phantom_meta = st.session_state.get("cbb_phantom_review_meta") or {}
+            if isinstance(phantom_df_state, pd.DataFrame) and not phantom_df_state.empty:
+                if phantom_meta:
+                    st.caption(
+                        f"Phantom run: `{phantom_meta.get('run_id', '')}` | Date: `{phantom_meta.get('date', '')}` | "
+                        f"Compared to field: `{phantom_meta.get('compared_to_field', False)}`"
+                    )
+                if isinstance(phantom_summary_state, pd.DataFrame) and not phantom_summary_state.empty:
+                    st.subheader("Phantom Summary")
+                    s1, s2, s3, s4 = st.columns(4)
+                    s1.metric("Versions", int(phantom_summary_state["version_key"].nunique()))
+                    s2.metric("Lineups Scored", int(len(phantom_df_state)))
+                    s3.metric("Best Actual", f"{float(phantom_df_state['actual_points'].max()):.2f}")
+                    coverage_mean = pd.to_numeric(phantom_df_state["coverage_pct"], errors="coerce").mean()
+                    s4.metric("Avg Coverage %", f"{float(coverage_mean):.1f}")
+                    st.dataframe(phantom_summary_state, hide_index=True, use_container_width=True)
+                    st.download_button(
+                        "Download Phantom Summary CSV",
+                        data=phantom_summary_state.to_csv(index=False),
+                        file_name=f"phantom_summary_{tr_date.isoformat()}_{phantom_meta.get('run_id', 'run')}.csv",
+                        mime="text/csv",
+                        key="download_phantom_summary_csv",
+                    )
+
+                st.subheader("Phantom Lineup Results")
+                display_cols = [
+                    "version_key",
+                    "version_label",
+                    "lineup_number",
+                    "lineup_strategy",
+                    "pair_id",
+                    "pair_role",
+                    "salary_used",
+                    "salary_left",
+                    "projected_points",
+                    "actual_points",
+                    "actual_minus_projected",
+                    "would_rank",
+                    "would_beat_pct",
+                    "coverage_pct",
+                    "missing_players",
+                    "missing_names",
+                ]
+                use_cols = [c for c in display_cols if c in phantom_df_state.columns]
+                phantom_view = phantom_df_state[use_cols].copy()
+                sort_cols = [c for c in ["actual_points", "would_beat_pct"] if c in phantom_view.columns]
+                if sort_cols:
+                    phantom_view = phantom_view.sort_values(sort_cols, ascending=False)
+                st.dataframe(phantom_view, hide_index=True, use_container_width=True)
+                st.download_button(
+                    "Download Phantom Lineups CSV",
+                    data=phantom_df_state.to_csv(index=False),
+                    file_name=f"phantom_lineups_{tr_date.isoformat()}_{phantom_meta.get('run_id', 'run')}.csv",
+                    mime="text/csv",
+                    key="download_phantom_lineups_csv",
+                )
         except Exception as exc:
             st.exception(exc)
 
