@@ -17,6 +17,9 @@ class _FakeBlob:
     def download_as_text(self, encoding: str = "utf-8") -> str:
         return self._store[self.name]
 
+    def delete(self) -> None:
+        self._store.pop(self.name, None)
+
 
 class _FakeBucket:
     def __init__(self) -> None:
@@ -48,6 +51,9 @@ def test_dk_slate_blob_name_and_rw() -> None:
     written = store.write_dk_slate_csv(d, "col1,col2\n1,2\n")
     assert written == expected_blob
     assert store.read_dk_slate_csv(d) == "col1,col2\n1,2\n"
+    assert store.delete_dk_slate_csv(d) is True
+    assert store.read_dk_slate_csv(d) is None
+    assert store.delete_dk_slate_csv(d) is False
 
 
 def test_dk_slate_read_missing_returns_none() -> None:

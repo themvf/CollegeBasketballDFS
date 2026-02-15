@@ -235,6 +235,13 @@ class CbbGcsStore:
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
 
+    def delete_dk_slate_csv(self, game_date: date) -> bool:
+        blob = self.bucket.blob(self.dk_slate_blob_name(game_date))
+        if not blob.exists():
+            return False
+        blob.delete()
+        return True
+
     def read_injuries_csv(self) -> str | None:
         blob = self.bucket.blob(self.injuries_blob_name())
         if not blob.exists():

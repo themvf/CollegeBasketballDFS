@@ -98,6 +98,18 @@ def _write_dk_slate_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> 
     return blob_name
 
 
+def _delete_dk_slate_csv(store: CbbGcsStore, slate_date: date) -> tuple[bool, str]:
+    blob_name = _dk_slate_blob_name(slate_date)
+    deleter = getattr(store, "delete_dk_slate_csv", None)
+    if callable(deleter):
+        return bool(deleter(slate_date)), blob_name
+    blob = store.bucket.blob(blob_name)
+    if not blob.exists():
+        return False, blob_name
+    blob.delete()
+    return True, blob_name
+
+
 def _injuries_blob_name() -> str:
     return "cbb/injuries/injuries_master.csv"
 
@@ -1004,15 +1016,22 @@ with tab_backfill:
 with tab_dk:
     st.subheader("DraftKings Slate Upload")
     dk_slate_date = st.date_input("DraftKings Slate Date", value=game_selected_date, key="dk_slate_date")
+    st.caption("Each date stores one DK slate file. Uploading/replacing only affects the selected date.")
     uploaded_dk_slate = st.file_uploader(
         "Upload DraftKings Slate CSV",
         type=["csv"],
         key="dk_slate_upload",
         help="Upload the DraftKings player/salary slate CSV for this date.",
     )
-    d1, d2 = st.columns(2)
+    delete_dk_slate_confirm = st.checkbox(
+        "Confirm delete for selected date",
+        value=False,
+        key="confirm_delete_dk_slate",
+    )
+    d1, d2, d3 = st.columns(3)
     upload_dk_slate_clicked = d1.button("Upload DK Slate to GCS", key="upload_dk_slate_to_gcs")
     load_dk_slate_clicked = d2.button("Refresh Cached Slate View", key="refresh_dk_slate_view")
+    delete_dk_slate_clicked = d3.button("Delete Cached Slate for Date", key="delete_dk_slate_for_date")
 
 with tab_game:
     if run_clicked:
@@ -1137,6 +1156,31 @@ with tab_props:
                         st.success("Props import completed.")
                     load_props_frame_for_date.clear()
                     st.session_state["cbb_props_summary"] = summary
+                except Exception as exc:
+                    st.exception(exc)
+
+with tab_dk:
+    if delete_dk_slate_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before deleting DraftKings slate.")
+        elif not delete_dk_slate_confirm:
+            st.error("Check `Confirm delete for selected date` before deleting.")
+        else:
+            with st.spinner("Deleting DraftKings slate from GCS..."):
+                try:
+                    client = build_storage_client(
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                        project=gcp_project or None,
+                    )
+                    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                    deleted, blob_name = _delete_dk_slate_csv(store, dk_slate_date)
+                    load_dk_slate_frame_for_date.clear()
+                    if deleted:
+                        st.session_state.pop("cbb_dk_upload_summary", None)
+                        st.success(f"Deleted `{blob_name}`")
+                    else:
+                        st.warning(f"No cached slate found for selected date. Expected `{blob_name}`")
                 except Exception as exc:
                     st.exception(exc)
 
