@@ -2158,6 +2158,10 @@ with tab_tournament_review:
     tr_refresh_clicked = t2.button("Refresh Tournament Review", key="refresh_tournament_review")
     if tr_refresh_clicked:
         load_contest_standings_frame.clear()
+        load_actual_results_frame_for_date.clear()
+        st.session_state.pop("cbb_phantom_review_df", None)
+        st.session_state.pop("cbb_phantom_summary_df", None)
+        st.session_state.pop("cbb_phantom_review_meta", None)
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to run tournament review.")
@@ -2318,6 +2322,34 @@ with tab_tournament_review:
                 "Score saved generated lineups against actual player results for this date. "
                 "Optional field comparison uses the loaded contest standings."
             )
+
+            actual_probe_df = load_actual_results_frame_for_date(
+                bucket_name=bucket_name,
+                selected_date=tr_date,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            ap1, ap2, ap3 = st.columns(3)
+            ap1.metric("Actual Player Rows", int(len(actual_probe_df)))
+            ap2.metric(
+                "Actual Unique Players",
+                int(actual_probe_df["ID"].astype(str).nunique()) if not actual_probe_df.empty and "ID" in actual_probe_df.columns else 0,
+            )
+            ap3.metric(
+                "Actual Avg DK Pts",
+                (
+                    f"{float(pd.to_numeric(actual_probe_df['actual_dk_points'], errors='coerce').mean()):.2f}"
+                    if not actual_probe_df.empty and "actual_dk_points" in actual_probe_df.columns
+                    else "0.00"
+                ),
+            )
+            if actual_probe_df.empty:
+                st.info(
+                    "No actual results currently loaded for this date. "
+                    "Expected blob: "
+                    f"`cbb/players/{tr_date.isoformat()}_players.csv`"
+                )
 
             p1, p2 = st.columns(2)
             phantom_refresh = p1.button("Refresh Saved Runs for Phantom Review", key="refresh_phantom_runs")
