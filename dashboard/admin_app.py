@@ -2305,6 +2305,7 @@ with tab_tournament_review:
                         entry_count=int(len(entries_df)),
                         projection_df=projections_df,
                         actual_ownership_df=actual_own_df,
+                        actual_results_df=actual_probe_df,
                     )
                     user_summary_df = build_user_strategy_summary(entries_df)
 
@@ -2364,6 +2365,7 @@ with tab_tournament_review:
                         exp_cols = [
                             "Name",
                             "TeamAbbrev",
+                            "final_dk_points",
                             "appearances",
                             "field_ownership_pct",
                             "projected_ownership",

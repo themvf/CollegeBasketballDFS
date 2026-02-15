@@ -306,6 +306,7 @@ def build_player_exposure_comparison(
     entry_count: int,
     projection_df: pd.DataFrame | None,
     actual_ownership_df: pd.DataFrame | None = None,
+    actual_results_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if expanded_players_df is None or expanded_players_df.empty or entry_count <= 0:
         return pd.DataFrame()
@@ -317,6 +318,7 @@ def build_player_exposure_comparison(
     )
     expo["field_ownership_pct"] = (100.0 * expo["appearances"] / float(entry_count)).round(2)
     expo["name_key"] = expo["Name"].map(_norm)
+    expo["name_key_loose"] = expo["Name"].map(_norm_loose)
 
     if projection_df is not None and not projection_df.empty:
         proj = projection_df.copy()
@@ -350,8 +352,42 @@ def build_player_exposure_comparison(
     else:
         expo["actual_ownership_from_file"] = pd.NA
 
+    if actual_results_df is not None and not actual_results_df.empty:
+        actual = actual_results_df.copy()
+        if "Name" not in actual.columns:
+            actual["Name"] = ""
+        if "actual_dk_points" not in actual.columns:
+            actual["actual_dk_points"] = pd.NA
+        actual["Name"] = actual["Name"].astype(str).str.strip()
+        actual["actual_dk_points"] = pd.to_numeric(actual["actual_dk_points"], errors="coerce")
+        actual = actual.loc[actual["actual_dk_points"].notna()]
+        if actual.empty:
+            expo["final_dk_points"] = pd.NA
+        else:
+            by_name = (
+                actual.assign(name_key=actual["Name"].map(_norm))
+                .loc[lambda x: x["name_key"] != ""]
+                .groupby("name_key", as_index=False)["actual_dk_points"]
+                .mean(numeric_only=True)
+                .set_index("name_key")["actual_dk_points"]
+                .to_dict()
+            )
+            by_name_loose = (
+                actual.assign(name_key_loose=actual["Name"].map(_norm_loose))
+                .loc[lambda x: x["name_key_loose"] != ""]
+                .groupby("name_key_loose", as_index=False)["actual_dk_points"]
+                .mean(numeric_only=True)
+                .set_index("name_key_loose")["actual_dk_points"]
+                .to_dict()
+            )
+            expo["final_dk_points"] = expo["name_key"].map(by_name)
+            missing = expo["final_dk_points"].isna()
+            expo.loc[missing, "final_dk_points"] = expo.loc[missing, "name_key_loose"].map(by_name_loose)
+    else:
+        expo["final_dk_points"] = pd.NA
+
     expo = expo.sort_values("field_ownership_pct", ascending=False).reset_index(drop=True)
-    return expo.drop(columns=["name_key"])
+    return expo.drop(columns=["name_key", "name_key_loose"])
 
 
 def build_user_strategy_summary(entry_summary_df: pd.DataFrame) -> pd.DataFrame:
@@ -365,6 +401,7 @@ def build_user_strategy_summary(entry_summary_df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             entries=("EntryId", "count"),
             avg_points=("Points", "mean"),
+            most_points=("Points", "max"),
             best_rank=("Rank", "min"),
             avg_salary_left=("salary_left", "mean"),
             avg_team_stack=("max_team_stack", "mean"),

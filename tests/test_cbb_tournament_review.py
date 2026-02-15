@@ -109,14 +109,31 @@ def test_player_exposure_and_user_summary() -> None:
             {"Name": "Bravo Two", "TeamAbbrev": "BBB", "projected_ownership": 15.0, "blended_projection": 28.0},
         ]
     )
-    exposure = build_player_exposure_comparison(expanded, entry_count=2, projection_df=proj)
+    actual = pd.DataFrame(
+        [
+            {"Name": "Alpha One Jr.", "actual_dk_points": 31.5},
+            {"Name": "Bravo Two", "actual_dk_points": 28.25},
+        ]
+    )
+    exposure = build_player_exposure_comparison(
+        expanded,
+        entry_count=2,
+        projection_df=proj,
+        actual_results_df=actual,
+    )
     assert len(exposure) >= 2
     assert "field_ownership_pct" in exposure.columns
     assert "projected_ownership" in exposure.columns
+    assert "final_dk_points" in exposure.columns
+    alpha = exposure.loc[exposure["Name"] == "Alpha One", "final_dk_points"]
+    assert not alpha.empty
+    assert round(float(alpha.iloc[0]), 2) == 31.5
 
     users = build_user_strategy_summary(entries)
     assert len(users) == 2
     assert "entries" in users.columns
+    assert "most_points" in users.columns
+    assert round(float(users["most_points"].max()), 2) == 200.5
 
 
 def test_build_entry_actual_points_comparison_adds_computed_points() -> None:
