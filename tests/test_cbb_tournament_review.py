@@ -111,13 +111,13 @@ def test_player_exposure_and_user_summary() -> None:
     )
     actual = pd.DataFrame(
         [
-            {"Name": "Alpha One Jr.", "actual_dk_points": 31.5},
+            {"Name": "Alpha One Jr.", "actual_dk_points": 40.0},
             {"Name": "Bravo Two", "actual_dk_points": 28.25},
         ]
     )
     exposure = build_player_exposure_comparison(
         expanded,
-        entry_count=2,
+        entry_count=20,
         projection_df=proj,
         actual_results_df=actual,
     )
@@ -125,9 +125,13 @@ def test_player_exposure_and_user_summary() -> None:
     assert "field_ownership_pct" in exposure.columns
     assert "projected_ownership" in exposure.columns
     assert "final_dk_points" in exposure.columns
+    assert "high_points_low_own_flag" in exposure.columns
     alpha = exposure.loc[exposure["Name"] == "Alpha One", "final_dk_points"]
     assert not alpha.empty
-    assert round(float(alpha.iloc[0]), 2) == 31.5
+    assert round(float(alpha.iloc[0]), 2) == 40.0
+    alpha_flag = exposure.loc[exposure["Name"] == "Alpha One", "high_points_low_own_flag"]
+    assert not alpha_flag.empty
+    assert bool(alpha_flag.iloc[0]) is True
 
     users = build_user_strategy_summary(entries)
     assert len(users) == 2

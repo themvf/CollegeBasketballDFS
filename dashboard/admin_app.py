@@ -2368,6 +2368,7 @@ with tab_tournament_review:
                             "Name",
                             "TeamAbbrev",
                             "final_dk_points",
+                            "high_points_low_own_flag",
                             "appearances",
                             "field_ownership_pct",
                             "projected_ownership",

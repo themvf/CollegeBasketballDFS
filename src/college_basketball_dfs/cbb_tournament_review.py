@@ -7,6 +7,8 @@ import pandas as pd
 
 SALARY_CAP = 50000
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
+HIGH_POINTS_THRESHOLD = 35.0
+LOW_OWNERSHIP_THRESHOLD = 10.0
 
 
 def _norm(value: Any) -> str:
@@ -396,6 +398,12 @@ def build_player_exposure_comparison(
             expo.loc[missing, "final_dk_points"] = expo.loc[missing, "name_key_loose"].map(by_name_loose)
     else:
         expo["final_dk_points"] = pd.NA
+
+    expo["high_points_low_own_flag"] = (
+        pd.to_numeric(expo["final_dk_points"], errors="coerce").fillna(0.0) >= HIGH_POINTS_THRESHOLD
+    ) & (
+        pd.to_numeric(expo["field_ownership_pct"], errors="coerce").fillna(0.0) <= LOW_OWNERSHIP_THRESHOLD
+    )
 
     expo = expo.sort_values("field_ownership_pct", ascending=False).reset_index(drop=True)
     return expo.drop(columns=["name_key", "name_key_loose"])
