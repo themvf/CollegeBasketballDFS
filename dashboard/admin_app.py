@@ -38,6 +38,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
 )
 from college_basketball_dfs.cbb_tail_model import fit_total_tail_model, score_odds_games_for_tail
 from college_basketball_dfs.cbb_tournament_review import (
+    build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_player_exposure_comparison,
     compare_phantom_entries_to_field,
@@ -2249,6 +2250,14 @@ with tab_tournament_review:
                     service_account_json_b64=cred_json_b64,
                 )
 
+            actual_probe_df = load_actual_results_frame_for_date(
+                bucket_name=bucket_name,
+                selected_date=tr_date,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+
             field_entries_df = pd.DataFrame()
             if standings_df.empty:
                 st.warning("No contest standings loaded. Upload a CSV or save/load one from GCS.")
@@ -2284,6 +2293,11 @@ with tab_tournament_review:
                 if entries_df.empty:
                     st.warning("Could not parse lineup strings from this standings file.")
                 else:
+                    entries_df = build_entry_actual_points_comparison(
+                        entry_summary_df=entries_df,
+                        expanded_players_df=expanded_df,
+                        actual_results_df=actual_probe_df,
+                    )
                     field_entries_df = entries_df.copy()
                     actual_own_df = extract_actual_ownership_from_standings(normalized_standings)
                     exposure_df = build_player_exposure_comparison(
@@ -2301,6 +2315,11 @@ with tab_tournament_review:
                     m4.metric("Avg Max Game Stack", f"{float(entries_df['max_game_stack'].mean()):.2f}")
                     top10 = entries_df.nsmallest(10, "Rank")
                     m5.metric("Top-10 Avg Salary Left", f"{float(top10['salary_left'].mean()):.0f}")
+                    if "computed_actual_points" in entries_df.columns:
+                        st.caption(
+                            "`Points` is from uploaded contest CSV snapshot. "
+                            "`computed_actual_points` is recalculated from current `cbb/players` stats cache."
+                        )
 
                     our_generated = st.session_state.get("cbb_generated_lineups", [])
                     if our_generated:
@@ -2319,6 +2338,10 @@ with tab_tournament_review:
                         "EntryId",
                         "EntryName",
                         "Points",
+                        "computed_actual_points",
+                        "computed_minus_file_points",
+                        "computed_players_matched",
+                        "computed_coverage_pct",
                         "parsed_players",
                         "mapped_players",
                         "salary_used",
@@ -2376,14 +2399,6 @@ with tab_tournament_review:
             st.caption(
                 "Score saved generated lineups against actual player results for this date. "
                 "Optional field comparison uses the loaded contest standings."
-            )
-
-            actual_probe_df = load_actual_results_frame_for_date(
-                bucket_name=bucket_name,
-                selected_date=tr_date,
-                gcp_project=gcp_project or None,
-                service_account_json=cred_json,
-                service_account_json_b64=cred_json_b64,
             )
             ap1, ap2, ap3 = st.columns(3)
             ap1.metric("Actual Player Rows", int(len(actual_probe_df)))
@@ -2476,13 +2491,7 @@ with tab_tournament_review:
                         if not selected_versions:
                             st.error("Choose at least one run version to score.")
                         else:
-                            actual_df = load_actual_results_frame_for_date(
-                                bucket_name=bucket_name,
-                                selected_date=tr_date,
-                                gcp_project=gcp_project or None,
-                                service_account_json=cred_json,
-                                service_account_json_b64=cred_json_b64,
-                            )
+                            actual_df = actual_probe_df.copy()
                             if actual_df.empty:
                                 st.error(
                                     "No actual player stats found for this date. "

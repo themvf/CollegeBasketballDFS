@@ -6,10 +6,18 @@ from typing import Any
 import pandas as pd
 
 SALARY_CAP = 50000
+NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
 def _norm(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _norm_loose(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [tok for tok in text.split() if tok and tok not in NAME_SUFFIX_TOKENS]
+    return "".join(tokens)
 
 
 def _to_float(value: Any) -> float | None:
@@ -178,6 +186,100 @@ def build_field_entries_and_players(
     return entry_summary, expanded
 
 
+def build_entry_actual_points_comparison(
+    entry_summary_df: pd.DataFrame,
+    expanded_players_df: pd.DataFrame,
+    actual_results_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if entry_summary_df is None or entry_summary_df.empty:
+        return pd.DataFrame()
+    out = entry_summary_df.copy()
+    for col, default in [
+        ("computed_actual_points", 0.0),
+        ("computed_players_matched", 0),
+        ("computed_coverage_pct", 0.0),
+        ("computed_minus_file_points", pd.NA),
+    ]:
+        if col not in out.columns:
+            out[col] = default
+
+    if expanded_players_df is None or expanded_players_df.empty:
+        return out
+
+    actual = actual_results_df.copy() if isinstance(actual_results_df, pd.DataFrame) else pd.DataFrame()
+    if actual.empty:
+        return out
+    if "Name" not in actual.columns:
+        actual["Name"] = ""
+    if "actual_dk_points" not in actual.columns:
+        actual["actual_dk_points"] = pd.NA
+    actual["Name"] = actual["Name"].astype(str).str.strip()
+    actual["actual_dk_points"] = pd.to_numeric(actual["actual_dk_points"], errors="coerce")
+    actual = actual.loc[actual["actual_dk_points"].notna()].copy()
+    if actual.empty:
+        return out
+
+    by_name = (
+        actual.assign(name_key=actual["Name"].map(_norm))
+        .loc[lambda x: x["name_key"] != ""]
+        .groupby("name_key", as_index=False)["actual_dk_points"]
+        .mean(numeric_only=True)
+        .set_index("name_key")["actual_dk_points"]
+        .to_dict()
+    )
+    by_name_loose = (
+        actual.assign(name_key_loose=actual["Name"].map(_norm_loose))
+        .loc[lambda x: x["name_key_loose"] != ""]
+        .groupby("name_key_loose", as_index=False)["actual_dk_points"]
+        .mean(numeric_only=True)
+        .set_index("name_key_loose")["actual_dk_points"]
+        .to_dict()
+    )
+
+    expanded = expanded_players_df.copy()
+    if "EntryId" not in expanded.columns:
+        return out
+    if "resolved_name" not in expanded.columns:
+        expanded["resolved_name"] = expanded.get("player_name", "")
+    expanded["resolved_name"] = expanded["resolved_name"].astype(str).str.strip()
+    expanded["name_key"] = expanded["resolved_name"].map(_norm)
+    expanded["name_key_loose"] = expanded["resolved_name"].map(_norm_loose)
+    expanded["actual_points_match"] = expanded["name_key"].map(by_name)
+    missing_mask = expanded["actual_points_match"].isna()
+    expanded.loc[missing_mask, "actual_points_match"] = expanded.loc[missing_mask, "name_key_loose"].map(by_name_loose)
+
+    entry_actual = (
+        expanded.groupby("EntryId", as_index=False)
+        .agg(
+            computed_actual_points=("actual_points_match", lambda s: float(pd.to_numeric(s, errors="coerce").fillna(0).sum())),
+            computed_players_matched=("actual_points_match", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
+            parsed_players=("resolved_name", "count"),
+        )
+    )
+    entry_actual["computed_coverage_pct"] = (
+        100.0 * pd.to_numeric(entry_actual["computed_players_matched"], errors="coerce")
+        / pd.to_numeric(entry_actual["parsed_players"], errors="coerce").replace(0, pd.NA)
+    ).fillna(0.0)
+
+    out = out.merge(
+        entry_actual[["EntryId", "computed_actual_points", "computed_players_matched", "computed_coverage_pct"]],
+        on="EntryId",
+        how="left",
+        suffixes=("", "_new"),
+    )
+    for col in ["computed_actual_points", "computed_players_matched", "computed_coverage_pct"]:
+        new_col = f"{col}_new"
+        if new_col in out.columns:
+            out[col] = pd.to_numeric(out[new_col], errors="coerce").fillna(out[col])
+            out = out.drop(columns=[new_col])
+
+    if "Points" in out.columns:
+        out["computed_minus_file_points"] = pd.to_numeric(out["computed_actual_points"], errors="coerce") - pd.to_numeric(
+            out["Points"], errors="coerce"
+        )
+    return out
+
+
 def build_player_exposure_comparison(
     expanded_players_df: pd.DataFrame,
     entry_count: int,
@@ -337,6 +439,14 @@ def score_generated_lineups_against_actuals(
         .set_index("name_key")["actual_dk_points"]
         .to_dict()
     )
+    by_name_loose = (
+        actual.assign(name_key_loose=actual["Name"].map(_norm_loose))
+        .loc[lambda x: x["name_key_loose"] != ""]
+        .groupby("name_key_loose", as_index=False)["actual_dk_points"]
+        .mean(numeric_only=True)
+        .set_index("name_key_loose")["actual_dk_points"]
+        .to_dict()
+    )
 
     rows: list[dict[str, Any]] = []
     for lineup in generated_lineups:
@@ -352,6 +462,8 @@ def score_generated_lineups_against_actuals(
                 actual_points = by_id.get(pid)
             elif player_name:
                 actual_points = by_name.get(_norm(player_name))
+                if actual_points is None or pd.isna(actual_points):
+                    actual_points = by_name_loose.get(_norm_loose(player_name))
             if actual_points is None or pd.isna(actual_points):
                 missing_names.append(player_name or pid or "unknown")
                 continue

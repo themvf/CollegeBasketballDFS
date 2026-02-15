@@ -1,6 +1,7 @@
 import pandas as pd
 
 from college_basketball_dfs.cbb_tournament_review import (
+    build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_player_exposure_comparison,
     compare_phantom_entries_to_field,
@@ -84,6 +85,51 @@ def test_player_exposure_and_user_summary() -> None:
     users = build_user_strategy_summary(entries)
     assert len(users) == 2
     assert "entries" in users.columns
+
+
+def test_build_entry_actual_points_comparison_adds_computed_points() -> None:
+    entries, expanded = build_field_entries_and_players(_sample_standings(), _sample_slate())
+    actual_df = pd.DataFrame(
+        [
+            {"Name": "Alpha One Jr.", "actual_dk_points": 30.0},
+            {"Name": "Bravo Two", "actual_dk_points": 28.0},
+            {"Name": "Charlie Three", "actual_dk_points": 26.0},
+            {"Name": "Delta Four", "actual_dk_points": 24.0},
+            {"Name": "Echo Five", "actual_dk_points": 22.0},
+            {"Name": "Foxtrot Six", "actual_dk_points": 20.0},
+            {"Name": "Gamma Seven", "actual_dk_points": 18.0},
+            {"Name": "Hotel Eight", "actual_dk_points": 16.0},
+        ]
+    )
+    compared = build_entry_actual_points_comparison(entries, expanded, actual_df)
+    assert len(compared) == 2
+    assert "computed_actual_points" in compared.columns
+    assert "computed_coverage_pct" in compared.columns
+    assert round(float(compared.iloc[0]["computed_actual_points"]), 2) == 184.0
+    assert round(float(compared.iloc[0]["computed_coverage_pct"]), 2) == 100.0
+
+
+def test_score_generated_lineups_against_actuals_loose_name_match() -> None:
+    generated_lineups = [
+        {
+            "lineup_number": 1,
+            "lineup_strategy": "standard",
+            "salary": 5000,
+            "projected_points": 20.0,
+            "players": [{"ID": "1", "Name": "Alpha One"}],
+        }
+    ]
+    actual_df = pd.DataFrame([{"ID": "99", "Name": "Alpha One Jr.", "actual_dk_points": 30.0}])
+    phantom = score_generated_lineups_against_actuals(
+        generated_lineups=generated_lineups,
+        actual_results_df=actual_df,
+        version_key="standard_v1",
+        version_label="Standard v1",
+    )
+    assert len(phantom) == 1
+    assert float(phantom.iloc[0]["actual_points"]) == 30.0
+    assert int(phantom.iloc[0]["matched_players"]) == 1
+    assert float(phantom.iloc[0]["coverage_pct"]) == 100.0
 
 
 def test_score_generated_lineups_against_actuals_and_field_compare() -> None:
