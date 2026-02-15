@@ -9,6 +9,7 @@ from collections import Counter
 from typing import Any, Callable
 
 import pandas as pd
+from college_basketball_dfs.cbb_tail_model import map_slate_games_to_tail_features
 
 SALARY_CAP = 50000
 ROSTER_SIZE = 8
@@ -158,6 +159,7 @@ def build_player_pool(
     props_df: pd.DataFrame | None,
     season_stats_df: pd.DataFrame | None = None,
     bookmaker_filter: str | None = None,
+    odds_games_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if slate_df.empty:
         return pd.DataFrame()
@@ -173,6 +175,13 @@ def build_player_pool(
     out["game_key"] = out.get("Game Info", "").map(_game_key)
     out["_name_norm"] = out["Name"].map(_normalize_text)
     out["_team_norm"] = out["TeamAbbrev"].map(_normalize_text)
+
+    # Attach game-level Vegas tail metrics (p+8 / p+12 / volatility) by matching slate game keys to odds events.
+    if odds_games_df is not None and not odds_games_df.empty and "game_key" in out.columns:
+        game_keys = sorted({str(x or "").strip().upper() for x in out["game_key"].tolist() if str(x or "").strip()})
+        mapped = map_slate_games_to_tail_features(slate_game_keys=game_keys, odds_tail_df=odds_games_df)
+        if not mapped.empty:
+            out = out.merge(mapped, on="game_key", how="left")
 
     # Our V1 projection source: season averages from cached NCAA player stats.
     if season_stats_df is not None and not season_stats_df.empty:
@@ -384,6 +393,27 @@ def build_player_pool(
     sal_pct = out["Salary"].rank(method="average", pct=True).fillna(0.0)
     val_pct = out["value_per_1k"].rank(method="average", pct=True).fillna(0.0)
     out["projected_ownership"] = (2.0 + 38.0 * ((0.5 * proj_pct) + (0.3 * sal_pct) + (0.2 * val_pct))).round(2)
+
+    for col in ["game_p_plus_8", "game_p_plus_12", "game_volatility_score", "game_tail_residual_mu", "game_tail_sigma", "game_tail_match_score"]:
+        if col not in out.columns:
+            out[col] = pd.NA
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    game_own_proxy = out.groupby("game_key")["projected_ownership"].mean().rename("game_avg_projected_ownership")
+    out = out.merge(game_own_proxy.reset_index(), on="game_key", how="left")
+    out["game_avg_projected_ownership"] = pd.to_numeric(out["game_avg_projected_ownership"], errors="coerce").fillna(0.0)
+    out["game_tail_to_ownership"] = out["game_p_plus_12"] / (out["game_avg_projected_ownership"] + 0.5)
+
+    p8 = out["game_p_plus_8"].fillna(0.0).clip(lower=0.0, upper=1.0)
+    p12 = out["game_p_plus_12"].fillna(0.0).clip(lower=0.0, upper=1.0)
+    vol_pct = out["game_volatility_score"].rank(method="average", pct=True).fillna(0.0)
+    ratio_pct = out["game_tail_to_ownership"].rank(method="average", pct=True).fillna(0.0)
+    out["game_volatility_pct"] = vol_pct
+    out["game_tail_to_ownership_pct"] = ratio_pct
+    out["game_tail_score"] = (
+        100.0 * ((0.45 * p12) + (0.25 * p8) + (0.15 * vol_pct) + (0.15 * ratio_pct))
+    ).round(3)
+
     out["low_own_ceiling_flag"] = (
         (
             (pd.to_numeric(out["projected_ownership"], errors="coerce") < 10.0)
@@ -432,13 +462,15 @@ def apply_contest_objective(pool_df: pd.DataFrame, contest_type: str) -> pd.Data
     own = out["projected_ownership"].fillna(0.0)
     leverage = base - (0.15 * own)
     ceiling = base * 1.18
+    tail_score = pd.to_numeric(out.get("game_tail_score"), errors="coerce").fillna(0.0) / 100.0
+    tail_to_own = pd.to_numeric(out.get("game_tail_to_ownership_pct"), errors="coerce").fillna(0.0)
 
     if ct == "cash":
         out["objective_score"] = base
     elif ct == "small gpp":
-        out["objective_score"] = base + (0.25 * leverage)
+        out["objective_score"] = base + (0.25 * leverage) + (3.0 * tail_score) + (1.6 * tail_to_own)
     else:  # large gpp default
-        out["objective_score"] = base + (0.45 * leverage) + (0.1 * ceiling)
+        out["objective_score"] = base + (0.45 * leverage) + (0.1 * ceiling) + (5.0 * tail_score) + (2.3 * tail_to_own)
     return out
 
 
@@ -590,7 +622,25 @@ def generate_lineups(
     warnings: list[str] = []
 
     min_salary_any = int(scored["Salary"].min())
-    player_cols = ["ID", "Name", "Name + ID", "TeamAbbrev", "PositionBase", "Salary", "game_key", "objective_score", "projected_dk_points", "projected_ownership"]
+    player_cols = [
+        "ID",
+        "Name",
+        "Name + ID",
+        "TeamAbbrev",
+        "PositionBase",
+        "Salary",
+        "game_key",
+        "objective_score",
+        "projected_dk_points",
+        "projected_ownership",
+        "game_tail_event_id",
+        "game_tail_match_score",
+        "game_p_plus_8",
+        "game_p_plus_12",
+        "game_volatility_score",
+        "game_tail_to_ownership",
+        "game_tail_score",
+    ]
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
     spike_pair_overlap_cap = max(0, min(ROSTER_SIZE, int(spike_max_pair_overlap)))
@@ -683,7 +733,16 @@ def generate_lineups(
             selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
             game_counts = _lineup_game_counts(selected)
             if spike_mode:
+                def _safe_num(value: Any) -> float:
+                    num = _safe_float(value)
+                    if num is None or math.isnan(num):
+                        return 0.0
+                    return float(num)
+
                 selected_score += 1.25 * _stack_bonus_from_counts(game_counts)
+                avg_tail = sum(_safe_num(p.get("game_tail_score")) for p in selected) / max(1, len(selected))
+                avg_vol = sum(_safe_num(p.get("game_volatility_score")) for p in selected) / max(1, len(selected))
+                selected_score += (0.20 * avg_tail) + (0.02 * avg_vol)
 
             if lineups:
                 max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)

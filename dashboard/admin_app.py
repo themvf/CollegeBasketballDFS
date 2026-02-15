@@ -19,7 +19,7 @@ if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
-from college_basketball_dfs.cbb_backfill import run_season_backfill, season_start_for_date
+from college_basketball_dfs.cbb_backfill import iter_dates, run_season_backfill, season_start_for_date
 from college_basketball_dfs.cbb_ncaa import prior_day
 from college_basketball_dfs.cbb_odds_backfill import run_odds_season_backfill
 from college_basketball_dfs.cbb_odds import flatten_odds_payload
@@ -36,6 +36,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     normalize_injuries_frame,
     remove_injured_players,
 )
+from college_basketball_dfs.cbb_tail_model import fit_total_tail_model, score_odds_games_for_tail
 from college_basketball_dfs.cbb_tournament_review import (
     build_field_entries_and_players,
     build_player_exposure_comparison,
@@ -44,6 +45,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     normalize_contest_standings_frame,
     extract_actual_ownership_from_standings,
 )
+from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 
 
 def _secret(name: str) -> str | None:
@@ -528,6 +530,41 @@ def load_season_player_history_frame(
     return pd.concat(frames, ignore_index=True)
 
 
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_season_vegas_history_frame(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+
+    season_start = season_start_for_date(selected_date)
+    end_date = selected_date - timedelta(days=1)
+    if end_date < season_start:
+        return pd.DataFrame()
+
+    raw_payloads: list[dict[str, Any]] = []
+    odds_payloads: list[dict[str, Any]] = []
+    for d in iter_dates(season_start, end_date):
+        raw_payload = store.read_raw_json(d)
+        if raw_payload is not None:
+            raw_payloads.append(raw_payload)
+        odds_payload = store.read_odds_json(d)
+        if odds_payload is not None:
+            odds_payloads.append(odds_payload)
+
+    if not raw_payloads or not odds_payloads:
+        return pd.DataFrame()
+    return build_vegas_review_games_frame(raw_payloads=raw_payloads, odds_payloads=odds_payloads)
+
+
 def _ownership_to_float(value: object) -> float | None:
     if value is None:
         return None
@@ -756,6 +793,23 @@ def build_optimizer_pool_for_date(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
+    odds_df = load_odds_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=slate_date,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    vegas_history_df = load_season_vegas_history_frame(
+        bucket_name=bucket_name,
+        selected_date=slate_date,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    tail_model = fit_total_tail_model(vegas_history_df)
+    odds_scored_df = score_odds_games_for_tail(odds_df, tail_model) if not odds_df.empty else pd.DataFrame()
+
     props_df = load_props_frame_for_date(
         bucket_name=bucket_name,
         selected_date=slate_date,
@@ -768,6 +822,7 @@ def build_optimizer_pool_for_date(
         props_df=props_df,
         season_stats_df=season_history_df,
         bookmaker_filter=(bookmaker or None),
+        odds_games_df=odds_scored_df,
     )
     return pool_df, removed_injured, slate_df, injuries_df, season_history_df
 
@@ -1307,8 +1362,10 @@ with tab_slate_vegas:
     if refresh_pool_clicked:
         load_dk_slate_frame_for_date.clear()
         load_props_frame_for_date.clear()
+        load_odds_frame_for_date.clear()
         load_injuries_frame.clear()
         load_season_player_history_frame.clear()
+        load_season_vegas_history_frame.clear()
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to build the slate player pool.")
@@ -1363,6 +1420,17 @@ with tab_slate_vegas:
                         "projected_dk_points",
                         "projected_ownership",
                         "leverage_score",
+                        "game_tail_match_score",
+                        "game_total_line",
+                        "game_spread_line",
+                        "game_tail_residual_mu",
+                        "game_tail_sigma",
+                        "game_p_plus_8",
+                        "game_p_plus_12",
+                        "game_volatility_score",
+                        "game_avg_projected_ownership",
+                        "game_tail_to_ownership",
+                        "game_tail_score",
                         "vegas_over_our_flag",
                         "low_own_ceiling_flag",
                         "vegas_vs_our_delta_pct",
@@ -1392,6 +1460,17 @@ with tab_slate_vegas:
                         "projected_dk_points",
                         "projected_ownership",
                         "leverage_score",
+                        "game_tail_match_score",
+                        "game_total_line",
+                        "game_spread_line",
+                        "game_tail_residual_mu",
+                        "game_tail_sigma",
+                        "game_p_plus_8",
+                        "game_p_plus_12",
+                        "game_volatility_score",
+                        "game_avg_projected_ownership",
+                        "game_tail_to_ownership",
+                        "game_tail_score",
                         "vegas_vs_our_delta_pct",
                         "blend_points_proj",
                         "blend_rebounds_proj",

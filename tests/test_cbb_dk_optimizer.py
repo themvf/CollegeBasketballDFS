@@ -230,3 +230,47 @@ def test_build_player_pool_blends_our_and_vegas_stats() -> None:
     f1 = pool.loc[pool["Name"] == "Forward 1"].iloc[0]
     assert "vegas_over_our_flag" in f1.index
     assert "low_own_ceiling_flag" in f1.index
+
+
+def test_build_player_pool_attaches_tail_metrics_from_game_odds() -> None:
+    odds_scored_df = pd.DataFrame(
+        [
+            {
+                "event_id": "evt_aaa_bbb",
+                "home_team": "BBB",
+                "away_team": "AAA",
+                "total_points": 148.5,
+                "spread_home": -3.5,
+                "tail_residual_mu": 1.0,
+                "tail_sigma": 10.5,
+                "p_plus_8": 0.22,
+                "p_plus_12": 0.11,
+                "volatility_score": 10.5,
+            },
+            {
+                "event_id": "evt_ccc_ddd",
+                "home_team": "DDD",
+                "away_team": "CCC",
+                "total_points": 152.0,
+                "spread_home": -1.5,
+                "tail_residual_mu": 2.0,
+                "tail_sigma": 12.2,
+                "p_plus_8": 0.31,
+                "p_plus_12": 0.18,
+                "volatility_score": 12.2,
+            },
+        ]
+    )
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        bookmaker_filter="fanduel",
+        odds_games_df=odds_scored_df,
+    )
+    assert "game_p_plus_8" in pool.columns
+    assert "game_p_plus_12" in pool.columns
+    assert "game_tail_score" in pool.columns
+    game_rows = pool.loc[pool["game_key"] == "AAA@BBB"]
+    assert not game_rows.empty
+    assert game_rows["game_p_plus_12"].notna().any()
+    assert game_rows["game_tail_score"].notna().any()
