@@ -156,6 +156,11 @@ def test_build_entry_actual_points_comparison_adds_computed_points() -> None:
     assert "computed_coverage_pct" in compared.columns
     assert round(float(compared.iloc[0]["computed_actual_points"]), 2) == 184.0
     assert round(float(compared.iloc[0]["computed_coverage_pct"]), 2) == 100.0
+    assert round(float(compared.iloc[0]["Points"]), 2) == 184.0
+    assert "points_from_file" in compared.columns
+    assert round(float(compared.iloc[0]["points_from_file"]), 2) == 200.5
+    assert "rank_from_computed_points" in compared.columns
+    assert round(float(compared.iloc[0]["rank_from_computed_points"]), 2) == 1.0
 
 
 def test_score_generated_lineups_against_actuals_loose_name_match() -> None:
@@ -179,6 +184,37 @@ def test_score_generated_lineups_against_actuals_loose_name_match() -> None:
     assert float(phantom.iloc[0]["actual_points"]) == 30.0
     assert int(phantom.iloc[0]["matched_players"]) == 1
     assert float(phantom.iloc[0]["coverage_pct"]) == 100.0
+
+
+def test_build_user_strategy_summary_uses_computed_actual_points_when_available() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "EntryId": "1",
+                "EntryName": "userx (1/2)",
+                "Points": 250.0,
+                "computed_actual_points": 190.0,
+                "Rank": 2,
+                "salary_left": 100.0,
+                "max_team_stack": 3,
+                "max_game_stack": 3,
+            },
+            {
+                "EntryId": "2",
+                "EntryName": "userx (2/2)",
+                "Points": 100.0,
+                "computed_actual_points": 220.0,
+                "Rank": 1,
+                "salary_left": 0.0,
+                "max_team_stack": 2,
+                "max_game_stack": 2,
+            },
+        ]
+    )
+    users = build_user_strategy_summary(df)
+    assert len(users) == 1
+    assert round(float(users.iloc[0]["most_points"]), 2) == 220.0
+    assert round(float(users.iloc[0]["avg_points"]), 2) == 205.0
 
 
 def test_score_generated_lineups_against_actuals_and_field_compare() -> None:

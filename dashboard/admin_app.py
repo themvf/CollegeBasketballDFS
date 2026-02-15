@@ -2318,8 +2318,8 @@ with tab_tournament_review:
                     m5.metric("Top-10 Avg Salary Left", f"{float(top10['salary_left'].mean()):.0f}")
                     if "computed_actual_points" in entries_df.columns:
                         st.caption(
-                            "`Points` is from uploaded contest CSV snapshot. "
-                            "`computed_actual_points` is recalculated from current `cbb/players` stats cache."
+                            "`Points` and `Rank` below are recomputed from current `cbb/players` actual results. "
+                            "Uploaded contest values are kept in `points_from_file` and `rank_from_file` for reference."
                         )
 
                     our_generated = st.session_state.get("cbb_generated_lineups", [])
@@ -2334,14 +2334,16 @@ with tab_tournament_review:
                             c4.metric("Our Avg Max Game Stack", f"{float(our_df['max_game_stack'].mean()):.2f}")
 
                     st.subheader("Field Lineup Construction")
-                    st.caption("`Rank` is recomputed from contest `Points`; file rank is kept in `rank_from_file`.")
+                    st.caption("`Rank` and `Points` use computed final results.")
                     show_entry_cols = [
                         "Rank",
+                        "rank_from_computed_points",
                         "rank_from_file",
                         "rank_from_points",
                         "EntryId",
                         "EntryName",
                         "Points",
+                        "points_from_file",
                         "computed_actual_points",
                         "computed_minus_file_points",
                         "computed_players_matched",

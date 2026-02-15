@@ -220,15 +220,21 @@ def build_entry_actual_points_comparison(
         ("computed_players_matched", 0),
         ("computed_coverage_pct", 0.0),
         ("computed_minus_file_points", pd.NA),
+        ("points_from_file", pd.NA),
+        ("rank_from_computed_points", pd.NA),
     ]:
         if col not in out.columns:
             out[col] = default
+    if "Points" in out.columns:
+        out["points_from_file"] = pd.to_numeric(out["Points"], errors="coerce")
 
     if expanded_players_df is None or expanded_players_df.empty:
+        # No computed actuals available; leave uploaded values as-is.
         return out
 
     actual = actual_results_df.copy() if isinstance(actual_results_df, pd.DataFrame) else pd.DataFrame()
     if actual.empty:
+        # No computed actuals available; leave uploaded values as-is.
         return out
     if "Name" not in actual.columns:
         actual["Name"] = ""
@@ -294,10 +300,15 @@ def build_entry_actual_points_comparison(
             out[col] = pd.to_numeric(out[new_col], errors="coerce").fillna(out[col])
             out = out.drop(columns=[new_col])
 
-    if "Points" in out.columns:
+    if "points_from_file" in out.columns:
         out["computed_minus_file_points"] = pd.to_numeric(out["computed_actual_points"], errors="coerce") - pd.to_numeric(
-            out["Points"], errors="coerce"
+            out["points_from_file"], errors="coerce"
         )
+
+    # Canonical standings values for Tournament Review: use computed actuals/rank.
+    out["Points"] = pd.to_numeric(out["computed_actual_points"], errors="coerce")
+    out["Rank"] = pd.to_numeric(out["Points"], errors="coerce").rank(method="min", ascending=False)
+    out["rank_from_computed_points"] = out["Rank"]
     return out
 
 
@@ -396,12 +407,13 @@ def build_user_strategy_summary(entry_summary_df: pd.DataFrame) -> pd.DataFrame:
 
     users = entry_summary_df.copy()
     users["handle"] = users["EntryName"].astype(str).str.replace(r"\s+\(\d+/\d+\)$", "", regex=True)
+    points_col = "computed_actual_points" if "computed_actual_points" in users.columns else "Points"
     summary = (
         users.groupby("handle", as_index=False)
         .agg(
             entries=("EntryId", "count"),
-            avg_points=("Points", "mean"),
-            most_points=("Points", "max"),
+            avg_points=(points_col, "mean"),
+            most_points=(points_col, "max"),
             best_rank=("Rank", "min"),
             avg_salary_left=("salary_left", "mean"),
             avg_team_stack=("max_team_stack", "mean"),
