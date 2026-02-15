@@ -843,33 +843,17 @@ default_base_url = os.getenv("NCAA_API_BASE_URL", "https://ncaa-api.henrygd.me")
 default_project = os.getenv("GCP_PROJECT", "").strip() or (_secret("gcp_project") or "")
 odds_api_key = (_resolve_odds_api_key() or "").strip()
 default_bookmakers = os.getenv("CBB_ODDS_BOOKMAKERS", "").strip() or (_secret("cbb_odds_bookmakers") or "fanduel")
+default_season_start = season_start_for_date(date.today())
+default_props_markets = "player_points,player_rebounds,player_assists"
+default_props_event_sleep_seconds = float(os.getenv("CBB_ODDS_EVENT_SLEEP_SECONDS", "0.6"))
 
 with st.sidebar:
-    st.header("Pipeline Settings")
-    selected_date = st.date_input("Slate Date", value=prior_day())
-    optimizer_slate_date = st.date_input("DK/Optimizer Slate Date", value=selected_date)
-    props_date_preset = st.selectbox(
-        "Props Date Preset",
-        options=["Custom", "Today", "Tomorrow"],
-        index=2,
-        help="Use Today/Tomorrow for pregame props pulls without manual date entry.",
-    )
-    if props_date_preset == "Today":
-        props_selected_date = date.today()
-        st.caption(f"Props Date: {props_selected_date.isoformat()}")
-    elif props_date_preset == "Tomorrow":
-        props_selected_date = date.today() + timedelta(days=1)
-        st.caption(f"Props Date: {props_selected_date.isoformat()}")
-    else:
-        props_selected_date = st.date_input("Props Date", value=prior_day())
-    default_season_start = season_start_for_date(date.today())
-    backfill_start = st.date_input("Backfill Start", value=default_season_start)
-    backfill_end = st.date_input("Backfill End", value=prior_day())
+    st.header("Global Settings")
     bucket_name = st.text_input("GCS Bucket", value=default_bucket)
     base_url = st.text_input("NCAA API Base URL", value=default_base_url)
     gcp_project = st.text_input("GCP Project (optional)", value=default_project)
-    bookmakers_filter = st.text_input(
-        "Bookmakers Filter",
+    default_bookmakers_filter = st.text_input(
+        "Default Bookmakers Filter",
         value=default_bookmakers,
         help="Comma-separated bookmaker keys (example: fanduel). Leave blank for all.",
     )
@@ -877,35 +861,7 @@ with st.sidebar:
         "The Odds API key source: "
         + ("loaded from secrets/env" if odds_api_key else "missing (`the_odds_api_key`)")
     )
-    force_refresh = st.checkbox("Force API refresh (ignore cached raw JSON)", value=False)
-    backfill_sleep = st.number_input("Backfill Sleep Seconds", min_value=0.0, max_value=5.0, value=0.0, step=0.1)
-    stop_on_error = st.checkbox("Stop Backfill On Error", value=False)
-    props_markets = st.text_input(
-        "Props Markets",
-        value="player_points,player_rebounds,player_assists",
-        help="Comma-separated The Odds API player prop market keys.",
-    )
-    props_fetch_mode = st.selectbox(
-        "Props Fetch Mode",
-        options=["Pregame Live", "Historical Snapshot"],
-        index=0,
-        help="Use Pregame Live for today/tomorrow pulls prior to tip-off.",
-    )
-    props_import_mode = st.selectbox(
-        "Props Import Mode",
-        options=["Auto (Cache -> API)", "Cache Only", "Force API Refresh"],
-        index=0,
-        help="Choose whether props import can call API or only load from cached GCS data.",
-    )
-    props_event_sleep_seconds = st.number_input(
-        "Props Event Sleep Seconds",
-        min_value=0.0,
-        max_value=5.0,
-        value=float(os.getenv("CBB_ODDS_EVENT_SLEEP_SECONDS", "0.6")),
-        step=0.1,
-        help="Delay between event-level props requests to avoid Odds API frequency limits (429).",
-    )
-    st.caption("Run imports and backfills from the tabs below.")
+    st.caption("Configure workflow-specific settings inside each tab.")
 
 cred_json = _resolve_credential_json()
 cred_json_b64 = _resolve_credential_json_b64()
@@ -932,24 +888,121 @@ tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_li
 
 with tab_game:
     st.subheader("Game Imports")
+    game_selected_date = st.date_input("Slate Date", value=prior_day(), key="game_slate_date")
+    game_force_refresh = st.checkbox(
+        "Force API refresh (ignore cached raw JSON)",
+        value=False,
+        key="game_force_refresh",
+    )
+    game_bookmakers_filter = st.text_input(
+        "Game Odds Bookmakers",
+        value=(default_bookmakers_filter.strip() or "fanduel"),
+        key="game_bookmakers_filter",
+        help="Comma-separated bookmaker keys used by `Run Odds Import`.",
+    )
+    st.caption(
+        "`Run Game Import (Cache/API)` may call NCAA API and writes/updates GCS cache. "
+        "`Preview Cached GCS Data (Read Only)` only reads existing cache files."
+    )
     c1, c2, c3 = st.columns(3)
-    run_clicked = c1.button("Run Cache Pipeline", key="run_cache_pipeline")
+    run_clicked = c1.button("Run Game Import (Cache/API)", key="run_cache_pipeline")
     run_odds_clicked = c2.button("Run Odds Import", key="run_odds_import")
-    preview_clicked = c3.button("Load Cached Preview", key="preview_cached_data")
+    preview_clicked = c3.button("Preview Cached GCS Data (Read Only)", key="preview_cached_data")
 
 with tab_props:
     st.subheader("Prop Imports")
+    props_date_preset = st.selectbox(
+        "Props Date Preset",
+        options=["Custom", "Today", "Tomorrow"],
+        index=2,
+        key="props_date_preset",
+        help="Use Today/Tomorrow for pregame props pulls without manual date entry.",
+    )
+    if props_date_preset == "Today":
+        props_selected_date = date.today()
+        st.caption(f"Props Date: `{props_selected_date.isoformat()}`")
+    elif props_date_preset == "Tomorrow":
+        props_selected_date = date.today() + timedelta(days=1)
+        st.caption(f"Props Date: `{props_selected_date.isoformat()}`")
+    else:
+        props_selected_date = st.date_input("Props Date", value=prior_day(), key="props_custom_date")
+    props_markets = st.text_input(
+        "Props Markets",
+        value=default_props_markets,
+        key="props_markets",
+        help="Comma-separated The Odds API player prop market keys.",
+    )
+    props_bookmakers_filter = st.text_input(
+        "Props Bookmakers",
+        value=(default_bookmakers_filter.strip() or "fanduel"),
+        key="props_bookmakers_filter",
+        help="Comma-separated bookmaker keys used by props import.",
+    )
+    props_fetch_mode = st.selectbox(
+        "Props Fetch Mode",
+        options=["Pregame Live", "Historical Snapshot"],
+        index=0,
+        key="props_fetch_mode",
+        help="Use Pregame Live for today/tomorrow pulls prior to tip-off.",
+    )
+    props_import_mode = st.selectbox(
+        "Props Import Mode",
+        options=["Auto (Cache -> API)", "Cache Only", "Force API Refresh"],
+        index=0,
+        key="props_import_mode",
+        help="Choose whether props import can call API or only load from cached GCS data.",
+    )
+    props_force_refresh_auto = st.checkbox(
+        "Force API refresh in Auto mode",
+        value=False,
+        key="props_force_refresh_auto",
+        help="Used only when Props Import Mode is `Auto (Cache -> API)`.",
+    )
+    props_event_sleep_seconds = st.number_input(
+        "Props Event Sleep Seconds",
+        min_value=0.0,
+        max_value=5.0,
+        value=default_props_event_sleep_seconds,
+        step=0.1,
+        key="props_event_sleep_seconds",
+        help="Delay between event-level props requests to avoid Odds API frequency limits (429).",
+    )
     run_props_clicked = st.button("Run Props Import", key="run_props_import")
 
 with tab_backfill:
     st.subheader("Backfill Jobs")
+    bcfg1, bcfg2 = st.columns(2)
+    backfill_start = bcfg1.date_input("Backfill Start", value=default_season_start, key="backfill_start")
+    backfill_end = bcfg2.date_input("Backfill End", value=prior_day(), key="backfill_end")
+    bcfg3, bcfg4, bcfg5 = st.columns(3)
+    backfill_force_refresh = bcfg3.checkbox(
+        "Force API refresh",
+        value=False,
+        key="backfill_force_refresh",
+        help="Ignore cached raw JSON/odds files and refetch API responses.",
+    )
+    backfill_sleep = bcfg4.number_input(
+        "Sleep Seconds",
+        min_value=0.0,
+        max_value=5.0,
+        value=0.0,
+        step=0.1,
+        key="backfill_sleep_seconds",
+    )
+    stop_on_error = bcfg5.checkbox("Stop On Error", value=False, key="backfill_stop_on_error")
+    backfill_bookmakers_filter = st.text_input(
+        "Odds Backfill Bookmakers",
+        value=(default_bookmakers_filter.strip() or "fanduel"),
+        key="backfill_bookmakers_filter",
+        help="Comma-separated bookmaker keys for odds backfill.",
+    )
     c4, c5 = st.columns(2)
     run_backfill_clicked = c4.button("Run Season Backfill", key="run_season_backfill")
     run_odds_backfill_clicked = c5.button("Run Odds Season Backfill", key="run_odds_season_backfill")
 
 with tab_dk:
     st.subheader("DraftKings Slate Upload")
-    dk_slate_date = st.date_input("DraftKings Slate Date", value=selected_date, key="dk_slate_date")
+    dk_slate_date = st.date_input("DraftKings Slate Date", value=game_selected_date, key="dk_slate_date")
     uploaded_dk_slate = st.file_uploader(
         "Upload DraftKings Slate CSV",
         type=["csv"],
@@ -968,10 +1021,10 @@ with tab_game:
             with st.spinner("Running CBB cache pipeline..."):
                 try:
                     summary = run_cbb_cache_pipeline(
-                        game_date=selected_date,
+                        game_date=game_selected_date,
                         bucket_name=bucket_name,
                         ncaa_base_url=base_url,
-                        force_refresh=force_refresh,
+                        force_refresh=game_force_refresh,
                         gcp_project=gcp_project or None,
                         gcp_service_account_json=cred_json,
                         gcp_service_account_json_b64=cred_json_b64,
@@ -992,15 +1045,15 @@ with tab_game:
             with st.spinner("Importing game odds from The Odds API..."):
                 try:
                     summary = run_cbb_odds_pipeline(
-                        game_date=selected_date,
+                        game_date=game_selected_date,
                         bucket_name=bucket_name,
                         odds_api_key=odds_api_key,
-                        bookmakers=(bookmakers_filter.strip() or None),
-                        historical_mode=(selected_date < date.today()),
-                        historical_snapshot_time=f"{selected_date.isoformat()}T23:59:59Z"
-                        if selected_date < date.today()
+                        bookmakers=(game_bookmakers_filter.strip() or None),
+                        historical_mode=(game_selected_date < date.today()),
+                        historical_snapshot_time=f"{game_selected_date.isoformat()}T23:59:59Z"
+                        if game_selected_date < date.today()
                         else None,
-                        force_refresh=force_refresh,
+                        force_refresh=game_force_refresh,
                         gcp_project=gcp_project or None,
                         gcp_service_account_json=cred_json,
                         gcp_service_account_json_b64=cred_json_b64,
@@ -1036,7 +1089,7 @@ with tab_props:
                                 "props_cache_hit": False,
                                 "historical_mode": (props_fetch_mode == "Historical Snapshot"),
                                 "markets": props_markets.strip(),
-                                "bookmakers": (bookmakers_filter.strip() or None),
+                                "bookmakers": (props_bookmakers_filter.strip() or None),
                                 "bucket_name": bucket_name,
                                 "props_blob": store.props_blob_name(props_selected_date),
                                 "props_lines_blob": store.props_lines_blob_name(props_selected_date),
@@ -1052,7 +1105,7 @@ with tab_props:
                                 "props_cache_hit": True,
                                 "historical_mode": (props_fetch_mode == "Historical Snapshot"),
                                 "markets": props_markets.strip(),
-                                "bookmakers": (bookmakers_filter.strip() or None),
+                                "bookmakers": (props_bookmakers_filter.strip() or None),
                                 "bucket_name": bucket_name,
                                 "props_blob": store.props_blob_name(props_selected_date),
                                 "props_lines_blob": store.props_lines_blob_name(props_selected_date),
@@ -1067,11 +1120,11 @@ with tab_props:
                             "bucket_name": bucket_name,
                             "odds_api_key": odds_api_key,
                             "markets": props_markets.strip(),
-                            "bookmakers": (bookmakers_filter.strip() or None),
+                            "bookmakers": (props_bookmakers_filter.strip() or None),
                             "historical_mode": (props_fetch_mode == "Historical Snapshot"),
                             "historical_snapshot_time": None,
                             "inter_event_sleep_seconds": float(props_event_sleep_seconds),
-                            "force_refresh": (True if props_import_mode == "Force API Refresh" else force_refresh),
+                            "force_refresh": (True if props_import_mode == "Force API Refresh" else props_force_refresh_auto),
                             "gcp_project": gcp_project or None,
                             "gcp_service_account_json": cred_json,
                             "gcp_service_account_json_b64": cred_json_b64,
@@ -1135,7 +1188,7 @@ with tab_backfill:
                         end_date=backfill_end,
                         bucket_name=bucket_name,
                         ncaa_base_url=base_url,
-                        force_refresh=force_refresh,
+                        force_refresh=backfill_force_refresh,
                         gcp_project=gcp_project or None,
                         gcp_service_account_json=cred_json,
                         gcp_service_account_json_b64=cred_json_b64,
@@ -1165,9 +1218,9 @@ with tab_backfill:
                         end_date=backfill_end,
                         bucket_name=bucket_name,
                         odds_api_key=odds_api_key,
-                        bookmakers=(bookmakers_filter.strip() or None),
+                        bookmakers=(backfill_bookmakers_filter.strip() or None),
                         historical_mode=True,
-                        force_refresh=force_refresh,
+                        force_refresh=backfill_force_refresh,
                         gcp_project=gcp_project or None,
                         gcp_service_account_json=cred_json,
                         gcp_service_account_json_b64=cred_json_b64,
@@ -1359,9 +1412,10 @@ with tab_injuries:
 with tab_slate_vegas:
     st.subheader("Slate + Vegas Player Pool")
     st.caption("Lineup Generator uses the `blended_projection` (Projected DK Points) from this table.")
+    slate_vegas_date = st.date_input("DK/Optimizer Slate Date", value=game_selected_date, key="slate_vegas_date")
     vegas_bookmaker = st.text_input(
         "Vegas Bookmaker Source",
-        value=(bookmakers_filter.strip() or "fanduel"),
+        value=(default_bookmakers_filter.strip() or "fanduel"),
         key="slate_vegas_bookmaker",
         help="Use the same bookmaker used for odds/props imports (example: fanduel).",
     )
@@ -1380,7 +1434,7 @@ with tab_slate_vegas:
         try:
             pool_df, removed_injured_df, raw_slate_df, _, season_history_df = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
-                slate_date=optimizer_slate_date,
+                slate_date=slate_vegas_date,
                 bookmaker=(vegas_bookmaker.strip() or None),
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
@@ -1503,14 +1557,14 @@ with tab_slate_vegas:
                         store = CbbGcsStore(bucket_name=bucket_name, client=client)
                         blob_name = _write_projections_csv(
                             store,
-                            optimizer_slate_date,
+                            slate_vegas_date,
                             display_pool.to_csv(index=False),
                         )
                         st.success(f"Saved projections to `{blob_name}` (same date overwrites).")
                     st.download_button(
                         "Download Active Pool CSV",
                         data=display_pool.to_csv(index=False),
-                        file_name=f"cbb_active_pool_{optimizer_slate_date.isoformat()}.csv",
+                        file_name=f"cbb_active_pool_{slate_vegas_date.isoformat()}.csv",
                         mime="text/csv",
                         key="download_active_pool_csv",
                     )
@@ -1519,9 +1573,10 @@ with tab_slate_vegas:
 
 with tab_lineups:
     st.subheader("DK Lineup Generator")
+    lineup_slate_date = st.date_input("Lineup Slate Date", value=game_selected_date, key="lineup_slate_date")
     lineup_bookmaker = st.text_input(
         "Lineup Bookmaker Source",
-        value=(bookmakers_filter.strip() or "fanduel"),
+        value=(default_bookmakers_filter.strip() or "fanduel"),
         key="lineup_bookmaker_source",
     )
     c1, c2, c3, c4 = st.columns(4)
@@ -1619,7 +1674,7 @@ with tab_lineups:
         try:
             pool_df, removed_injured_df, raw_slate_df, _, _ = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
-                slate_date=optimizer_slate_date,
+                slate_date=lineup_slate_date,
                 bookmaker=(lineup_bookmaker.strip() or None),
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
@@ -1783,7 +1838,7 @@ with tab_lineups:
                     run_bundle = {
                         "run_id": _new_lineup_run_id(),
                         "generated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
-                        "slate_date": optimizer_slate_date.isoformat(),
+                        "slate_date": lineup_slate_date.isoformat(),
                         "run_mode": run_mode_key,
                         "settings": {
                             "selected_model_key": selected_model_key,
@@ -1811,7 +1866,7 @@ with tab_lineups:
                             project=gcp_project or None,
                         )
                         store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                        saved_meta = persist_lineup_run_bundle(store, optimizer_slate_date, run_bundle)
+                        saved_meta = persist_lineup_run_bundle(store, lineup_slate_date, run_bundle)
                         st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
                         load_saved_lineup_run_manifests.clear()
                         load_saved_lineup_version_payload.clear()
@@ -1879,7 +1934,7 @@ with tab_lineups:
                         st.download_button(
                             "Download DK Upload CSV",
                             data=upload_csv,
-                            file_name=f"dk_lineups_{optimizer_slate_date.isoformat()}_{active_version_key}.csv",
+                            file_name=f"dk_lineups_{lineup_slate_date.isoformat()}_{active_version_key}.csv",
                             mime="text/csv",
                             key="download_dk_upload_csv",
                         )
@@ -1896,7 +1951,7 @@ with tab_lineups:
 
                 saved_manifests = load_saved_lineup_run_manifests(
                     bucket_name=bucket_name,
-                    selected_date=optimizer_slate_date,
+                    selected_date=lineup_slate_date,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -1938,7 +1993,7 @@ with tab_lineups:
                             )
                             saved_payload = load_saved_lineup_version_payload(
                                 bucket_name=bucket_name,
-                                selected_date=optimizer_slate_date,
+                                selected_date=lineup_slate_date,
                                 run_id=str(selected_manifest.get("run_id") or ""),
                                 version_key=selected_saved_version,
                                 gcp_project=gcp_project or None,
@@ -1962,7 +2017,7 @@ with tab_lineups:
                                         "Download Saved DK Upload CSV",
                                         data=saved_upload_csv,
                                         file_name=(
-                                            f"dk_lineups_{optimizer_slate_date.isoformat()}_"
+                                            f"dk_lineups_{lineup_slate_date.isoformat()}_"
                                             f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
                                         ),
                                         mime="text/csv",
@@ -1973,7 +2028,7 @@ with tab_lineups:
 
 with tab_projection_review:
     st.subheader("Projection Review")
-    review_date = st.date_input("Review Date", value=optimizer_slate_date, key="projection_review_date")
+    review_date = st.date_input("Review Date", value=lineup_slate_date, key="projection_review_date")
     refresh_review_clicked = st.button("Refresh Review Data", key="refresh_projection_review")
     if refresh_review_clicked:
         load_projection_snapshot_frame.clear()
@@ -2146,7 +2201,7 @@ with tab_tournament_review:
         "Upload contest standings to analyze field construction (stacks, salary left, ownership) "
         "and compare against our lineups and projection assumptions."
     )
-    tr_date = st.date_input("Tournament Date", value=optimizer_slate_date, key="tournament_review_date")
+    tr_date = st.date_input("Tournament Date", value=lineup_slate_date, key="tournament_review_date")
     tr_contest_id = st.text_input("Contest ID", value="contest", key="tournament_review_contest_id")
     tr_upload = st.file_uploader(
         "Upload Contest Standings CSV",
@@ -2218,7 +2273,7 @@ with tab_tournament_review:
                     fallback_pool, _, _, _, _ = build_optimizer_pool_for_date(
                         bucket_name=bucket_name,
                         slate_date=tr_date,
-                        bookmaker=(bookmakers_filter.strip() or None),
+                        bookmaker=(default_bookmakers_filter.strip() or None),
                         gcp_project=gcp_project or None,
                         service_account_json=cred_json,
                         service_account_json_b64=cred_json_b64,
@@ -2605,7 +2660,7 @@ with tab_game:
         try:
             odds_df = load_odds_frame_for_date(
                 bucket_name=bucket_name,
-                selected_date=selected_date,
+                selected_date=game_selected_date,
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -2743,7 +2798,7 @@ with tab_game:
                     )
                     store = CbbGcsStore(bucket_name=bucket_name, client=client)
 
-                    raw_payload = store.read_raw_json(selected_date)
+                    raw_payload = store.read_raw_json(game_selected_date)
                     if raw_payload is None:
                         st.warning("No raw JSON cache found for this date.")
                     else:
@@ -2757,7 +2812,7 @@ with tab_game:
                             }
                         )
 
-                    players_blob = store.players_blob_name(selected_date)
+                    players_blob = store.players_blob_name(game_selected_date)
                     blob = store.bucket.blob(players_blob)
                     if not blob.exists():
                         st.warning("No player CSV cache found for this date.")
