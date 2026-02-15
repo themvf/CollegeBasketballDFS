@@ -41,6 +41,8 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_player_exposure_comparison,
+    build_projection_actual_comparison,
+    build_projection_adjustment_factors,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
     score_generated_lineups_against_actuals,
@@ -2580,6 +2582,203 @@ with tab_tournament_review:
                         ]
                         use_cols = [c for c in exp_cols if c in exposure_df.columns]
                         st.dataframe(exposure_df[use_cols], hide_index=True, use_container_width=True)
+
+                    st.subheader("Projection vs Actual (Tournament Slate)")
+                    proj_compare_df = build_projection_actual_comparison(
+                        projection_df=projections_df,
+                        actual_results_df=actual_probe_df,
+                    )
+                    if proj_compare_df.empty:
+                        st.info("Projection comparison unavailable (need both projection snapshot and final actual stats).")
+                    else:
+                        matched_rows = int(pd.to_numeric(proj_compare_df["actual_dk_points"], errors="coerce").notna().sum())
+                        blend_mae = float(pd.to_numeric(proj_compare_df["blend_error"], errors="coerce").abs().mean())
+                        our_mae = float(pd.to_numeric(proj_compare_df["our_error"], errors="coerce").abs().mean())
+                        vegas_mae = float(pd.to_numeric(proj_compare_df["vegas_error"], errors="coerce").abs().mean())
+                        mins_mae_avg = float(pd.to_numeric(proj_compare_df["minutes_error_avg"], errors="coerce").abs().mean())
+                        mins_mae_last7 = float(pd.to_numeric(proj_compare_df["minutes_error_last7"], errors="coerce").abs().mean())
+                        pm1, pm2, pm3, pm4, pm5, pm6 = st.columns(6)
+                        pm1.metric("Matched Players", matched_rows)
+                        pm2.metric("Blend MAE", f"{blend_mae:.2f}")
+                        pm3.metric("Our MAE", f"{our_mae:.2f}")
+                        pm4.metric("Vegas MAE", f"{vegas_mae:.2f}")
+                        pm5.metric("Minutes MAE (Season Avg)", f"{mins_mae_avg:.2f}")
+                        pm6.metric("Minutes MAE (Last 7)", f"{mins_mae_last7:.2f}")
+
+                        tr_role_filter = st.selectbox(
+                            "Projection Comparison Role Filter",
+                            options=ROLE_FILTER_OPTIONS,
+                            index=0,
+                            key="tournament_projection_role_filter",
+                            help="Filter projection comparison rows by DraftKings role.",
+                        )
+                        proj_compare_view = _filter_frame_by_role(
+                            proj_compare_df,
+                            selected_role=tr_role_filter,
+                            position_col="Position",
+                        )
+                        st.caption(
+                            f"Showing `{len(proj_compare_view)}` of `{len(proj_compare_df)}` players. "
+                            "Use multipliers below to tune future projection inputs."
+                        )
+                        compare_cols = [
+                            "ID",
+                            "Name + ID",
+                            "Name",
+                            "TeamAbbrev",
+                            "Position",
+                            "Salary",
+                            "blended_projection",
+                            "our_dk_projection",
+                            "vegas_dk_projection",
+                            "actual_dk_points",
+                            "blend_error",
+                            "our_error",
+                            "vegas_error",
+                            "our_minutes_avg",
+                            "our_minutes_last7",
+                            "actual_minutes",
+                            "minutes_error_avg",
+                            "minutes_error_last7",
+                            "our_multiplier",
+                            "minutes_multiplier_avg",
+                            "minutes_multiplier_last7",
+                        ]
+                        compare_use_cols = [c for c in compare_cols if c in proj_compare_view.columns]
+                        st.dataframe(proj_compare_view[compare_use_cols], hide_index=True, use_container_width=True)
+
+                        adjust_df = build_projection_adjustment_factors(proj_compare_df)
+                        st.caption(
+                            "Example usage: `adjusted_our_dk = our_dk_projection * our_points_multiplier`, "
+                            "`adjusted_minutes = our_minutes_last7 * minutes_multiplier_last7`."
+                        )
+                        st.dataframe(adjust_df, hide_index=True, use_container_width=True)
+                        recommended = {str(r.get("segment")): r for r in adjust_df.to_dict(orient="records")}
+                        rec_all = float((recommended.get("All") or {}).get("our_points_multiplier") or 1.0)
+                        rec_g = float((recommended.get("Guard (G)") or {}).get("our_points_multiplier") or rec_all or 1.0)
+                        rec_f = float((recommended.get("Forward (F)") or {}).get("our_points_multiplier") or rec_all or 1.0)
+                        rec_mins = float((recommended.get("All") or {}).get("minutes_multiplier_last7") or 1.0)
+
+                        st.caption("Adjustment Sandbox (preview only)")
+                        a1, a2, a3, a4 = st.columns(4)
+                        adj_mult_all = float(
+                            a1.number_input(
+                                "Our Pts Mult (All)",
+                                min_value=0.25,
+                                max_value=2.50,
+                                value=max(0.25, min(2.50, rec_all)),
+                                step=0.01,
+                                key="tournament_adj_mult_all",
+                            )
+                        )
+                        adj_mult_g = float(
+                            a2.number_input(
+                                "Our Pts Mult (G)",
+                                min_value=0.25,
+                                max_value=2.50,
+                                value=max(0.25, min(2.50, rec_g)),
+                                step=0.01,
+                                key="tournament_adj_mult_g",
+                            )
+                        )
+                        adj_mult_f = float(
+                            a3.number_input(
+                                "Our Pts Mult (F)",
+                                min_value=0.25,
+                                max_value=2.50,
+                                value=max(0.25, min(2.50, rec_f)),
+                                step=0.01,
+                                key="tournament_adj_mult_f",
+                            )
+                        )
+                        adj_mins_last7 = float(
+                            a4.number_input(
+                                "Minutes Mult (Last 7)",
+                                min_value=0.25,
+                                max_value=2.50,
+                                value=max(0.25, min(2.50, rec_mins)),
+                                step=0.01,
+                                key="tournament_adj_mult_minutes_last7",
+                            )
+                        )
+
+                        adjusted_df = proj_compare_df.copy()
+                        adjusted_df["our_dk_projection_adjusted"] = pd.to_numeric(
+                            adjusted_df.get("our_dk_projection"), errors="coerce"
+                        )
+                        pos_series = adjusted_df.get("Position", pd.Series(dtype=str)).astype(str).str.upper()
+                        point_mult_series = pd.Series(adj_mult_all, index=adjusted_df.index, dtype="float64")
+                        point_mult_series.loc[pos_series.str.startswith("G")] = adj_mult_g
+                        point_mult_series.loc[pos_series.str.startswith("F")] = adj_mult_f
+                        adjusted_df["our_dk_projection_adjusted"] = (
+                            adjusted_df["our_dk_projection_adjusted"] * point_mult_series
+                        )
+                        adjusted_df["our_adjusted_error"] = (
+                            pd.to_numeric(adjusted_df.get("actual_dk_points"), errors="coerce")
+                            - pd.to_numeric(adjusted_df.get("our_dk_projection_adjusted"), errors="coerce")
+                        )
+                        adjusted_df["our_minutes_adjusted_last7"] = (
+                            pd.to_numeric(adjusted_df.get("our_minutes_last7"), errors="coerce") * adj_mins_last7
+                        )
+                        adjusted_df["minutes_adjusted_error_last7"] = (
+                            pd.to_numeric(adjusted_df.get("actual_minutes"), errors="coerce")
+                            - pd.to_numeric(adjusted_df.get("our_minutes_adjusted_last7"), errors="coerce")
+                        )
+
+                        am1, am2 = st.columns(2)
+                        am1.metric(
+                            "Adjusted Our MAE",
+                            f"{float(pd.to_numeric(adjusted_df['our_adjusted_error'], errors='coerce').abs().mean()):.2f}",
+                        )
+                        am2.metric(
+                            "Adjusted Minutes MAE (Last 7)",
+                            f"{float(pd.to_numeric(adjusted_df['minutes_adjusted_error_last7'], errors='coerce').abs().mean()):.2f}",
+                        )
+                        adjusted_cols = [
+                            "ID",
+                            "Name + ID",
+                            "Name",
+                            "TeamAbbrev",
+                            "Position",
+                            "our_dk_projection",
+                            "our_dk_projection_adjusted",
+                            "actual_dk_points",
+                            "our_error",
+                            "our_adjusted_error",
+                            "our_minutes_last7",
+                            "our_minutes_adjusted_last7",
+                            "actual_minutes",
+                            "minutes_error_last7",
+                            "minutes_adjusted_error_last7",
+                        ]
+                        adjusted_use_cols = [c for c in adjusted_cols if c in adjusted_df.columns]
+                        adjusted_view = _filter_frame_by_role(
+                            adjusted_df[adjusted_use_cols],
+                            selected_role=tr_role_filter,
+                            position_col="Position",
+                        )
+                        st.dataframe(adjusted_view, hide_index=True, use_container_width=True)
+                        st.download_button(
+                            "Download Tournament Projection Comparison CSV",
+                            data=proj_compare_view.to_csv(index=False),
+                            file_name=f"tournament_projection_comparison_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                            mime="text/csv",
+                            key="download_tournament_projection_comparison_csv",
+                        )
+                        st.download_button(
+                            "Download Tournament Projection Adjustment Factors CSV",
+                            data=adjust_df.to_csv(index=False),
+                            file_name=f"tournament_projection_adjustments_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                            mime="text/csv",
+                            key="download_tournament_projection_adjustment_factors_csv",
+                        )
+                        st.download_button(
+                            "Download Tournament Adjusted Projection Preview CSV",
+                            data=adjusted_view.to_csv(index=False),
+                            file_name=f"tournament_adjusted_projection_preview_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                            mime="text/csv",
+                            key="download_tournament_adjusted_projection_preview_csv",
+                        )
 
                     st.subheader("User Strategy Summary")
                     if user_summary_df.empty:

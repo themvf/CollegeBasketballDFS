@@ -409,6 +409,226 @@ def build_player_exposure_comparison(
     return expo.drop(columns=["name_key", "name_key_loose"])
 
 
+def build_projection_actual_comparison(
+    projection_df: pd.DataFrame | None,
+    actual_results_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    if projection_df is None or projection_df.empty:
+        return pd.DataFrame()
+    if actual_results_df is None or actual_results_df.empty:
+        return pd.DataFrame()
+
+    proj = projection_df.copy()
+    actual = actual_results_df.copy()
+
+    for col in ["ID", "Name", "TeamAbbrev", "Position"]:
+        if col not in proj.columns:
+            proj[col] = ""
+    for col in ["ID", "Name"]:
+        if col not in actual.columns:
+            actual[col] = ""
+    if "actual_dk_points" not in actual.columns:
+        actual["actual_dk_points"] = pd.NA
+    if "actual_minutes" not in actual.columns:
+        actual["actual_minutes"] = pd.NA
+
+    proj["ID"] = proj["ID"].astype(str).str.strip()
+    proj["Name"] = proj["Name"].astype(str).str.strip()
+    proj["TeamAbbrev"] = proj["TeamAbbrev"].astype(str).str.strip().str.upper()
+    proj["Position"] = proj["Position"].astype(str).str.strip().str.upper()
+    proj["name_key"] = proj["Name"].map(_norm)
+    proj["name_key_loose"] = proj["Name"].map(_norm_loose)
+
+    actual["ID"] = actual["ID"].astype(str).str.strip()
+    actual["Name"] = actual["Name"].astype(str).str.strip()
+    actual["actual_dk_points"] = pd.to_numeric(actual["actual_dk_points"], errors="coerce")
+    actual["actual_minutes"] = pd.to_numeric(actual["actual_minutes"], errors="coerce")
+    actual["name_key"] = actual["Name"].map(_norm)
+    actual["name_key_loose"] = actual["Name"].map(_norm_loose)
+
+    by_id_points = (
+        actual.loc[actual["ID"] != ""]
+        .groupby("ID", as_index=False)["actual_dk_points"]
+        .mean(numeric_only=True)
+        .set_index("ID")["actual_dk_points"]
+        .to_dict()
+    )
+    by_id_minutes = (
+        actual.loc[actual["ID"] != ""]
+        .groupby("ID", as_index=False)["actual_minutes"]
+        .mean(numeric_only=True)
+        .set_index("ID")["actual_minutes"]
+        .to_dict()
+    )
+    by_name_points = (
+        actual.loc[actual["name_key"] != ""]
+        .groupby("name_key", as_index=False)["actual_dk_points"]
+        .mean(numeric_only=True)
+        .set_index("name_key")["actual_dk_points"]
+        .to_dict()
+    )
+    by_name_minutes = (
+        actual.loc[actual["name_key"] != ""]
+        .groupby("name_key", as_index=False)["actual_minutes"]
+        .mean(numeric_only=True)
+        .set_index("name_key")["actual_minutes"]
+        .to_dict()
+    )
+    by_name_loose_points = (
+        actual.loc[actual["name_key_loose"] != ""]
+        .groupby("name_key_loose", as_index=False)["actual_dk_points"]
+        .mean(numeric_only=True)
+        .set_index("name_key_loose")["actual_dk_points"]
+        .to_dict()
+    )
+    by_name_loose_minutes = (
+        actual.loc[actual["name_key_loose"] != ""]
+        .groupby("name_key_loose", as_index=False)["actual_minutes"]
+        .mean(numeric_only=True)
+        .set_index("name_key_loose")["actual_minutes"]
+        .to_dict()
+    )
+
+    proj["actual_dk_points"] = proj["ID"].map(by_id_points)
+    proj["actual_minutes"] = proj["ID"].map(by_id_minutes)
+
+    missing_points = proj["actual_dk_points"].isna()
+    proj.loc[missing_points, "actual_dk_points"] = proj.loc[missing_points, "name_key"].map(by_name_points)
+    missing_points = proj["actual_dk_points"].isna()
+    proj.loc[missing_points, "actual_dk_points"] = proj.loc[missing_points, "name_key_loose"].map(by_name_loose_points)
+
+    missing_minutes = proj["actual_minutes"].isna()
+    proj.loc[missing_minutes, "actual_minutes"] = proj.loc[missing_minutes, "name_key"].map(by_name_minutes)
+    missing_minutes = proj["actual_minutes"].isna()
+    proj.loc[missing_minutes, "actual_minutes"] = proj.loc[missing_minutes, "name_key_loose"].map(by_name_loose_minutes)
+
+    for col in [
+        "Salary",
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "our_minutes_avg",
+        "our_minutes_last7",
+        "actual_dk_points",
+        "actual_minutes",
+    ]:
+        if col in proj.columns:
+            proj[col] = pd.to_numeric(proj[col], errors="coerce")
+        else:
+            proj[col] = pd.NA
+
+    proj["blend_error"] = proj["actual_dk_points"] - proj["blended_projection"]
+    proj["our_error"] = proj["actual_dk_points"] - proj["our_dk_projection"]
+    proj["vegas_error"] = proj["actual_dk_points"] - proj["vegas_dk_projection"]
+    proj["minutes_error_avg"] = proj["actual_minutes"] - proj["our_minutes_avg"]
+    proj["minutes_error_last7"] = proj["actual_minutes"] - proj["our_minutes_last7"]
+    proj["our_multiplier"] = proj["actual_dk_points"] / proj["our_dk_projection"].replace(0, pd.NA)
+    proj["minutes_multiplier_avg"] = proj["actual_minutes"] / proj["our_minutes_avg"].replace(0, pd.NA)
+    proj["minutes_multiplier_last7"] = proj["actual_minutes"] / proj["our_minutes_last7"].replace(0, pd.NA)
+
+    show_cols = [
+        "ID",
+        "Name + ID",
+        "Name",
+        "TeamAbbrev",
+        "Position",
+        "Salary",
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "actual_dk_points",
+        "blend_error",
+        "our_error",
+        "vegas_error",
+        "our_minutes_avg",
+        "our_minutes_last7",
+        "actual_minutes",
+        "minutes_error_avg",
+        "minutes_error_last7",
+        "our_multiplier",
+        "minutes_multiplier_avg",
+        "minutes_multiplier_last7",
+    ]
+    keep_cols = [c for c in show_cols if c in proj.columns]
+    out = proj[keep_cols].copy()
+    sort_cols = [c for c in ["actual_dk_points", "blended_projection"] if c in out.columns]
+    if sort_cols:
+        out = out.sort_values(sort_cols, ascending=False)
+    return out.reset_index(drop=True)
+
+
+def build_projection_adjustment_factors(comparison_df: pd.DataFrame) -> pd.DataFrame:
+    if comparison_df is None or comparison_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "segment",
+                "samples",
+                "our_points_multiplier",
+                "blended_points_multiplier",
+                "minutes_multiplier_avg",
+                "minutes_multiplier_last7",
+                "our_mae",
+                "blend_mae",
+                "minutes_mae_avg",
+                "minutes_mae_last7",
+            ]
+        )
+
+    def _segment_frame(df: pd.DataFrame, label: str, mask: pd.Series | None = None) -> dict[str, Any]:
+        seg = df.loc[mask].copy() if mask is not None else df.copy()
+        seg = seg.loc[pd.to_numeric(seg.get("actual_dk_points"), errors="coerce").notna()]
+        if seg.empty:
+            return {
+                "segment": label,
+                "samples": 0,
+                "our_points_multiplier": 0.0,
+                "blended_points_multiplier": 0.0,
+                "minutes_multiplier_avg": 0.0,
+                "minutes_multiplier_last7": 0.0,
+                "our_mae": 0.0,
+                "blend_mae": 0.0,
+                "minutes_mae_avg": 0.0,
+                "minutes_mae_last7": 0.0,
+            }
+
+        actual_pts = pd.to_numeric(seg["actual_dk_points"], errors="coerce")
+        our_pts = pd.to_numeric(seg.get("our_dk_projection"), errors="coerce")
+        blend_pts = pd.to_numeric(seg.get("blended_projection"), errors="coerce")
+        actual_min = pd.to_numeric(seg.get("actual_minutes"), errors="coerce")
+        our_min_avg = pd.to_numeric(seg.get("our_minutes_avg"), errors="coerce")
+        our_min_last7 = pd.to_numeric(seg.get("our_minutes_last7"), errors="coerce")
+
+        def _ratio(num: pd.Series, den: pd.Series) -> float:
+            den_mean = float(den.mean()) if den.notna().any() else 0.0
+            num_mean = float(num.mean()) if num.notna().any() else 0.0
+            if den_mean == 0.0:
+                return 0.0
+            return num_mean / den_mean
+
+        return {
+            "segment": label,
+            "samples": int(len(seg)),
+            "our_points_multiplier": _ratio(actual_pts, our_pts),
+            "blended_points_multiplier": _ratio(actual_pts, blend_pts),
+            "minutes_multiplier_avg": _ratio(actual_min, our_min_avg),
+            "minutes_multiplier_last7": _ratio(actual_min, our_min_last7),
+            "our_mae": float((actual_pts - our_pts).abs().mean()) if our_pts.notna().any() else 0.0,
+            "blend_mae": float((actual_pts - blend_pts).abs().mean()) if blend_pts.notna().any() else 0.0,
+            "minutes_mae_avg": float((actual_min - our_min_avg).abs().mean()) if our_min_avg.notna().any() else 0.0,
+            "minutes_mae_last7": (
+                float((actual_min - our_min_last7).abs().mean()) if our_min_last7.notna().any() else 0.0
+            ),
+        }
+
+    pos = comparison_df.get("Position", pd.Series(dtype=str)).astype(str).str.upper()
+    rows = [
+        _segment_frame(comparison_df, "All"),
+        _segment_frame(comparison_df, "Guard (G)", pos.str.startswith("G")),
+        _segment_frame(comparison_df, "Forward (F)", pos.str.startswith("F")),
+    ]
+    return pd.DataFrame(rows)
+
+
 def build_user_strategy_summary(entry_summary_df: pd.DataFrame) -> pd.DataFrame:
     if entry_summary_df is None or entry_summary_df.empty:
         return pd.DataFrame()
