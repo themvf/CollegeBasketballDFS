@@ -2333,8 +2333,11 @@ with tab_tournament_review:
                             c4.metric("Our Avg Max Game Stack", f"{float(our_df['max_game_stack'].mean()):.2f}")
 
                     st.subheader("Field Lineup Construction")
+                    st.caption("`Rank` is recomputed from contest `Points`; file rank is kept in `rank_from_file`.")
                     show_entry_cols = [
                         "Rank",
+                        "rank_from_file",
+                        "rank_from_points",
                         "EntryId",
                         "EntryName",
                         "Points",

@@ -49,7 +49,19 @@ def parse_lineup_players(lineup_text: str) -> list[dict[str, str]]:
 
 def normalize_contest_standings_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
-        return pd.DataFrame(columns=["Rank", "EntryId", "EntryName", "Points", "Lineup", "Player", "%Drafted"])
+        return pd.DataFrame(
+            columns=[
+                "Rank",
+                "rank_from_file",
+                "rank_from_points",
+                "EntryId",
+                "EntryName",
+                "Points",
+                "Lineup",
+                "Player",
+                "%Drafted",
+            ]
+        )
 
     out = df.copy()
     unnamed = [c for c in out.columns if str(c).strip().lower().startswith("unnamed")]
@@ -78,8 +90,17 @@ def normalize_contest_standings_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     out["EntryName"] = out["EntryName"].astype(str).str.strip()
     out["Lineup"] = out["Lineup"].astype(str).str.strip()
     out["Player"] = out["Player"].astype(str).str.strip()
-    out["Points"] = pd.to_numeric(out["Points"], errors="coerce")
-    out["Rank"] = pd.to_numeric(out["Rank"], errors="coerce")
+    points_num = pd.to_numeric(out["Points"], errors="coerce")
+    rank_file = pd.to_numeric(out["Rank"], errors="coerce")
+    if points_num.notna().any():
+        rank_points = points_num.rank(method="min", ascending=False)
+        out["Rank"] = rank_points
+        out["rank_from_points"] = rank_points
+    else:
+        out["Rank"] = rank_file
+        out["rank_from_points"] = pd.NA
+    out["rank_from_file"] = rank_file
+    out["Points"] = points_num
     out["%Drafted"] = out["%Drafted"].map(_to_float)
     return out
 

@@ -6,6 +6,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_player_exposure_comparison,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
+    normalize_contest_standings_frame,
     parse_lineup_players,
     score_generated_lineups_against_actuals,
     summarize_phantom_entries,
@@ -59,6 +60,37 @@ def test_parse_lineup_players_parses_eight_slots() -> None:
     assert len(parsed) == 8
     assert parsed[0]["slot"] == "F"
     assert parsed[-1]["slot"] == "UTIL"
+
+
+def test_normalize_contest_standings_imputes_rank_from_points() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "Rank": 99,
+                "EntryId": "a",
+                "EntryName": "A",
+                "Points": 180.0,
+                "Lineup": "F Alpha One",
+                "Player": "Alpha One",
+                "%Drafted": "10%",
+            },
+            {
+                "Rank": 1,
+                "EntryId": "b",
+                "EntryName": "B",
+                "Points": 210.0,
+                "Lineup": "F Bravo Two",
+                "Player": "Bravo Two",
+                "%Drafted": "20%",
+            },
+        ]
+    )
+    out = normalize_contest_standings_frame(raw)
+    by_entry = out.set_index("EntryId")
+    assert float(by_entry.loc["b", "Rank"]) == 1.0
+    assert float(by_entry.loc["a", "Rank"]) == 2.0
+    assert float(by_entry.loc["a", "rank_from_file"]) == 99.0
+    assert float(by_entry.loc["a", "rank_from_points"]) == 2.0
 
 
 def test_build_field_entries_and_players_builds_salary_left() -> None:
