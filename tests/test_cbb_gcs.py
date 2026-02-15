@@ -150,6 +150,16 @@ def test_list_lineup_run_ids() -> None:
     assert run_ids == ["run_b", "run_a"]
 
 
+def test_list_lineup_run_dates() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    store.write_lineup_run_manifest_json(date(2026, 2, 14), "run_a", {"run_id": "run_a"})
+    store.write_lineup_run_manifest_json(date(2026, 2, 16), "run_b", {"run_id": "run_b"})
+    store.write_lineup_run_manifest_json(date(2026, 2, 15), "run_c", {"run_id": "run_c"})
+
+    dates = store.list_lineup_run_dates()
+    assert dates == [date(2026, 2, 16), date(2026, 2, 15), date(2026, 2, 14)]
+
+
 def test_phantom_review_blob_names_and_rw() -> None:
     store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
     d = date(2026, 2, 14)

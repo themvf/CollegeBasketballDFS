@@ -326,6 +326,22 @@ def load_saved_lineup_run_manifests(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def load_saved_lineup_run_dates(
+    bucket_name: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> list[date]:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    return store.list_lineup_run_dates()
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def load_saved_lineup_version_payload(
     bucket_name: str,
     selected_date: date,
@@ -1985,91 +2001,179 @@ with tab_lineups:
 
                 st.markdown("---")
                 st.subheader("Saved Lineup Runs (GCS)")
-                rr1, rr2 = st.columns(2)
+                rr1, rr2, rr3 = st.columns(3)
                 refresh_saved_runs_clicked = rr1.button("Refresh Saved Runs", key="refresh_saved_runs")
                 auto_save_runs_to_gcs = rr2.checkbox(
                     "Auto-save generated lineup runs to GCS",
                     key="auto_save_runs_to_gcs",
                     help="Saves manifest + per-version lineup JSON/CSV + DK upload CSV.",
                 )
+                save_current_run_clicked = rr3.button("Save Current Run to GCS", key="save_current_run_to_gcs")
                 if refresh_saved_runs_clicked:
+                    load_saved_lineup_run_dates.clear()
                     load_saved_lineup_run_manifests.clear()
                     load_saved_lineup_version_payload.clear()
+                if save_current_run_clicked:
+                    current_run_bundle = st.session_state.get("cbb_generated_run_bundle") or {}
+                    current_versions = current_run_bundle.get("versions") or {}
+                    if not current_versions:
+                        st.error("No generated run is loaded in session to save.")
+                    else:
+                        save_date = lineup_slate_date
+                        bundle_slate = str(current_run_bundle.get("slate_date") or "").strip()
+                        if bundle_slate:
+                            try:
+                                save_date = date.fromisoformat(bundle_slate)
+                            except ValueError:
+                                save_date = lineup_slate_date
+                        client = build_storage_client(
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                            project=gcp_project or None,
+                        )
+                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                        saved_meta = persist_lineup_run_bundle(store, save_date, current_run_bundle)
+                        st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
+                        load_saved_lineup_run_dates.clear()
+                        load_saved_lineup_run_manifests.clear()
+                        load_saved_lineup_version_payload.clear()
+                        st.success(
+                            f"Saved current run `{saved_meta.get('run_id')}` "
+                            f"to `{saved_meta.get('manifest_blob')}`."
+                        )
 
-                saved_manifests = load_saved_lineup_run_manifests(
+                saved_run_dates = load_saved_lineup_run_dates(
                     bucket_name=bucket_name,
-                    selected_date=lineup_slate_date,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
                 )
-                if not saved_manifests:
-                    st.info("No saved lineup runs found for this slate date yet.")
+                if not saved_run_dates:
+                    st.info("No saved lineup runs found in GCS yet.")
                 else:
-                    run_option_map: dict[str, dict[str, Any]] = {}
-                    run_options: list[str] = []
-                    for manifest in saved_manifests:
-                        run_id = str(manifest.get("run_id") or "")
-                        generated_at = str(manifest.get("generated_at_utc") or "")
-                        run_mode = str(manifest.get("run_mode") or "single")
-                        label = f"{generated_at} | {run_id} | {run_mode}"
-                        run_options.append(label)
-                        run_option_map[label] = manifest
-
-                    selected_run_label = st.selectbox(
-                        "Saved Run",
-                        options=run_options,
-                        index=0,
-                        key="saved_run_picker",
+                    date_options = ["All Dates"] + [d.isoformat() for d in saved_run_dates]
+                    default_date_label = lineup_slate_date.isoformat()
+                    if default_date_label not in date_options:
+                        default_date_label = date_options[0]
+                    selected_saved_date_label = st.selectbox(
+                        "Saved Run Date",
+                        options=date_options,
+                        index=date_options.index(default_date_label),
+                        key="saved_run_date_picker",
                     )
-                    selected_manifest = run_option_map[selected_run_label]
-                    versions_meta = selected_manifest.get("versions") or []
-                    if versions_meta:
-                        version_meta_map = {str(v.get("version_key") or ""): v for v in versions_meta}
-                        saved_version_keys = [k for k in version_meta_map.keys() if k]
-                        if saved_version_keys:
-                            selected_saved_version = st.selectbox(
-                                "Saved Version",
-                                options=saved_version_keys,
-                                index=0,
-                                format_func=lambda k: (
-                                    f"{version_meta_map[k].get('version_label', k)} "
-                                    f"[{k} | {'tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'}]"
-                                ),
-                                key="saved_run_version_picker",
+                    sr1, sr2 = st.columns([1, 2])
+                    load_latest_clicked = sr1.button("Load Latest Run", key="load_latest_saved_run")
+                    run_id_filter = sr2.text_input("Filter Run ID (optional)", key="saved_run_id_filter")
+
+                    selected_dates: list[date]
+                    if selected_saved_date_label == "All Dates":
+                        selected_dates = saved_run_dates
+                    else:
+                        selected_dates = [date.fromisoformat(selected_saved_date_label)]
+
+                    merged_manifests: list[dict[str, Any]] = []
+                    for selected_saved_date in selected_dates:
+                        manifests_for_date = load_saved_lineup_run_manifests(
+                            bucket_name=bucket_name,
+                            selected_date=selected_saved_date,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        for manifest in manifests_for_date:
+                            entry = dict(manifest)
+                            entry["_saved_date"] = selected_saved_date
+                            merged_manifests.append(entry)
+                    merged_manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
+
+                    if run_id_filter.strip():
+                        needle = run_id_filter.strip().lower()
+                        merged_manifests = [
+                            m for m in merged_manifests if needle in str(m.get("run_id") or "").strip().lower()
+                        ]
+
+                    if not merged_manifests:
+                        st.info("No saved runs match the selected date/filter.")
+                    else:
+                        run_option_map: dict[str, dict[str, Any]] = {}
+                        run_options: list[str] = []
+                        for manifest in merged_manifests:
+                            run_id = str(manifest.get("run_id") or "")
+                            generated_at = str(manifest.get("generated_at_utc") or "")
+                            run_mode = str(manifest.get("run_mode") or "single")
+                            saved_date_obj = manifest.get("_saved_date")
+                            saved_date_str = (
+                                saved_date_obj.isoformat() if isinstance(saved_date_obj, date) else str(saved_date_obj or "")
                             )
-                            saved_payload = load_saved_lineup_version_payload(
-                                bucket_name=bucket_name,
-                                selected_date=lineup_slate_date,
-                                run_id=str(selected_manifest.get("run_id") or ""),
-                                version_key=selected_saved_version,
-                                gcp_project=gcp_project or None,
-                                service_account_json=cred_json,
-                                service_account_json_b64=cred_json_b64,
-                            )
-                            if isinstance(saved_payload, dict):
-                                saved_lineups = saved_payload.get("lineups") or []
-                                saved_warnings = [str(x) for x in (saved_payload.get("warnings") or [])]
-                                if saved_warnings:
-                                    for msg in saved_warnings:
-                                        st.warning(f"[Saved] {msg}")
-                                if saved_lineups:
-                                    saved_summary_df = lineups_summary_frame(saved_lineups)
-                                    st.dataframe(saved_summary_df, hide_index=True, use_container_width=True)
-                                    saved_slots_df = lineups_slots_frame(saved_lineups)
-                                    if not saved_slots_df.empty:
-                                        st.dataframe(saved_slots_df, hide_index=True, use_container_width=True)
-                                    saved_upload_csv = str(saved_payload.get("dk_upload_csv") or build_dk_upload_csv(saved_lineups))
-                                    st.download_button(
-                                        "Download Saved DK Upload CSV",
-                                        data=saved_upload_csv,
-                                        file_name=(
-                                            f"dk_lineups_{lineup_slate_date.isoformat()}_"
-                                            f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
-                                        ),
-                                        mime="text/csv",
-                                        key=f"download_saved_dk_upload_csv_{selected_saved_version}",
-                                    )
+                            label = f"{saved_date_str} | {generated_at} | {run_id} | {run_mode}"
+                            run_options.append(label)
+                            run_option_map[label] = manifest
+
+                        if load_latest_clicked and run_options:
+                            st.session_state["saved_run_picker"] = run_options[0]
+                        if str(st.session_state.get("saved_run_picker", "")) not in run_options:
+                            st.session_state.pop("saved_run_picker", None)
+
+                        selected_run_label = st.selectbox(
+                            "Saved Run",
+                            options=run_options,
+                            index=0,
+                            key="saved_run_picker",
+                        )
+                        selected_manifest = run_option_map[selected_run_label]
+                        selected_manifest_date = selected_manifest.get("_saved_date")
+                        if not isinstance(selected_manifest_date, date):
+                            selected_manifest_date = lineup_slate_date
+
+                        versions_meta = selected_manifest.get("versions") or []
+                        if versions_meta:
+                            version_meta_map = {str(v.get("version_key") or ""): v for v in versions_meta}
+                            saved_version_keys = [k for k in version_meta_map.keys() if k]
+                            if saved_version_keys:
+                                if str(st.session_state.get("saved_run_version_picker", "")) not in saved_version_keys:
+                                    st.session_state.pop("saved_run_version_picker", None)
+                                selected_saved_version = st.selectbox(
+                                    "Saved Version",
+                                    options=saved_version_keys,
+                                    index=0,
+                                    format_func=lambda k: (
+                                        f"{version_meta_map[k].get('version_label', k)} "
+                                        f"[{k} | {'tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'}]"
+                                    ),
+                                    key="saved_run_version_picker",
+                                )
+                                saved_payload = load_saved_lineup_version_payload(
+                                    bucket_name=bucket_name,
+                                    selected_date=selected_manifest_date,
+                                    run_id=str(selected_manifest.get("run_id") or ""),
+                                    version_key=selected_saved_version,
+                                    gcp_project=gcp_project or None,
+                                    service_account_json=cred_json,
+                                    service_account_json_b64=cred_json_b64,
+                                )
+                                if isinstance(saved_payload, dict):
+                                    saved_lineups = saved_payload.get("lineups") or []
+                                    saved_warnings = [str(x) for x in (saved_payload.get("warnings") or [])]
+                                    if saved_warnings:
+                                        for msg in saved_warnings:
+                                            st.warning(f"[Saved] {msg}")
+                                    if saved_lineups:
+                                        saved_summary_df = lineups_summary_frame(saved_lineups)
+                                        st.dataframe(saved_summary_df, hide_index=True, use_container_width=True)
+                                        saved_slots_df = lineups_slots_frame(saved_lineups)
+                                        if not saved_slots_df.empty:
+                                            st.dataframe(saved_slots_df, hide_index=True, use_container_width=True)
+                                        saved_upload_csv = str(saved_payload.get("dk_upload_csv") or build_dk_upload_csv(saved_lineups))
+                                        st.download_button(
+                                            "Download Saved DK Upload CSV",
+                                            data=saved_upload_csv,
+                                            file_name=(
+                                                f"dk_lineups_{selected_manifest_date.isoformat()}_"
+                                                f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
+                                            ),
+                                            mime="text/csv",
+                                            key=f"download_saved_dk_upload_csv_{selected_saved_version}",
+                                        )
         except Exception as exc:
             st.exception(exc)
 

@@ -364,6 +364,24 @@ class CbbGcsStore:
         out = sorted(run_ids, reverse=True)
         return out
 
+    def list_lineup_run_dates(self) -> list[date]:
+        prefix = f"{self.lineup_runs_prefix}/"
+        blobs = self.bucket.list_blobs(prefix=prefix)
+        dates_found: set[date] = set()
+        for blob in blobs:
+            suffix = str(blob.name or "")[len(prefix) :]
+            if not suffix:
+                continue
+            date_part = suffix.split("/", 1)[0].strip()
+            if not date_part:
+                continue
+            try:
+                parsed = date.fromisoformat(date_part)
+            except ValueError:
+                continue
+            dates_found.add(parsed)
+        return sorted(dates_found, reverse=True)
+
     def read_phantom_review_csv(self, game_date: date, run_id: str, version_key: str) -> str | None:
         blob = self.bucket.blob(self.phantom_review_csv_blob_name(game_date, run_id, version_key))
         if not blob.exists():
