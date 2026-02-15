@@ -74,6 +74,24 @@ def _resolve_odds_api_key() -> str | None:
     return os.getenv("THE_ODDS_API_KEY") or _secret("the_odds_api_key")
 
 
+ROLE_FILTER_OPTIONS = ["All", "Guard (G)", "Forward (F)"]
+
+
+def _filter_frame_by_role(
+    df: pd.DataFrame,
+    selected_role: str,
+    position_col: str = "Position",
+) -> pd.DataFrame:
+    if df.empty or position_col not in df.columns:
+        return df
+    pos = df[position_col].astype(str).str.strip().str.upper()
+    if selected_role == "Guard (G)":
+        return df.loc[pos.str.startswith("G")].copy()
+    if selected_role == "Forward (F)":
+        return df.loc[pos.str.startswith("F")].copy()
+    return df
+
+
 def _dk_slate_blob_name(slate_date: date) -> str:
     return f"cbb/dk_slates/{slate_date.isoformat()}_dk_slate.csv"
 
@@ -1607,7 +1625,20 @@ with tab_slate_vegas:
                     for col in numeric_cols:
                         if col in display_pool.columns:
                             display_pool[col] = pd.to_numeric(display_pool[col], errors="coerce")
-                    st.dataframe(display_pool, hide_index=True, use_container_width=True)
+                    slate_role_filter = st.selectbox(
+                        "Role Filter",
+                        options=ROLE_FILTER_OPTIONS,
+                        index=0,
+                        key="slate_vegas_role_filter",
+                        help="Filter the table by DraftKings role.",
+                    )
+                    display_pool_view = _filter_frame_by_role(
+                        display_pool,
+                        selected_role=slate_role_filter,
+                        position_col="Position",
+                    )
+                    st.caption(f"Showing `{len(display_pool_view)}` of `{len(display_pool)}` players.")
+                    st.dataframe(display_pool_view, hide_index=True, use_container_width=True)
                     save_proj_clicked = st.button("Save Projections Snapshot to GCS", key="save_proj_snapshot")
                     if save_proj_clicked:
                         client = build_storage_client(
@@ -2313,6 +2344,7 @@ with tab_projection_review:
                     "Name + ID",
                     "Name",
                     "TeamAbbrev",
+                    "Position",
                     "Salary",
                     "blended_projection",
                     "our_dk_projection",
@@ -2335,10 +2367,23 @@ with tab_projection_review:
                 sort_cols = [c for c in ["actual_dk_points", "blended_projection"] if c in show_cols]
                 if sort_cols:
                     view_df = view_df.sort_values(by=sort_cols, ascending=False)
-                st.dataframe(view_df, hide_index=True, use_container_width=True)
+                review_role_filter = st.selectbox(
+                    "Role Filter",
+                    options=ROLE_FILTER_OPTIONS,
+                    index=0,
+                    key="projection_review_role_filter",
+                    help="Filter the table by DraftKings role.",
+                )
+                view_df_filtered = _filter_frame_by_role(
+                    view_df,
+                    selected_role=review_role_filter,
+                    position_col="Position",
+                )
+                st.caption(f"Showing `{len(view_df_filtered)}` of `{len(view_df)}` rows.")
+                st.dataframe(view_df_filtered, hide_index=True, use_container_width=True)
                 st.download_button(
                     "Download Projection Review CSV",
-                    data=view_df.to_csv(index=False),
+                    data=view_df_filtered.to_csv(index=False),
                     file_name=f"projection_review_{review_date.isoformat()}.csv",
                     mime="text/csv",
                     key="download_projection_review_csv",
