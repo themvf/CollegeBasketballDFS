@@ -47,6 +47,13 @@ def _safe_int(value: Any) -> int | None:
     return int(as_float)
 
 
+def _safe_num(value: Any, default: float = 0.0) -> float:
+    num = _safe_float(value)
+    if num is None or math.isnan(num):
+        return float(default)
+    return float(num)
+
+
 def _position_base(value: Any) -> str:
     raw = str(value or "").strip().upper()
     if not raw:
@@ -587,6 +594,163 @@ def _stack_bonus_from_counts(game_counts: Counter[str]) -> float:
     return float(sum(max(0, n - 1) for n in game_counts.values()))
 
 
+def _salary_texture_bucket(salary_left: int) -> str:
+    left = max(0, int(salary_left))
+    if left <= 100:
+        return "0-100"
+    if left <= 300:
+        return "101-300"
+    if left <= 500:
+        return "301-500"
+    if left <= 900:
+        return "501-900"
+    return "901+"
+
+
+def _lineup_stack_signature(players: list[dict[str, Any]]) -> str:
+    counts = _lineup_game_counts(players)
+    if not counts:
+        return "no_game_key"
+    ordered = sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))
+    return "|".join(f"{game}:{count}" for game, count in ordered)
+
+
+def _cluster_mutation_type(variant_idx: int) -> str:
+    if variant_idx <= 0:
+        return "seed"
+    mutations = [
+        "same_role_swap",
+        "bring_back_rotation",
+        "stack_size_shift",
+        "chalk_pivot",
+        "value_risk_swap",
+        "salary_texture_shift",
+    ]
+    return mutations[(variant_idx - 1) % len(mutations)]
+
+
+def _build_cluster_specs(
+    players: list[dict[str, Any]],
+    num_lineups: int,
+    target_clusters: int = 15,
+    variants_per_cluster: int = 10,
+) -> list[dict[str, Any]]:
+    if num_lineups <= 0:
+        return []
+
+    game_rows: dict[str, dict[str, list[float]]] = {}
+    for p in players:
+        game_key = str(p.get("game_key") or "").strip().upper()
+        if not game_key:
+            continue
+        bucket = game_rows.setdefault(
+            game_key,
+            {
+                "projected": [],
+                "ownership": [],
+                "tail": [],
+                "total": [],
+                "spread_abs": [],
+            },
+        )
+        bucket["projected"].append(_safe_num(p.get("projected_dk_points")))
+        bucket["ownership"].append(_safe_num(p.get("projected_ownership")))
+        bucket["tail"].append(_safe_num(p.get("game_tail_score")))
+        total_line = _safe_float(p.get("game_total_line"))
+        spread_line = _safe_float(p.get("game_spread_line"))
+        if total_line is not None and not math.isnan(total_line):
+            bucket["total"].append(float(total_line))
+        if spread_line is not None and not math.isnan(spread_line):
+            bucket["spread_abs"].append(abs(float(spread_line)))
+
+    if not game_rows:
+        return [
+            {
+                "cluster_id": "C01",
+                "cluster_script": "balanced",
+                "anchor_game_key": "",
+                "target_lineups": num_lineups,
+            }
+        ]
+
+    metric_rows: list[dict[str, Any]] = []
+    for game_key, values in game_rows.items():
+        projected = values["projected"] or [0.0]
+        ownership = values["ownership"] or [0.0]
+        tail = values["tail"] or [0.0]
+        totals = values["total"]
+        spreads = values["spread_abs"]
+        metric_rows.append(
+            {
+                "game_key": game_key,
+                "projected_mean": float(sum(projected) / len(projected)),
+                "ownership_mean": float(sum(ownership) / len(ownership)),
+                "tail_mean": float(sum(tail) / len(tail)),
+                "total_mean": float(sum(totals) / len(totals)) if totals else 0.0,
+                "spread_abs_mean": float(sum(spreads) / len(spreads)) if spreads else 999.0,
+            }
+        )
+
+    metrics = pd.DataFrame(metric_rows)
+    metrics["leverage_score"] = metrics["tail_mean"] - (0.35 * metrics["ownership_mean"])
+    metrics["contrarian_score"] = metrics["projected_mean"] - (0.5 * metrics["ownership_mean"])
+
+    unique_games = int(len(metrics))
+    desired_clusters = max(1, int(math.ceil(float(num_lineups) / max(1, int(variants_per_cluster)))))
+    cluster_count = max(1, min(int(target_clusters), unique_games, int(num_lineups), desired_clusters))
+
+    pools: dict[str, list[str]] = {
+        "high_total": (
+            metrics.sort_values(["total_mean", "projected_mean"], ascending=[False, False])["game_key"].tolist()
+        ),
+        "tight_spread": (
+            metrics.sort_values(["spread_abs_mean", "total_mean"], ascending=[True, False])["game_key"].tolist()
+        ),
+        "tail_leverage": (
+            metrics.sort_values(["leverage_score", "tail_mean"], ascending=[False, False])["game_key"].tolist()
+        ),
+        "contrarian": (
+            metrics.sort_values(["ownership_mean", "contrarian_score"], ascending=[True, False])["game_key"].tolist()
+        ),
+        "balanced": (
+            metrics.sort_values(["projected_mean", "tail_mean"], ascending=[False, False])["game_key"].tolist()
+        ),
+    }
+    script_cycle = ["high_total", "tight_spread", "tail_leverage", "contrarian", "balanced"]
+    used_games: set[str] = set()
+    specs: list[dict[str, Any]] = []
+
+    for idx in range(cluster_count):
+        script = script_cycle[idx % len(script_cycle)]
+        pool = pools.get(script) or []
+        anchor = ""
+        for game_key in pool:
+            if game_key not in used_games:
+                anchor = game_key
+                break
+        if not anchor:
+            if pool:
+                anchor = pool[idx % len(pool)]
+            else:
+                fallback = metrics["game_key"].tolist()
+                anchor = fallback[idx % len(fallback)] if fallback else ""
+        if anchor:
+            used_games.add(anchor)
+        specs.append(
+            {
+                "cluster_id": f"C{idx + 1:02d}",
+                "cluster_script": script,
+                "anchor_game_key": anchor,
+            }
+        )
+
+    base = int(num_lineups // cluster_count)
+    remainder = int(num_lineups % cluster_count)
+    for idx, spec in enumerate(specs):
+        spec["target_lineups"] = base + (1 if idx < remainder else 0)
+    return specs
+
+
 def generate_lineups(
     pool_df: pd.DataFrame,
     num_lineups: int,
@@ -599,6 +763,8 @@ def generate_lineups(
     lineup_strategy: str = "standard",
     include_tail_signals: bool = False,
     spike_max_pair_overlap: int = 4,
+    cluster_target_count: int = 15,
+    cluster_variants_per_cluster: int = 10,
     random_seed: int = 7,
     max_attempts_per_lineup: int = 1200,
     progress_callback: Callable[[int, int, str], None] | None = None,
@@ -686,7 +852,32 @@ def generate_lineups(
     ]
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
+    cluster_mode = strategy_norm in {
+        "cluster",
+        "cluster_v1",
+        "cluster_v1_experimental",
+        "cluster_mutation",
+        "cluster_mutation_v1",
+    }
     spike_pair_overlap_cap = max(0, min(ROSTER_SIZE, int(spike_max_pair_overlap)))
+
+    if cluster_mode:
+        return _generate_lineups_cluster_mode(
+            players=players,
+            num_lineups=num_lineups,
+            lock_players=lock_players,
+            cap_counts=cap_counts,
+            exposure_counts=exposure_counts,
+            min_salary_used=min_salary_used,
+            min_salary_any=min_salary_any,
+            max_salary_any=max_salary_any,
+            random_seed=random_seed,
+            max_attempts_per_lineup=max_attempts_per_lineup,
+            player_cols=player_cols,
+            progress_callback=progress_callback,
+            cluster_target_count=cluster_target_count,
+            cluster_variants_per_cluster=cluster_variants_per_cluster,
+        )
 
     for lineup_idx in range(num_lineups):
         anchor_ids: set[str] = set()
@@ -842,6 +1033,298 @@ def generate_lineups(
     return lineups, warnings
 
 
+def _generate_lineups_cluster_mode(
+    players: list[dict[str, Any]],
+    num_lineups: int,
+    lock_players: list[dict[str, Any]],
+    cap_counts: dict[str, int],
+    exposure_counts: dict[str, int],
+    min_salary_used: int,
+    min_salary_any: int,
+    max_salary_any: int,
+    random_seed: int,
+    max_attempts_per_lineup: int,
+    player_cols: list[str],
+    progress_callback: Callable[[int, int, str], None] | None = None,
+    cluster_target_count: int = 15,
+    cluster_variants_per_cluster: int = 10,
+) -> tuple[list[dict[str, Any]], list[str]]:
+    if not players:
+        return [], ["No players available for cluster generation."]
+
+    warnings: list[str] = []
+    lineups: list[dict[str, Any]] = []
+    rng = random.Random(random_seed)
+
+    total_baseline = pd.to_numeric(
+        pd.Series([_safe_float(p.get("game_total_line")) for p in players]),
+        errors="coerce",
+    ).dropna()
+    spread_baseline = pd.to_numeric(
+        pd.Series([abs(_safe_num(p.get("game_spread_line"))) for p in players]),
+        errors="coerce",
+    ).dropna()
+    own_baseline = pd.to_numeric(
+        pd.Series([_safe_num(p.get("projected_ownership")) for p in players]),
+        errors="coerce",
+    ).dropna()
+    tail_baseline = pd.to_numeric(
+        pd.Series([_safe_num(p.get("game_tail_score")) for p in players]),
+        errors="coerce",
+    ).dropna()
+    base_total = float(total_baseline.median()) if not total_baseline.empty else 145.0
+    base_spread = float(spread_baseline.median()) if not spread_baseline.empty else 8.0
+    base_own = float(own_baseline.median()) if not own_baseline.empty else 14.0
+    base_tail = float(tail_baseline.median()) if not tail_baseline.empty else 50.0
+
+    cluster_specs = _build_cluster_specs(
+        players=players,
+        num_lineups=num_lineups,
+        target_clusters=cluster_target_count,
+        variants_per_cluster=cluster_variants_per_cluster,
+    )
+    if not cluster_specs:
+        return [], ["No cluster specs available for this slate."]
+
+    for cluster_idx, cluster in enumerate(cluster_specs):
+        cluster_id = str(cluster.get("cluster_id") or f"C{cluster_idx + 1:02d}")
+        cluster_script = str(cluster.get("cluster_script") or "balanced")
+        anchor_game_key = str(cluster.get("anchor_game_key") or "").strip().upper()
+        target_lineups = int(cluster.get("target_lineups") or 0)
+        if target_lineups <= 0:
+            continue
+
+        cluster_lineups: list[dict[str, Any]] = []
+        seed_player_ids: set[str] = set()
+        seed_lineup_id: int | None = None
+
+        for variant_idx in range(target_lineups):
+            mutation_type = _cluster_mutation_type(variant_idx)
+            required_anchor_count = 0
+            if anchor_game_key:
+                if mutation_type == "seed":
+                    required_anchor_count = 2
+                elif mutation_type == "stack_size_shift":
+                    required_anchor_count = 2 if (variant_idx % 2 == 0) else 1
+                else:
+                    required_anchor_count = 1
+
+            if progress_callback is not None:
+                progress_callback(
+                    len(lineups),
+                    num_lineups,
+                    (
+                        f"Generating lineup {len(lineups) + 1} of {num_lineups} "
+                        f"({cluster_id} {cluster_script} | {mutation_type})..."
+                    ),
+                )
+
+            best_lineup: list[dict[str, Any]] | None = None
+            best_score = -10**12
+
+            for _ in range(max_attempts_per_lineup):
+                selected = [dict(x) for x in lock_players]
+                selected_ids = {str(p["ID"]) for p in selected}
+                salary = sum(int(p["Salary"]) for p in selected)
+
+                while len(selected) < ROSTER_SIZE:
+                    remaining_slots = ROSTER_SIZE - len(selected)
+                    candidates: list[dict[str, Any]] = []
+                    weights: list[float] = []
+                    current_anchor_count = (
+                        sum(1 for p in selected if str(p.get("game_key") or "").strip().upper() == anchor_game_key)
+                        if anchor_game_key
+                        else 0
+                    )
+
+                    for p in players:
+                        pid = str(p["ID"])
+                        if pid in selected_ids:
+                            continue
+                        if exposure_counts.get(pid, 0) >= cap_counts.get(pid, num_lineups):
+                            continue
+
+                        next_salary = salary + int(p["Salary"])
+                        if next_salary > SALARY_CAP:
+                            continue
+                        rem_after_pick = remaining_slots - 1
+                        if next_salary + (rem_after_pick * min_salary_any) > SALARY_CAP:
+                            continue
+                        if next_salary + (rem_after_pick * max_salary_any) < min_salary_used:
+                            continue
+
+                        pick_game_key = str(p.get("game_key") or "").strip().upper()
+                        if anchor_game_key and required_anchor_count > 0:
+                            is_anchor_pick = pick_game_key == anchor_game_key
+                            projected_anchor = current_anchor_count + (1 if is_anchor_pick else 0)
+                            needed_after_pick = max(0, required_anchor_count - projected_anchor)
+                            if needed_after_pick > rem_after_pick:
+                                continue
+
+                        partial = selected + [p]
+                        if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
+                            continue
+
+                        base_weight = max(0.01, float(p.get("objective_score", 0.0)))
+                        weight_mult = 1.0
+                        if anchor_game_key:
+                            if pick_game_key == anchor_game_key:
+                                weight_mult *= 1.30
+                            elif pick_game_key:
+                                weight_mult *= 0.94
+
+                        total_line = _safe_num(p.get("game_total_line"), base_total)
+                        spread_abs = abs(_safe_num(p.get("game_spread_line"), base_spread))
+                        own_pct = _safe_num(p.get("projected_ownership"), base_own)
+                        tail_score = _safe_num(p.get("game_tail_score"), base_tail)
+
+                        if cluster_script == "high_total":
+                            weight_mult *= 1.0 + max(0.0, (total_line - base_total) / 180.0)
+                        elif cluster_script == "tight_spread":
+                            weight_mult *= 1.0 + max(0.0, (base_spread - spread_abs) / 35.0)
+                        elif cluster_script == "tail_leverage":
+                            weight_mult *= 1.0 + (tail_score / 400.0) + max(0.0, (base_own - own_pct) / 200.0)
+                        elif cluster_script == "contrarian":
+                            weight_mult *= 1.0 + max(0.0, (base_own - own_pct) / 120.0)
+                        else:
+                            weight_mult *= 1.0 + max(0.0, (tail_score - base_tail) / 600.0)
+
+                        candidates.append(p)
+                        weights.append(base_weight * max(0.05, weight_mult) * rng.uniform(0.85, 1.15))
+
+                    if not candidates:
+                        selected = []
+                        break
+
+                    pick = rng.choices(candidates, weights=weights, k=1)[0]
+                    selected.append(pick)
+                    selected_ids.add(str(pick["ID"]))
+                    salary += int(pick["Salary"])
+
+                if not selected:
+                    continue
+                if not _lineup_valid(selected):
+                    continue
+                final_salary = int(sum(int(p["Salary"]) for p in selected))
+                if final_salary < min_salary_used:
+                    continue
+
+                game_counts = _lineup_game_counts(selected)
+                anchor_count = int(game_counts.get(anchor_game_key, 0)) if anchor_game_key else 0
+                if anchor_game_key and anchor_count < required_anchor_count:
+                    continue
+
+                lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in selected))
+                selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
+                selected_score += 1.10 * _stack_bonus_from_counts(game_counts)
+                if anchor_game_key:
+                    selected_score += 1.8 * float(anchor_count)
+
+                current_ids = {str(p["ID"]) for p in selected}
+                if lineups:
+                    max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)
+                    selected_score -= max(0, max_overlap - 5) * 2.5
+                if cluster_lineups:
+                    max_cluster_overlap = max(len(current_ids & set(l["player_ids"])) for l in cluster_lineups)
+                    selected_score -= max(0, max_cluster_overlap - 6) * 1.4
+
+                if mutation_type == "same_role_swap" and seed_player_ids:
+                    overlap_seed = len(current_ids & seed_player_ids)
+                    selected_score -= max(0, overlap_seed - 5) * 1.6
+                    selected_score += max(0.0, 3.0 - abs(float(overlap_seed) - 4.0))
+                elif mutation_type == "bring_back_rotation" and anchor_game_key:
+                    anchor_teams = {
+                        str(p.get("TeamAbbrev") or "").strip().upper()
+                        for p in selected
+                        if str(p.get("game_key") or "").strip().upper() == anchor_game_key
+                    }
+                    if len(anchor_teams) >= 2:
+                        selected_score += 2.8
+                    else:
+                        selected_score -= 2.0
+                elif mutation_type == "stack_size_shift" and anchor_game_key:
+                    target_anchor = 3 if (variant_idx % 2 == 0) else 2
+                    selected_score -= abs(anchor_count - target_anchor) * 1.4
+                elif mutation_type == "chalk_pivot":
+                    selected_score -= 0.22 * lineup_own
+                elif mutation_type == "value_risk_swap":
+                    value_players = [p for p in selected if int(p.get("Salary") or 0) <= 5200]
+                    selected_score += 0.35 * float(len(value_players))
+                    if value_players:
+                        value_minutes = [
+                            _safe_num(p.get("our_minutes_last7"), _safe_num(p.get("our_minutes_avg"), 0.0))
+                            for p in value_players
+                        ]
+                        selected_score += (sum(value_minutes) / max(1.0, float(len(value_minutes)))) / 25.0
+                elif mutation_type == "salary_texture_shift":
+                    salary_left = SALARY_CAP - final_salary
+                    target_salary_left = [100, 300, 500, 700, 900][variant_idx % 5]
+                    selected_score -= abs(float(salary_left - target_salary_left)) / 95.0
+
+                if selected_score > best_score:
+                    best_score = selected_score
+                    best_lineup = [{k: p.get(k) for k in player_cols} for p in selected]
+
+            if best_lineup is None:
+                warnings.append(
+                    f"Cluster {cluster_id} ({cluster_script}) stopped early at variant {variant_idx + 1}."
+                )
+                break
+
+            for p in best_lineup:
+                exposure_counts[str(p["ID"])] = exposure_counts.get(str(p["ID"]), 0) + 1
+
+            lineup_salary = int(sum(int(p["Salary"]) for p in best_lineup))
+            lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
+            lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
+            lineup_number = len(lineups) + 1
+            if seed_lineup_id is None:
+                seed_lineup_id = lineup_number
+                mutation_label = "seed"
+                seed_player_ids = {str(p["ID"]) for p in best_lineup}
+            else:
+                mutation_label = mutation_type
+
+            lineup_payload = {
+                "lineup_number": lineup_number,
+                "players": best_lineup,
+                "player_ids": [str(p["ID"]) for p in best_lineup],
+                "salary": lineup_salary,
+                "projected_points": round(lineup_proj, 2),
+                "projected_ownership_sum": round(lineup_own, 2),
+                "lineup_strategy": "cluster",
+                "pair_id": None,
+                "pair_role": None,
+                "cluster_id": cluster_id,
+                "cluster_script": cluster_script,
+                "anchor_game_key": anchor_game_key,
+                "seed_lineup_id": seed_lineup_id,
+                "mutation_type": mutation_label,
+                "stack_signature": _lineup_stack_signature(best_lineup),
+                "salary_texture_bucket": _salary_texture_bucket(SALARY_CAP - lineup_salary),
+            }
+            lineups.append(lineup_payload)
+            cluster_lineups.append(lineup_payload)
+
+            if progress_callback is not None:
+                progress_callback(
+                    len(lineups),
+                    num_lineups,
+                    f"Generated {len(lineups)} of {num_lineups} lineups ({cluster_id}).",
+                )
+            if len(lineups) >= num_lineups:
+                break
+
+        if len(lineups) >= num_lineups:
+            break
+
+    if len(lineups) < num_lineups:
+        warnings.append(
+            f"Cluster generator returned {len(lineups)} of {num_lineups} requested lineups."
+        )
+    return lineups, warnings
+
+
 def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for lineup in lineups:
@@ -857,6 +1340,14 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
             row["Strategy"] = str(lineup.get("lineup_strategy"))
+        if lineup.get("cluster_id"):
+            row["Cluster"] = str(lineup.get("cluster_id"))
+        if lineup.get("mutation_type"):
+            row["Mutation"] = str(lineup.get("mutation_type"))
+        if lineup.get("stack_signature"):
+            row["Stack Signature"] = str(lineup.get("stack_signature"))
+        if lineup.get("salary_texture_bucket"):
+            row["Salary Texture"] = str(lineup.get("salary_texture_bucket"))
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -885,6 +1376,14 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
             row["Strategy"] = str(lineup.get("lineup_strategy"))
+        if lineup.get("cluster_id"):
+            row["Cluster"] = str(lineup.get("cluster_id"))
+        if lineup.get("mutation_type"):
+            row["Mutation"] = str(lineup.get("mutation_type"))
+        if lineup.get("stack_signature"):
+            row["Stack Signature"] = str(lineup.get("stack_signature"))
+        if lineup.get("salary_texture_bucket"):
+            row["Salary Texture"] = str(lineup.get("salary_texture_bucket"))
         rows.append(row)
     return pd.DataFrame(rows)
 

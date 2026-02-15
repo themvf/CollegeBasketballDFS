@@ -1690,8 +1690,8 @@ with tab_lineups:
         options=["Single Version", "All Versions"],
         index=0,
         help=(
-            "All Versions generates and saves all three lineup models: "
-            "standard_v1, spike_v1_legacy, spike_v2_tail."
+            "All Versions generates and saves all lineup models: "
+            "standard_v1, spike_v1_legacy, spike_v2_tail, cluster_v1_experimental."
         ),
     )
     run_mode_key = "all" if run_mode_label == "All Versions" else "single"
@@ -1704,16 +1704,21 @@ with tab_lineups:
                 "Standard v1",
                 "Spike v1 (Legacy A/B)",
                 "Spike v2 (Tail A/B)",
+                "Cluster v1 (Experimental)",
             ],
             index=0,
             help=(
-                "Run one lineup model. Use All Versions to save all three in a single run."
+                "Run one lineup model. Use All Versions to save all models in a single run."
             ),
         )
         if lineup_model_label == "Spike v2 (Tail A/B)":
             selected_model_key = "spike_v2_tail"
             lineup_strategy = "spike"
             include_tail_signals = True
+        elif lineup_model_label == "Cluster v1 (Experimental)":
+            selected_model_key = "cluster_v1_experimental"
+            lineup_strategy = "cluster"
+            include_tail_signals = False
         elif lineup_model_label == "Spike v1 (Legacy A/B)":
             selected_model_key = "spike_v1_legacy"
             lineup_strategy = "spike"
@@ -1724,10 +1729,16 @@ with tab_lineups:
             include_tail_signals = False
     else:
         c5.caption("Lineup Models")
-        c5.write("All Versions: `standard_v1`, `spike_v1_legacy`, `spike_v2_tail`")
+        c5.write("All Versions: `standard_v1`, `spike_v1_legacy`, `spike_v2_tail`, `cluster_v1_experimental`")
         selected_model_key = "standard_v1"
         lineup_strategy = "standard"
         include_tail_signals = False
+
+    if run_mode_key == "all" or lineup_strategy == "cluster":
+        st.caption(
+            "Cluster v1 Phase 1 uses seed + mutation generation with target `15 clusters x 10 variants` "
+            "(auto-adjusted for smaller lineup counts/slates)."
+        )
 
     max_salary_left = int(
         c6.slider(
@@ -1852,6 +1863,16 @@ with tab_lineups:
                                 "model_profile": "tail_spike_pairs",
                                 "spike_max_pair_overlap": spike_max_pair_overlap,
                             },
+                            {
+                                "version_key": "cluster_v1_experimental",
+                                "version_label": "Cluster v1 (Experimental)",
+                                "lineup_strategy": "cluster",
+                                "include_tail_signals": False,
+                                "model_profile": "cluster_seed_mutation_v1",
+                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                                "cluster_target_count": 15,
+                                "cluster_variants_per_cluster": 10,
+                            },
                         ]
                     else:
                         if selected_model_key == "spike_v2_tail":
@@ -1863,6 +1884,19 @@ with tab_lineups:
                                     "include_tail_signals": True,
                                     "model_profile": "tail_spike_pairs",
                                     "spike_max_pair_overlap": spike_max_pair_overlap,
+                                }
+                            ]
+                        elif selected_model_key == "cluster_v1_experimental":
+                            version_plan = [
+                                {
+                                    "version_key": "cluster_v1_experimental",
+                                    "version_label": "Cluster v1 (Experimental)",
+                                    "lineup_strategy": "cluster",
+                                    "include_tail_signals": False,
+                                    "model_profile": "cluster_seed_mutation_v1",
+                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                    "cluster_target_count": 15,
+                                    "cluster_variants_per_cluster": 10,
                                 }
                             ]
                         elif selected_model_key == "spike_v1_legacy":
@@ -1914,6 +1948,8 @@ with tab_lineups:
                             lineup_strategy=str(version_cfg["lineup_strategy"]),
                             include_tail_signals=bool(version_cfg.get("include_tail_signals", False)),
                             spike_max_pair_overlap=int(version_cfg["spike_max_pair_overlap"]),
+                            cluster_target_count=int(version_cfg.get("cluster_target_count", 15)),
+                            cluster_variants_per_cluster=int(version_cfg.get("cluster_variants_per_cluster", 10)),
                             random_seed=lineup_seed + version_idx,
                             progress_callback=_lineup_progress,
                         )
@@ -1944,6 +1980,8 @@ with tab_lineups:
                             "max_salary_left": max_salary_left,
                             "global_max_exposure_pct": global_max_exposure_pct,
                             "spike_max_pair_overlap": spike_max_pair_overlap,
+                            "cluster_target_count": 15,
+                            "cluster_variants_per_cluster": 10,
                             "bookmaker": lineup_bookmaker.strip(),
                             "locked_ids": locked_ids,
                             "excluded_ids": excluded_ids,
@@ -2170,16 +2208,17 @@ with tab_lineups:
                             if saved_version_keys:
                                 if str(st.session_state.get("saved_run_version_picker", "")) not in saved_version_keys:
                                     st.session_state.pop("saved_run_version_picker", None)
-                                selected_saved_version = st.selectbox(
-                                    "Saved Version",
-                                    options=saved_version_keys,
-                                    index=0,
-                                    format_func=lambda k: (
-                                        f"{version_meta_map[k].get('version_label', k)} "
-                                        f"[{k} | {'tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'}]"
-                                    ),
-                                    key="saved_run_version_picker",
-                                )
+                                    selected_saved_version = st.selectbox(
+                                        "Saved Version",
+                                        options=saved_version_keys,
+                                        index=0,
+                                        format_func=lambda k: (
+                                            f"{version_meta_map[k].get('version_label', k)} "
+                                            f"[{k} | "
+                                            f"{(version_meta_map[k].get('model_profile') or ('tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'))}]"
+                                        ),
+                                        key="saved_run_version_picker",
+                                    )
                                 saved_payload = load_saved_lineup_version_payload(
                                     bucket_name=bucket_name,
                                     selected_date=selected_manifest_date,
@@ -3041,6 +3080,13 @@ with tab_tournament_review:
                     "lineup_strategy",
                     "pair_id",
                     "pair_role",
+                    "cluster_id",
+                    "cluster_script",
+                    "anchor_game_key",
+                    "seed_lineup_id",
+                    "mutation_type",
+                    "stack_signature",
+                    "salary_texture_bucket",
                     "salary_used",
                     "salary_left",
                     "projected_points",
