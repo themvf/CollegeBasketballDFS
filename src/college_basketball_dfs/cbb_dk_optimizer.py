@@ -455,7 +455,11 @@ def build_player_pool(
     return out.drop(columns=existing_drop)
 
 
-def apply_contest_objective(pool_df: pd.DataFrame, contest_type: str) -> pd.DataFrame:
+def apply_contest_objective(
+    pool_df: pd.DataFrame,
+    contest_type: str,
+    include_tail_signals: bool = False,
+) -> pd.DataFrame:
     out = pool_df.copy()
     ct = str(contest_type or "").strip().lower()
     base = out["projected_dk_points"].fillna(0.0)
@@ -468,9 +472,13 @@ def apply_contest_objective(pool_df: pd.DataFrame, contest_type: str) -> pd.Data
     if ct == "cash":
         out["objective_score"] = base
     elif ct == "small gpp":
-        out["objective_score"] = base + (0.25 * leverage) + (3.0 * tail_score) + (1.6 * tail_to_own)
+        out["objective_score"] = base + (0.25 * leverage)
+        if include_tail_signals:
+            out["objective_score"] = out["objective_score"] + (3.0 * tail_score) + (1.6 * tail_to_own)
     else:  # large gpp default
-        out["objective_score"] = base + (0.45 * leverage) + (0.1 * ceiling) + (5.0 * tail_score) + (2.3 * tail_to_own)
+        out["objective_score"] = base + (0.45 * leverage) + (0.1 * ceiling)
+        if include_tail_signals:
+            out["objective_score"] = out["objective_score"] + (5.0 * tail_score) + (2.3 * tail_to_own)
     return out
 
 
@@ -555,6 +563,7 @@ def generate_lineups(
     global_max_exposure_pct: float = 100.0,
     max_salary_left: int | None = None,
     lineup_strategy: str = "standard",
+    include_tail_signals: bool = False,
     spike_max_pair_overlap: int = 4,
     random_seed: int = 7,
     max_attempts_per_lineup: int = 1200,
@@ -568,7 +577,7 @@ def generate_lineups(
     if progress_callback is not None:
         progress_callback(0, num_lineups, "Starting lineup generation...")
 
-    scored = apply_contest_objective(pool_df, contest_type)
+    scored = apply_contest_objective(pool_df, contest_type, include_tail_signals=include_tail_signals)
     scored = scored.loc[scored["Salary"] > 0].copy()
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
 
@@ -740,9 +749,10 @@ def generate_lineups(
                     return float(num)
 
                 selected_score += 1.25 * _stack_bonus_from_counts(game_counts)
-                avg_tail = sum(_safe_num(p.get("game_tail_score")) for p in selected) / max(1, len(selected))
-                avg_vol = sum(_safe_num(p.get("game_volatility_score")) for p in selected) / max(1, len(selected))
-                selected_score += (0.20 * avg_tail) + (0.02 * avg_vol)
+                if include_tail_signals:
+                    avg_tail = sum(_safe_num(p.get("game_tail_score")) for p in selected) / max(1, len(selected))
+                    avg_vol = sum(_safe_num(p.get("game_volatility_score")) for p in selected) / max(1, len(selected))
+                    selected_score += (0.20 * avg_tail) + (0.02 * avg_vol)
 
             if lineups:
                 max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)

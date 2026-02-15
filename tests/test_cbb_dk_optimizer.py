@@ -3,6 +3,7 @@ from collections import Counter
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
+    apply_contest_objective,
     build_dk_upload_csv,
     build_player_pool,
     generate_lineups,
@@ -274,3 +275,17 @@ def test_build_player_pool_attaches_tail_metrics_from_game_odds() -> None:
     assert not game_rows.empty
     assert game_rows["game_p_plus_12"].notna().any()
     assert game_rows["game_tail_score"].notna().any()
+
+
+def test_apply_contest_objective_can_toggle_tail_signals() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    pool = pool.copy()
+    pool["game_tail_score"] = 80.0
+    pool["game_tail_to_ownership_pct"] = 1.0
+
+    legacy = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=False)
+    tail = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
+
+    assert "objective_score" in legacy.columns
+    assert "objective_score" in tail.columns
+    assert float(tail["objective_score"].mean()) > float(legacy["objective_score"].mean())

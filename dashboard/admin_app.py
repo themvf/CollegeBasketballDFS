@@ -243,6 +243,8 @@ def persist_lineup_run_bundle(
             "version_key": version_name,
             "version_label": str(version_data.get("version_label") or version_name),
             "lineup_strategy": str(version_data.get("lineup_strategy") or ""),
+            "model_profile": str(version_data.get("model_profile") or ""),
+            "include_tail_signals": bool(version_data.get("include_tail_signals", False)),
             "warnings": warnings,
             "settings": settings,
             "lineups": _json_safe(lineups),
@@ -256,6 +258,8 @@ def persist_lineup_run_bundle(
                 "version_key": version_name,
                 "version_label": str(version_data.get("version_label") or version_name),
                 "lineup_strategy": str(version_data.get("lineup_strategy") or ""),
+                "model_profile": str(version_data.get("model_profile") or ""),
+                "include_tail_signals": bool(version_data.get("include_tail_signals", False)),
                 "lineup_count_generated": int(len(lineups)),
                 "warning_count": int(len(warnings)),
                 "json_blob": json_blob,
@@ -1525,26 +1529,45 @@ with tab_lineups:
         "Run Mode",
         options=["Single Version", "All Versions"],
         index=0,
-        help="All Versions generates Standard v1 and Spike v1 in one run and auto-saves each version.",
+        help=(
+            "All Versions generates and saves all three lineup models: "
+            "standard_v1, spike_v1_legacy, spike_v2_tail."
+        ),
     )
     run_mode_key = "all" if run_mode_label == "All Versions" else "single"
 
     c5, c6, c7 = st.columns(3)
     if run_mode_key == "single":
-        lineup_strategy_label = c5.selectbox(
-            "Lineup Strategy",
-            options=["Standard", "Lineup Spike (A/B Pairs)"],
+        lineup_model_label = c5.selectbox(
+            "Lineup Model",
+            options=[
+                "Standard v1",
+                "Spike v1 (Legacy A/B)",
+                "Spike v2 (Tail A/B)",
+            ],
             index=0,
             help=(
-                "Spike mode builds lineups in A/B pairs: each lineup still targets ceiling, "
-                "while B is intentionally de-correlated from A."
+                "Run one lineup model. Use All Versions to save all three in a single run."
             ),
         )
-        lineup_strategy = "spike" if lineup_strategy_label.startswith("Lineup Spike") else "standard"
+        if lineup_model_label == "Spike v2 (Tail A/B)":
+            selected_model_key = "spike_v2_tail"
+            lineup_strategy = "spike"
+            include_tail_signals = True
+        elif lineup_model_label == "Spike v1 (Legacy A/B)":
+            selected_model_key = "spike_v1_legacy"
+            lineup_strategy = "spike"
+            include_tail_signals = False
+        else:
+            selected_model_key = "standard_v1"
+            lineup_strategy = "standard"
+            include_tail_signals = False
     else:
-        c5.caption("Lineup Strategy")
-        c5.write("All Versions: `standard_v1`, `spike_v1`")
+        c5.caption("Lineup Models")
+        c5.write("All Versions: `standard_v1`, `spike_v1_legacy`, `spike_v2_tail`")
+        selected_model_key = "standard_v1"
         lineup_strategy = "standard"
+        include_tail_signals = False
 
     max_salary_left = int(
         c6.slider(
@@ -1655,22 +1678,47 @@ with tab_lineups:
                                 "version_key": "standard_v1",
                                 "version_label": "Standard v1",
                                 "lineup_strategy": "standard",
+                                "include_tail_signals": False,
+                                "model_profile": "legacy_baseline",
                                 "spike_max_pair_overlap": spike_max_pair_overlap,
                             },
                             {
-                                "version_key": "spike_v1",
-                                "version_label": "Spike v1 (A/B Pairs)",
+                                "version_key": "spike_v1_legacy",
+                                "version_label": "Spike v1 (Legacy A/B)",
                                 "lineup_strategy": "spike",
+                                "include_tail_signals": False,
+                                "model_profile": "legacy_spike_pairs",
+                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                            },
+                            {
+                                "version_key": "spike_v2_tail",
+                                "version_label": "Spike v2 (Tail A/B)",
+                                "lineup_strategy": "spike",
+                                "include_tail_signals": True,
+                                "model_profile": "tail_spike_pairs",
                                 "spike_max_pair_overlap": spike_max_pair_overlap,
                             },
                         ]
                     else:
-                        if lineup_strategy == "spike":
+                        if selected_model_key == "spike_v2_tail":
                             version_plan = [
                                 {
-                                    "version_key": "spike_v1",
-                                    "version_label": "Spike v1 (A/B Pairs)",
+                                    "version_key": "spike_v2_tail",
+                                    "version_label": "Spike v2 (Tail A/B)",
                                     "lineup_strategy": "spike",
+                                    "include_tail_signals": True,
+                                    "model_profile": "tail_spike_pairs",
+                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                }
+                            ]
+                        elif selected_model_key == "spike_v1_legacy":
+                            version_plan = [
+                                {
+                                    "version_key": "spike_v1_legacy",
+                                    "version_label": "Spike v1 (Legacy A/B)",
+                                    "lineup_strategy": "spike",
+                                    "include_tail_signals": False,
+                                    "model_profile": "legacy_spike_pairs",
                                     "spike_max_pair_overlap": spike_max_pair_overlap,
                                 }
                             ]
@@ -1680,6 +1728,8 @@ with tab_lineups:
                                     "version_key": "standard_v1",
                                     "version_label": "Standard v1",
                                     "lineup_strategy": "standard",
+                                    "include_tail_signals": False,
+                                    "model_profile": "legacy_baseline",
                                     "spike_max_pair_overlap": spike_max_pair_overlap,
                                 }
                             ]
@@ -1708,6 +1758,7 @@ with tab_lineups:
                             global_max_exposure_pct=global_max_exposure_pct,
                             max_salary_left=max_salary_left,
                             lineup_strategy=str(version_cfg["lineup_strategy"]),
+                            include_tail_signals=bool(version_cfg.get("include_tail_signals", False)),
                             spike_max_pair_overlap=int(version_cfg["spike_max_pair_overlap"]),
                             random_seed=lineup_seed + version_idx,
                             progress_callback=_lineup_progress,
@@ -1716,6 +1767,8 @@ with tab_lineups:
                             "version_key": str(version_cfg["version_key"]),
                             "version_label": str(version_cfg["version_label"]),
                             "lineup_strategy": str(version_cfg["lineup_strategy"]),
+                            "include_tail_signals": bool(version_cfg.get("include_tail_signals", False)),
+                            "model_profile": str(version_cfg.get("model_profile") or ""),
                             "lineups": lineups,
                             "warnings": warnings,
                             "upload_csv": build_dk_upload_csv(lineups) if lineups else "",
@@ -1730,6 +1783,7 @@ with tab_lineups:
                         "slate_date": optimizer_slate_date.isoformat(),
                         "run_mode": run_mode_key,
                         "settings": {
+                            "selected_model_key": selected_model_key,
                             "lineup_count": lineup_count,
                             "contest_type": contest_type,
                             "lineup_seed": lineup_seed,
@@ -1775,7 +1829,10 @@ with tab_lineups:
                         version_data = generated_versions.get(key) or {}
                         label = str(version_data.get("version_label") or key)
                         strategy = str(version_data.get("lineup_strategy") or "")
-                        return f"{label} [{strategy}]"
+                        profile = str(version_data.get("model_profile") or "")
+                        tail_tag = "tail" if bool(version_data.get("include_tail_signals", False)) else "legacy"
+                        profile_text = profile or tail_tag
+                        return f"{label} [{strategy} | {profile_text}]"
 
                     active_version_key = st.selectbox(
                         "Generated Version",
@@ -1870,7 +1927,10 @@ with tab_lineups:
                                 "Saved Version",
                                 options=saved_version_keys,
                                 index=0,
-                                format_func=lambda k: f"{version_meta_map[k].get('version_label', k)} [{k}]",
+                                format_func=lambda k: (
+                                    f"{version_meta_map[k].get('version_label', k)} "
+                                    f"[{k} | {'tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'}]"
+                                ),
                                 key="saved_run_version_picker",
                             )
                             saved_payload = load_saved_lineup_version_payload(
