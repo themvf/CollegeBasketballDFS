@@ -59,6 +59,7 @@ class CbbGcsStore:
     projections_prefix: str = "cbb/projections"
     ownership_prefix: str = "cbb/ownership"
     contest_standings_prefix: str = "cbb/contest_standings"
+    lineup_runs_prefix: str = "cbb/lineup_runs"
 
     def __post_init__(self) -> None:
         if not self.bucket_name:
@@ -104,6 +105,29 @@ class CbbGcsStore:
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(contest_id or "").strip())
         safe = safe or "contest"
         return f"{self.contest_standings_prefix}/{game_date.isoformat()}_{safe}.csv"
+
+    def _safe_key(self, value: str, default: str) -> str:
+        safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(value or "").strip())
+        return safe or default
+
+    def lineup_run_prefix(self, game_date: date, run_id: str) -> str:
+        run_key = self._safe_key(run_id, "run")
+        return f"{self.lineup_runs_prefix}/{game_date.isoformat()}/{run_key}"
+
+    def lineup_run_manifest_blob_name(self, game_date: date, run_id: str) -> str:
+        return f"{self.lineup_run_prefix(game_date, run_id)}/manifest.json"
+
+    def lineup_version_json_blob_name(self, game_date: date, run_id: str, version_key: str) -> str:
+        safe_version = self._safe_key(version_key, "version")
+        return f"{self.lineup_run_prefix(game_date, run_id)}/{safe_version}/lineups.json"
+
+    def lineup_version_csv_blob_name(self, game_date: date, run_id: str, version_key: str) -> str:
+        safe_version = self._safe_key(version_key, "version")
+        return f"{self.lineup_run_prefix(game_date, run_id)}/{safe_version}/lineups.csv"
+
+    def lineup_version_upload_blob_name(self, game_date: date, run_id: str, version_key: str) -> str:
+        safe_version = self._safe_key(version_key, "version")
+        return f"{self.lineup_run_prefix(game_date, run_id)}/{safe_version}/dk_upload.csv"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
         blob = self.bucket.blob(self.raw_blob_name(game_date))
@@ -248,6 +272,80 @@ class CbbGcsStore:
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
+
+    def read_lineup_run_manifest_json(self, game_date: date, run_id: str) -> dict[str, Any] | None:
+        blob = self.bucket.blob(self.lineup_run_manifest_blob_name(game_date, run_id))
+        if not blob.exists():
+            return None
+        payload = json.loads(blob.download_as_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected lineup-run manifest payload type: {type(payload).__name__}")
+        return payload
+
+    def write_lineup_run_manifest_json(self, game_date: date, run_id: str, payload: dict[str, Any]) -> str:
+        blob_name = self.lineup_run_manifest_blob_name(game_date, run_id)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+        return blob_name
+
+    def read_lineup_version_json(self, game_date: date, run_id: str, version_key: str) -> dict[str, Any] | None:
+        blob = self.bucket.blob(self.lineup_version_json_blob_name(game_date, run_id, version_key))
+        if not blob.exists():
+            return None
+        payload = json.loads(blob.download_as_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError(f"Unexpected lineup version payload type: {type(payload).__name__}")
+        return payload
+
+    def write_lineup_version_json(
+        self,
+        game_date: date,
+        run_id: str,
+        version_key: str,
+        payload: dict[str, Any],
+    ) -> str:
+        blob_name = self.lineup_version_json_blob_name(game_date, run_id, version_key)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+        return blob_name
+
+    def read_lineup_version_csv(self, game_date: date, run_id: str, version_key: str) -> str | None:
+        blob = self.bucket.blob(self.lineup_version_csv_blob_name(game_date, run_id, version_key))
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_lineup_version_csv(self, game_date: date, run_id: str, version_key: str, csv_text: str) -> str:
+        blob_name = self.lineup_version_csv_blob_name(game_date, run_id, version_key)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_lineup_version_upload_csv(self, game_date: date, run_id: str, version_key: str) -> str | None:
+        blob = self.bucket.blob(self.lineup_version_upload_blob_name(game_date, run_id, version_key))
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_lineup_version_upload_csv(self, game_date: date, run_id: str, version_key: str, csv_text: str) -> str:
+        blob_name = self.lineup_version_upload_blob_name(game_date, run_id, version_key)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def list_lineup_run_ids(self, game_date: date) -> list[str]:
+        prefix = f"{self.lineup_runs_prefix}/{game_date.isoformat()}/"
+        blobs = self.bucket.list_blobs(prefix=prefix)
+        run_ids: set[str] = set()
+        for blob in blobs:
+            suffix = str(blob.name or "")[len(prefix) :]
+            if not suffix:
+                continue
+            run_id = suffix.split("/", 1)[0].strip()
+            if run_id:
+                run_ids.add(run_id)
+        out = sorted(run_ids, reverse=True)
+        return out
 
     def write_raw_json(self, game_date: date, payload: dict[str, Any]) -> str:
         blob_name = self.raw_blob_name(game_date)

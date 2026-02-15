@@ -7,6 +7,8 @@ import re
 import sys
 from datetime import date, datetime, timedelta
 from pathlib import Path
+from typing import Any
+from uuid import uuid4
 
 import pandas as pd
 import streamlit as st
@@ -186,6 +188,141 @@ def _write_contest_standings_csv(store: CbbGcsStore, slate_date: date, contest_i
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
+
+
+def _new_lineup_run_id() -> str:
+    stamp = datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
+    return f"run_{stamp}_{uuid4().hex[:8]}"
+
+
+def _json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(k): _json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_json_safe(x) for x in value]
+    if hasattr(value, "item"):
+        try:
+            return _json_safe(value.item())
+        except Exception:
+            return str(value)
+    return str(value)
+
+
+def persist_lineup_run_bundle(
+    store: CbbGcsStore,
+    slate_date: date,
+    bundle: dict[str, Any],
+) -> dict[str, Any]:
+    run_id = str(bundle.get("run_id") or _new_lineup_run_id())
+    generated_at_utc = str(bundle.get("generated_at_utc") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+    settings = _json_safe(bundle.get("settings") or {})
+    versions = bundle.get("versions") or {}
+    version_entries: list[dict[str, Any]] = []
+
+    for version_key, version_data in versions.items():
+        version_name = str(version_key)
+        lineups = version_data.get("lineups") or []
+        warnings = [str(x) for x in (version_data.get("warnings") or [])]
+        upload_csv = str(version_data.get("upload_csv") or "")
+        slots_df = lineups_slots_frame(lineups)
+        if slots_df.empty:
+            slots_df = lineups_summary_frame(lineups)
+        lineups_csv = slots_df.to_csv(index=False)
+
+        payload = {
+            "run_id": run_id,
+            "slate_date": slate_date.isoformat(),
+            "generated_at_utc": generated_at_utc,
+            "run_mode": str(bundle.get("run_mode") or "single"),
+            "version_key": version_name,
+            "version_label": str(version_data.get("version_label") or version_name),
+            "lineup_strategy": str(version_data.get("lineup_strategy") or ""),
+            "warnings": warnings,
+            "settings": settings,
+            "lineups": _json_safe(lineups),
+            "dk_upload_csv": upload_csv,
+        }
+        json_blob = store.write_lineup_version_json(slate_date, run_id, version_name, payload)
+        csv_blob = store.write_lineup_version_csv(slate_date, run_id, version_name, lineups_csv)
+        upload_blob = store.write_lineup_version_upload_csv(slate_date, run_id, version_name, upload_csv)
+        version_entries.append(
+            {
+                "version_key": version_name,
+                "version_label": str(version_data.get("version_label") or version_name),
+                "lineup_strategy": str(version_data.get("lineup_strategy") or ""),
+                "lineup_count_generated": int(len(lineups)),
+                "warning_count": int(len(warnings)),
+                "json_blob": json_blob,
+                "csv_blob": csv_blob,
+                "dk_upload_blob": upload_blob,
+            }
+        )
+
+    manifest = {
+        "run_id": run_id,
+        "slate_date": slate_date.isoformat(),
+        "generated_at_utc": generated_at_utc,
+        "run_mode": str(bundle.get("run_mode") or "single"),
+        "settings": settings,
+        "versions": version_entries,
+    }
+    manifest_blob = store.write_lineup_run_manifest_json(slate_date, run_id, manifest)
+    return {
+        "run_id": run_id,
+        "manifest_blob": manifest_blob,
+        "version_count": len(version_entries),
+        "manifest": manifest,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_saved_lineup_run_manifests(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> list[dict[str, Any]]:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    run_ids = store.list_lineup_run_ids(selected_date)
+    manifests: list[dict[str, Any]] = []
+    for run_id in run_ids:
+        payload = store.read_lineup_run_manifest_json(selected_date, run_id)
+        if isinstance(payload, dict):
+            manifests.append(payload)
+    manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
+    return manifests
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_saved_lineup_version_payload(
+    bucket_name: str,
+    selected_date: date,
+    run_id: str,
+    version_key: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> dict[str, Any] | None:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    payload = store.read_lineup_version_json(selected_date, run_id, version_key)
+    if not isinstance(payload, dict):
+        return None
+    return payload
 
 
 def _list_players_blob_names(store: CbbGcsStore) -> list[str]:
@@ -1305,19 +1442,33 @@ with tab_lineups:
     lineup_count = int(c1.slider("Lineups", min_value=1, max_value=150, value=20, step=1))
     contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=1)
     lineup_seed = int(c3.number_input("Random Seed", min_value=1, max_value=999999, value=7, step=1))
-    lineup_strategy_label = c4.selectbox(
-        "Lineup Strategy",
-        options=["Standard", "Lineup Spike (A/B Pairs)"],
+    run_mode_label = c4.selectbox(
+        "Run Mode",
+        options=["Single Version", "All Versions"],
         index=0,
-        help=(
-            "Spike mode builds lineups in A/B pairs: each lineup still targets ceiling, "
-            "while B is intentionally de-correlated from A."
-        ),
+        help="All Versions generates Standard v1 and Spike v1 in one run and auto-saves each version.",
     )
-    lineup_strategy = "spike" if lineup_strategy_label.startswith("Lineup Spike") else "standard"
-    c5, c6 = st.columns(2)
+    run_mode_key = "all" if run_mode_label == "All Versions" else "single"
+
+    c5, c6, c7 = st.columns(3)
+    if run_mode_key == "single":
+        lineup_strategy_label = c5.selectbox(
+            "Lineup Strategy",
+            options=["Standard", "Lineup Spike (A/B Pairs)"],
+            index=0,
+            help=(
+                "Spike mode builds lineups in A/B pairs: each lineup still targets ceiling, "
+                "while B is intentionally de-correlated from A."
+            ),
+        )
+        lineup_strategy = "spike" if lineup_strategy_label.startswith("Lineup Spike") else "standard"
+    else:
+        c5.caption("Lineup Strategy")
+        c5.write("All Versions: `standard_v1`, `spike_v1`")
+        lineup_strategy = "standard"
+
     max_salary_left = int(
-        c5.slider(
+        c6.slider(
             "Max Salary Left Per Lineup",
             min_value=0,
             max_value=10000,
@@ -1327,7 +1478,7 @@ with tab_lineups:
         )
     )
     global_max_exposure_pct = float(
-        c6.slider(
+        c7.slider(
             "Global Max Player Exposure %",
             min_value=0,
             max_value=100,
@@ -1337,7 +1488,7 @@ with tab_lineups:
         )
     )
     spike_max_pair_overlap = 4
-    if lineup_strategy == "spike":
+    if run_mode_key == "all" or lineup_strategy == "spike":
         spike_max_pair_overlap = int(
             st.slider(
                 "Spike Max Shared Players (A vs B)",
@@ -1351,6 +1502,11 @@ with tab_lineups:
                 ),
             )
         )
+    auto_save_runs_to_gcs = st.checkbox(
+        "Auto-save generated lineup runs to GCS",
+        value=True,
+        help="Saves manifest + per-version lineup JSON/CSV + DK upload CSV.",
+    )
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
@@ -1414,61 +1570,262 @@ with tab_lineups:
                     progress_text = st.empty()
                     progress_bar = st.progress(0, text="Starting lineup generation...")
 
-                    def _lineup_progress(done: int, total: int, status: str) -> None:
-                        pct = 0 if total <= 0 else int((done / total) * 100)
-                        pct = max(0, min(100, pct))
-                        progress_bar.progress(pct, text=status)
-                        progress_text.caption(f"{done}/{total}")
+                    if run_mode_key == "all":
+                        version_plan = [
+                            {
+                                "version_key": "standard_v1",
+                                "version_label": "Standard v1",
+                                "lineup_strategy": "standard",
+                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                            },
+                            {
+                                "version_key": "spike_v1",
+                                "version_label": "Spike v1 (A/B Pairs)",
+                                "lineup_strategy": "spike",
+                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                            },
+                        ]
+                    else:
+                        if lineup_strategy == "spike":
+                            version_plan = [
+                                {
+                                    "version_key": "spike_v1",
+                                    "version_label": "Spike v1 (A/B Pairs)",
+                                    "lineup_strategy": "spike",
+                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                }
+                            ]
+                        else:
+                            version_plan = [
+                                {
+                                    "version_key": "standard_v1",
+                                    "version_label": "Standard v1",
+                                    "lineup_strategy": "standard",
+                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                }
+                            ]
 
-                    lineups, warnings = generate_lineups(
-                        pool_df=pool_sorted,
-                        num_lineups=lineup_count,
-                        contest_type=contest_type,
-                        locked_ids=locked_ids,
-                        excluded_ids=excluded_ids,
-                        exposure_caps_pct=exposure_caps,
-                        global_max_exposure_pct=global_max_exposure_pct,
-                        max_salary_left=max_salary_left,
-                        lineup_strategy=lineup_strategy,
-                        spike_max_pair_overlap=spike_max_pair_overlap,
-                        random_seed=lineup_seed,
-                        progress_callback=_lineup_progress,
+                    total_units = max(1, lineup_count * len(version_plan))
+                    generated_versions: dict[str, Any] = {}
+
+                    for version_idx, version_cfg in enumerate(version_plan):
+                        version_offset = version_idx * lineup_count
+
+                        def _lineup_progress(done: int, total: int, status: str) -> None:
+                            done_local = max(0, min(lineup_count, int(done)))
+                            units_done = version_offset + done_local
+                            pct = int((units_done / total_units) * 100)
+                            pct = max(0, min(100, pct))
+                            progress_bar.progress(pct, text=f"[{version_cfg['version_label']}] {status}")
+                            progress_text.caption(f"{units_done}/{total_units}")
+
+                        lineups, warnings = generate_lineups(
+                            pool_df=pool_sorted,
+                            num_lineups=lineup_count,
+                            contest_type=contest_type,
+                            locked_ids=locked_ids,
+                            excluded_ids=excluded_ids,
+                            exposure_caps_pct=exposure_caps,
+                            global_max_exposure_pct=global_max_exposure_pct,
+                            max_salary_left=max_salary_left,
+                            lineup_strategy=str(version_cfg["lineup_strategy"]),
+                            spike_max_pair_overlap=int(version_cfg["spike_max_pair_overlap"]),
+                            random_seed=lineup_seed + version_idx,
+                            progress_callback=_lineup_progress,
+                        )
+                        generated_versions[str(version_cfg["version_key"])] = {
+                            "version_key": str(version_cfg["version_key"]),
+                            "version_label": str(version_cfg["version_label"]),
+                            "lineup_strategy": str(version_cfg["lineup_strategy"]),
+                            "lineups": lineups,
+                            "warnings": warnings,
+                            "upload_csv": build_dk_upload_csv(lineups) if lineups else "",
+                        }
+
+                    total_generated = sum(len(v.get("lineups") or []) for v in generated_versions.values())
+                    progress_bar.progress(100, text=f"Finished: {total_generated} total lineups generated.")
+
+                    run_bundle = {
+                        "run_id": _new_lineup_run_id(),
+                        "generated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+                        "slate_date": optimizer_slate_date.isoformat(),
+                        "run_mode": run_mode_key,
+                        "settings": {
+                            "lineup_count": lineup_count,
+                            "contest_type": contest_type,
+                            "lineup_seed": lineup_seed,
+                            "max_salary_left": max_salary_left,
+                            "global_max_exposure_pct": global_max_exposure_pct,
+                            "spike_max_pair_overlap": spike_max_pair_overlap,
+                            "bookmaker": lineup_bookmaker.strip(),
+                            "locked_ids": locked_ids,
+                            "excluded_ids": excluded_ids,
+                            "exposure_caps_pct": exposure_caps,
+                        },
+                        "versions": generated_versions,
+                    }
+                    st.session_state["cbb_generated_run_bundle"] = run_bundle
+                    first_version_key = next(iter(generated_versions.keys()), "")
+                    st.session_state["cbb_active_version_key"] = first_version_key
+
+                    if auto_save_runs_to_gcs:
+                        client = build_storage_client(
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                            project=gcp_project or None,
+                        )
+                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                        saved_meta = persist_lineup_run_bundle(store, optimizer_slate_date, run_bundle)
+                        st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
+                        load_saved_lineup_run_manifests.clear()
+                        load_saved_lineup_version_payload.clear()
+                        st.success(
+                            f"Saved run `{saved_meta.get('run_id')}` with {saved_meta.get('version_count')} version(s) "
+                            f"to `{saved_meta.get('manifest_blob')}`."
+                        )
+
+                run_bundle = st.session_state.get("cbb_generated_run_bundle") or {}
+                generated_versions = run_bundle.get("versions") or {}
+                if generated_versions:
+                    version_keys = list(generated_versions.keys())
+                    default_version = st.session_state.get("cbb_active_version_key")
+                    if default_version not in version_keys:
+                        default_version = version_keys[0]
+
+                    def _generated_version_label(key: str) -> str:
+                        version_data = generated_versions.get(key) or {}
+                        label = str(version_data.get("version_label") or key)
+                        strategy = str(version_data.get("lineup_strategy") or "")
+                        return f"{label} [{strategy}]"
+
+                    active_version_key = st.selectbox(
+                        "Generated Version",
+                        options=version_keys,
+                        index=version_keys.index(default_version),
+                        format_func=_generated_version_label,
+                        key="generated_version_picker",
                     )
-                    final_pct = 100 if lineups else 0
-                    progress_bar.progress(final_pct, text=f"Finished: {len(lineups)} lineups generated.")
-                    st.session_state["cbb_generated_lineups"] = lineups
+                    st.session_state["cbb_active_version_key"] = active_version_key
+                    active_version = generated_versions.get(active_version_key) or {}
+                    generated = active_version.get("lineups") or []
+                    warnings = [str(x) for x in (active_version.get("warnings") or [])]
+                    upload_csv = str(active_version.get("upload_csv") or "")
+                    st.session_state["cbb_generated_lineups"] = generated
                     st.session_state["cbb_generated_lineups_warnings"] = warnings
-                    st.session_state["cbb_generated_upload_csv"] = build_dk_upload_csv(lineups) if lineups else ""
+                    st.session_state["cbb_generated_upload_csv"] = upload_csv
 
-                generated = st.session_state.get("cbb_generated_lineups", [])
-                warnings = st.session_state.get("cbb_generated_lineups_warnings", [])
-                if warnings:
-                    for msg in warnings:
-                        st.warning(msg)
-                if generated:
-                    g1, g2, g3 = st.columns(3)
+                    if warnings:
+                        for msg in warnings:
+                            st.warning(msg)
+
+                    g1, g2, g3, g4 = st.columns(4)
                     g1.metric("Generated Lineups", len(generated))
                     g2.metric("Injured Removed", int(len(removed_injured_df)))
                     g3.metric("Pool Size", int(len(pool_sorted)))
-
-                    summary_df = lineups_summary_frame(generated)
-                    st.dataframe(summary_df, hide_index=True, use_container_width=True)
-
-                    slots_df = lineups_slots_frame(generated)
-                    if not slots_df.empty:
-                        st.subheader("Generated Lineups (Slot View)")
-                        st.dataframe(slots_df, hide_index=True, use_container_width=True)
-
-                    upload_csv = st.session_state.get("cbb_generated_upload_csv", "")
-                    st.download_button(
-                        "Download DK Upload CSV",
-                        data=upload_csv,
-                        file_name=f"dk_lineups_{optimizer_slate_date.isoformat()}.csv",
-                        mime="text/csv",
-                        key="download_dk_upload_csv",
+                    g4.metric("Run Versions", int(len(generated_versions)))
+                    st.caption(
+                        f"Run ID: `{run_bundle.get('run_id', '')}` | Mode: `{run_bundle.get('run_mode', 'single')}` | "
+                        f"Version: `{active_version_key}`"
                     )
+
+                    if generated:
+                        summary_df = lineups_summary_frame(generated)
+                        st.dataframe(summary_df, hide_index=True, use_container_width=True)
+
+                        slots_df = lineups_slots_frame(generated)
+                        if not slots_df.empty:
+                            st.subheader("Generated Lineups (Slot View)")
+                            st.dataframe(slots_df, hide_index=True, use_container_width=True)
+
+                        st.download_button(
+                            "Download DK Upload CSV",
+                            data=upload_csv,
+                            file_name=f"dk_lineups_{optimizer_slate_date.isoformat()}_{active_version_key}.csv",
+                            mime="text/csv",
+                            key="download_dk_upload_csv",
+                        )
                 elif generate_lineups_clicked:
                     st.error("No lineups were generated. Adjust locks/exclusions/exposure settings and retry.")
+
+                st.markdown("---")
+                st.subheader("Saved Lineup Runs (GCS)")
+                rr1, rr2 = st.columns(2)
+                refresh_saved_runs_clicked = rr1.button("Refresh Saved Runs", key="refresh_saved_runs")
+                if refresh_saved_runs_clicked:
+                    load_saved_lineup_run_manifests.clear()
+                    load_saved_lineup_version_payload.clear()
+
+                saved_manifests = load_saved_lineup_run_manifests(
+                    bucket_name=bucket_name,
+                    selected_date=optimizer_slate_date,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                if not saved_manifests:
+                    st.info("No saved lineup runs found for this slate date yet.")
+                else:
+                    run_option_map: dict[str, dict[str, Any]] = {}
+                    run_options: list[str] = []
+                    for manifest in saved_manifests:
+                        run_id = str(manifest.get("run_id") or "")
+                        generated_at = str(manifest.get("generated_at_utc") or "")
+                        run_mode = str(manifest.get("run_mode") or "single")
+                        label = f"{generated_at} | {run_id} | {run_mode}"
+                        run_options.append(label)
+                        run_option_map[label] = manifest
+
+                    selected_run_label = st.selectbox(
+                        "Saved Run",
+                        options=run_options,
+                        index=0,
+                        key="saved_run_picker",
+                    )
+                    selected_manifest = run_option_map[selected_run_label]
+                    versions_meta = selected_manifest.get("versions") or []
+                    if versions_meta:
+                        version_meta_map = {str(v.get("version_key") or ""): v for v in versions_meta}
+                        saved_version_keys = [k for k in version_meta_map.keys() if k]
+                        if saved_version_keys:
+                            selected_saved_version = st.selectbox(
+                                "Saved Version",
+                                options=saved_version_keys,
+                                index=0,
+                                format_func=lambda k: f"{version_meta_map[k].get('version_label', k)} [{k}]",
+                                key="saved_run_version_picker",
+                            )
+                            saved_payload = load_saved_lineup_version_payload(
+                                bucket_name=bucket_name,
+                                selected_date=optimizer_slate_date,
+                                run_id=str(selected_manifest.get("run_id") or ""),
+                                version_key=selected_saved_version,
+                                gcp_project=gcp_project or None,
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                            )
+                            if isinstance(saved_payload, dict):
+                                saved_lineups = saved_payload.get("lineups") or []
+                                saved_warnings = [str(x) for x in (saved_payload.get("warnings") or [])]
+                                if saved_warnings:
+                                    for msg in saved_warnings:
+                                        st.warning(f"[Saved] {msg}")
+                                if saved_lineups:
+                                    saved_summary_df = lineups_summary_frame(saved_lineups)
+                                    st.dataframe(saved_summary_df, hide_index=True, use_container_width=True)
+                                    saved_slots_df = lineups_slots_frame(saved_lineups)
+                                    if not saved_slots_df.empty:
+                                        st.dataframe(saved_slots_df, hide_index=True, use_container_width=True)
+                                    saved_upload_csv = str(saved_payload.get("dk_upload_csv") or build_dk_upload_csv(saved_lineups))
+                                    st.download_button(
+                                        "Download Saved DK Upload CSV",
+                                        data=saved_upload_csv,
+                                        file_name=(
+                                            f"dk_lineups_{optimizer_slate_date.isoformat()}_"
+                                            f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
+                                        ),
+                                        mime="text/csv",
+                                        key=f"download_saved_dk_upload_csv_{selected_saved_version}",
+                                    )
         except Exception as exc:
             st.exception(exc)
 
