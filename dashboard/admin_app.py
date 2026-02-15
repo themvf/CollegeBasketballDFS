@@ -1618,6 +1618,9 @@ with tab_slate_vegas:
 
 with tab_lineups:
     st.subheader("DK Lineup Generator")
+    if "auto_save_runs_to_gcs" not in st.session_state:
+        st.session_state["auto_save_runs_to_gcs"] = True
+    auto_save_runs_to_gcs = bool(st.session_state.get("auto_save_runs_to_gcs", True))
     lineup_slate_date = st.date_input("Lineup Slate Date", value=game_selected_date, key="lineup_slate_date")
     lineup_bookmaker = st.text_input(
         "Lineup Bookmaker Source",
@@ -1677,7 +1680,7 @@ with tab_lineups:
             "Max Salary Left Per Lineup",
             min_value=0,
             max_value=10000,
-            value=2000,
+            value=500,
             step=100,
             help="Lineups must use at least 50000 - this value in salary.",
         )
@@ -1687,7 +1690,7 @@ with tab_lineups:
             "Global Max Player Exposure %",
             min_value=0,
             max_value=100,
-            value=100,
+            value=60,
             step=1,
             help="Caps every player's max lineup rate across the run (locks override this cap).",
         )
@@ -1707,12 +1710,6 @@ with tab_lineups:
                 ),
             )
         )
-    auto_save_runs_to_gcs = st.checkbox(
-        "Auto-save generated lineup runs to GCS",
-        value=True,
-        help="Saves manifest + per-version lineup JSON/CSV + DK upload CSV.",
-    )
-
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
     else:
@@ -1990,6 +1987,11 @@ with tab_lineups:
                 st.subheader("Saved Lineup Runs (GCS)")
                 rr1, rr2 = st.columns(2)
                 refresh_saved_runs_clicked = rr1.button("Refresh Saved Runs", key="refresh_saved_runs")
+                auto_save_runs_to_gcs = rr2.checkbox(
+                    "Auto-save generated lineup runs to GCS",
+                    key="auto_save_runs_to_gcs",
+                    help="Saves manifest + per-version lineup JSON/CSV + DK upload CSV.",
+                )
                 if refresh_saved_runs_clicked:
                     load_saved_lineup_run_manifests.clear()
                     load_saved_lineup_version_payload.clear()
