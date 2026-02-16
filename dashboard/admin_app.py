@@ -77,6 +77,38 @@ def _resolve_odds_api_key() -> str | None:
 
 
 ROLE_FILTER_OPTIONS = ["All", "Guard (G)", "Forward (F)"]
+COMMON_ODDS_BOOKMAKER_KEYS = [
+    "fanduel",
+    "draftkings",
+    "betmgm",
+    "betrivers",
+    "caesars",
+    "espnbet",
+    "hardrockbet",
+    "pointsbetus",
+    "lowvig",
+    "betonlineag",
+    "bovada",
+]
+
+
+def _csv_values(text: str | None) -> list[str]:
+    if not text:
+        return []
+    parts = [str(x).strip().lower() for x in str(text).split(",")]
+    return [x for x in parts if x]
+
+
+def _merged_bookmakers(selected: list[str] | None, custom_csv: str | None = None) -> list[str]:
+    out: list[str] = []
+    for item in (selected or []):
+        key = str(item).strip().lower()
+        if key and key not in out:
+            out.append(key)
+    for item in _csv_values(custom_csv):
+        if item not in out:
+            out.append(item)
+    return out
 
 
 def _filter_frame_by_role(
@@ -1128,6 +1160,12 @@ with tab_game:
 
 with tab_props:
     st.subheader("Prop Imports")
+    default_props_bookmakers = _csv_values(default_bookmakers_filter) or ["fanduel"]
+    props_bookmaker_options: list[str] = []
+    for key in COMMON_ODDS_BOOKMAKER_KEYS + default_props_bookmakers:
+        k = str(key).strip().lower()
+        if k and k not in props_bookmaker_options:
+            props_bookmaker_options.append(k)
     props_date_preset = st.selectbox(
         "Props Date Preset",
         options=["Custom", "Today", "Tomorrow"],
@@ -1149,11 +1187,24 @@ with tab_props:
         key="props_markets",
         help="Comma-separated The Odds API player prop market keys.",
     )
-    props_bookmakers_filter = st.text_input(
+    props_bookmakers_selected = st.multiselect(
         "Props Bookmakers",
-        value=(default_bookmakers_filter.strip() or "fanduel"),
-        key="props_bookmakers_filter",
-        help="Comma-separated bookmaker keys used by props import.",
+        options=props_bookmaker_options,
+        default=[k for k in default_props_bookmakers if k in props_bookmaker_options],
+        key="props_bookmakers_selected",
+        help="Checkbox dropdown of bookmaker keys used for props import.",
+    )
+    props_bookmakers_custom = st.text_input(
+        "Additional Props Bookmakers (optional)",
+        value="",
+        key="props_bookmakers_custom",
+        help="Comma-separated extra keys not listed above.",
+    )
+    props_bookmakers_keys = _merged_bookmakers(props_bookmakers_selected, props_bookmakers_custom)
+    props_bookmakers_filter = ",".join(props_bookmakers_keys)
+    st.caption(
+        "Resolved props bookmakers: "
+        + (f"`{props_bookmakers_filter}`" if props_bookmakers_filter else "`all books (no filter)`")
     )
     props_fetch_mode = st.selectbox(
         "Props Fetch Mode",
