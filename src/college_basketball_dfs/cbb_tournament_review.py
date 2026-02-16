@@ -825,6 +825,9 @@ def compare_phantom_entries_to_field(
         out["field_size"] = 0
         out["would_rank"] = pd.NA
         out["would_beat_pct"] = pd.NA
+        out["field_best_points"] = pd.NA
+        out["winner_gap"] = pd.NA
+        out["pct_of_winner"] = pd.NA
         return out
 
     field_points = pd.to_numeric(field_entries_df["Points"], errors="coerce").dropna()
@@ -833,10 +836,16 @@ def compare_phantom_entries_to_field(
         out["field_size"] = 0
         out["would_rank"] = pd.NA
         out["would_beat_pct"] = pd.NA
+        out["field_best_points"] = pd.NA
+        out["winner_gap"] = pd.NA
+        out["pct_of_winner"] = pd.NA
         return out
 
+    field_best_points = float(field_points.max())
     ranks: list[int] = []
     beats: list[float] = []
+    winner_gaps: list[float] = []
+    pct_of_winners: list[float] = []
     for _, row in out.iterrows():
         score = float(pd.to_numeric(row.get("actual_points"), errors="coerce") or 0.0)
         strictly_better = int((field_points > score).sum())
@@ -844,12 +853,19 @@ def compare_phantom_entries_to_field(
         ties = int((field_points == score).sum())
         rank_if_entered = 1 + strictly_better
         beat_pct = 100.0 * (strictly_worse + (0.5 * ties)) / float(field_n)
+        winner_gap = field_best_points - score
+        pct_of_winner = (100.0 * score / field_best_points) if field_best_points > 0 else 0.0
         ranks.append(rank_if_entered)
         beats.append(beat_pct)
+        winner_gaps.append(winner_gap)
+        pct_of_winners.append(pct_of_winner)
 
     out["field_size"] = field_n
     out["would_rank"] = ranks
     out["would_beat_pct"] = beats
+    out["field_best_points"] = field_best_points
+    out["winner_gap"] = winner_gaps
+    out["pct_of_winner"] = pct_of_winners
     return out
 
 
@@ -869,6 +885,9 @@ def summarize_phantom_entries(phantom_df: pd.DataFrame) -> pd.DataFrame:
                 "avg_salary_left",
                 "avg_would_beat_pct",
                 "best_would_rank",
+                "winner_points",
+                "winner_gap",
+                "pct_of_winner",
             ]
         )
 
@@ -877,6 +896,12 @@ def summarize_phantom_entries(phantom_df: pd.DataFrame) -> pd.DataFrame:
         group_cols = ["version_key"]
         phantom_df = phantom_df.copy()
         phantom_df["version_key"] = "unknown"
+    else:
+        phantom_df = phantom_df.copy()
+
+    for required_col in ["field_best_points", "would_beat_pct", "would_rank"]:
+        if required_col not in phantom_df.columns:
+            phantom_df[required_col] = pd.NA
 
     out = (
         phantom_df.groupby(group_cols, as_index=False)
@@ -891,7 +916,17 @@ def summarize_phantom_entries(phantom_df: pd.DataFrame) -> pd.DataFrame:
             avg_salary_left=("salary_left", "mean"),
             avg_would_beat_pct=("would_beat_pct", "mean"),
             best_would_rank=("would_rank", "min"),
+            winner_points=("field_best_points", "max"),
         )
     )
+    out["winner_gap"] = pd.to_numeric(out["winner_points"], errors="coerce") - pd.to_numeric(
+        out["best_actual_points"], errors="coerce"
+    )
+    out["pct_of_winner"] = (
+        100.0
+        * pd.to_numeric(out["best_actual_points"], errors="coerce")
+        / pd.to_numeric(out["winner_points"], errors="coerce")
+    )
+    out["pct_of_winner"] = out["pct_of_winner"].where(pd.to_numeric(out["winner_points"], errors="coerce") > 0)
     out = out.sort_values(["best_actual_points", "avg_actual_points"], ascending=[False, False]).reset_index(drop=True)
     return out

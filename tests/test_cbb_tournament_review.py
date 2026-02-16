@@ -280,8 +280,14 @@ def test_score_generated_lineups_against_actuals_and_field_compare() -> None:
     assert int(compared.iloc[0]["field_size"]) == 3
     assert int(compared.iloc[0]["would_rank"]) == 2
     assert round(float(compared.iloc[0]["would_beat_pct"]), 2) == round((2 / 3) * 100.0, 2)
+    assert float(compared.iloc[0]["field_best_points"]) == 190.0
+    assert round(float(compared.iloc[0]["winner_gap"]), 2) == 6.0
+    assert round(float(compared.iloc[0]["pct_of_winner"]), 2) == round((184.0 / 190.0) * 100.0, 2)
 
     summary = summarize_phantom_entries(compared)
     assert len(summary) == 1
     assert int(summary.iloc[0]["lineups"]) == 1
     assert float(summary.iloc[0]["best_actual_points"]) == 184.0
+    assert float(summary.iloc[0]["winner_points"]) == 190.0
+    assert round(float(summary.iloc[0]["winner_gap"]), 2) == 6.0
+    assert round(float(summary.iloc[0]["pct_of_winner"]), 2) == round((184.0 / 190.0) * 100.0, 2)
