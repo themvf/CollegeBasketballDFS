@@ -134,8 +134,10 @@ def _injuries_blob_name() -> str:
     return "cbb/injuries/injuries_master.csv"
 
 
-def _injuries_feed_blob_name() -> str:
-    return "cbb/injuries/injuries_feed.csv"
+def _injuries_feed_blob_name(selected_date: date | None = None) -> str:
+    if selected_date is None:
+        return "cbb/injuries/injuries_feed.csv"
+    return f"cbb/injuries/feed/{selected_date.isoformat()}_injuries_feed.csv"
 
 
 def _injuries_manual_blob_name() -> str:
@@ -162,21 +164,41 @@ def _write_injuries_csv(store: CbbGcsStore, csv_text: str) -> str:
     return blob_name
 
 
-def _read_injuries_feed_csv(store: CbbGcsStore) -> str | None:
+def _read_injuries_feed_csv(store: CbbGcsStore, selected_date: date | None = None) -> str | None:
     reader = getattr(store, "read_injuries_feed_csv", None)
     if callable(reader):
-        return reader()
-    blob = store.bucket.blob(_injuries_feed_blob_name())
+        try:
+            params = inspect.signature(reader).parameters
+            if "game_date" in params:
+                return reader(game_date=selected_date)
+            if selected_date is not None and len(params) >= 1:
+                return reader(selected_date)
+            return reader()
+        except (TypeError, ValueError):
+            return reader()
+    blob = store.bucket.blob(_injuries_feed_blob_name(selected_date))
     if not blob.exists():
+        if selected_date is not None:
+            legacy_blob = store.bucket.blob(_injuries_feed_blob_name(None))
+            if legacy_blob.exists():
+                return legacy_blob.download_as_text(encoding="utf-8")
         return None
     return blob.download_as_text(encoding="utf-8")
 
 
-def _write_injuries_feed_csv(store: CbbGcsStore, csv_text: str) -> str:
+def _write_injuries_feed_csv(store: CbbGcsStore, csv_text: str, selected_date: date | None = None) -> str:
     writer = getattr(store, "write_injuries_feed_csv", None)
     if callable(writer):
-        return writer(csv_text)
-    blob_name = _injuries_feed_blob_name()
+        try:
+            params = inspect.signature(writer).parameters
+            if "game_date" in params:
+                return writer(csv_text=csv_text, game_date=selected_date)
+            if selected_date is not None and len(params) >= 2:
+                return writer(selected_date, csv_text)
+            return writer(csv_text)
+        except (TypeError, ValueError):
+            return writer(csv_text)
+    blob_name = _injuries_feed_blob_name(selected_date)
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
@@ -202,8 +224,19 @@ def _write_injuries_manual_csv(store: CbbGcsStore, csv_text: str) -> str:
     return blob_name
 
 
-def _delete_injuries_feed_csv(store: CbbGcsStore) -> tuple[bool, str]:
-    blob_name = _injuries_feed_blob_name()
+def _delete_injuries_feed_csv(store: CbbGcsStore, selected_date: date | None = None) -> tuple[bool, str]:
+    blob_name = _injuries_feed_blob_name(selected_date)
+    deleter = getattr(store, "delete_injuries_feed_csv", None)
+    if callable(deleter):
+        try:
+            params = inspect.signature(deleter).parameters
+            if "game_date" in params:
+                return bool(deleter(game_date=selected_date)), blob_name
+            if selected_date is not None and len(params) >= 1:
+                return bool(deleter(selected_date)), blob_name
+            return bool(deleter()), blob_name
+        except (TypeError, ValueError):
+            return bool(deleter()), blob_name
     blob = store.bucket.blob(blob_name)
     if not blob.exists():
         return False, blob_name
@@ -570,6 +603,7 @@ def load_dk_slate_frame_for_date(
 @st.cache_data(ttl=300, show_spinner=False)
 def load_injuries_feed_frame(
     bucket_name: str,
+    selected_date: date | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -580,7 +614,7 @@ def load_injuries_feed_frame(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = _read_injuries_feed_csv(store)
+    csv_text = _read_injuries_feed_csv(store, selected_date=selected_date)
     if not csv_text or not csv_text.strip():
         return normalize_injuries_frame(None)
     frame = pd.read_csv(io.StringIO(csv_text))
@@ -610,12 +644,14 @@ def load_injuries_manual_frame(
 @st.cache_data(ttl=300, show_spinner=False)
 def load_injuries_frame(
     bucket_name: str,
+    selected_date: date | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
 ) -> pd.DataFrame:
     feed_df = load_injuries_feed_frame(
         bucket_name=bucket_name,
+        selected_date=selected_date,
         gcp_project=gcp_project,
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
@@ -965,6 +1001,7 @@ def build_optimizer_pool_for_date(
     )
     injuries_df = load_injuries_frame(
         bucket_name=bucket_name,
+        selected_date=slate_date,
         gcp_project=gcp_project,
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
@@ -1532,8 +1569,14 @@ with tab_dk:
 with tab_injuries:
     st.subheader("Injuries")
     st.caption(
-        "Two-layer injury system: uploaded feed CSV replaces stale source injuries, "
+        "Two-layer injury system: feed CSV is slate-specific by date, "
         "and manual entries persist as overrides for late news."
+    )
+    injury_feed_date = st.date_input(
+        "Injury Feed Date",
+        value=dk_slate_date,
+        key="injury_feed_date",
+        help="Uploaded injury feed applies only to this slate date.",
     )
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to manage injuries.")
@@ -1541,6 +1584,7 @@ with tab_injuries:
         try:
             feed_df = load_injuries_feed_frame(
                 bucket_name=bucket_name,
+                selected_date=injury_feed_date,
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -1553,6 +1597,7 @@ with tab_injuries:
             )
             effective_df = load_injuries_frame(
                 bucket_name=bucket_name,
+                selected_date=injury_feed_date,
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -1565,8 +1610,8 @@ with tab_injuries:
 
             st.subheader("Injury Feed Upload (CSV Replace)")
             st.caption(
-                "Upload your latest injury report CSV. This replaces prior feed injuries, "
-                "so players removed from the latest file are no longer auto-excluded."
+                "Upload your latest injury report CSV for the selected date. "
+                "Replacing feed clears stale source injuries for that date only."
             )
             feed_upload = st.file_uploader(
                 "Upload Injury Feed CSV",
@@ -1593,23 +1638,35 @@ with tab_injuries:
                         csv_text = feed_upload.getvalue().decode("utf-8-sig")
                         raw_feed = pd.read_csv(io.StringIO(csv_text))
                         normalized_feed = normalize_injuries_frame(raw_feed)
-                        blob_name = _write_injuries_feed_csv(store, normalized_feed.to_csv(index=False))
+                        blob_name = _write_injuries_feed_csv(
+                            store,
+                            normalized_feed.to_csv(index=False),
+                            selected_date=injury_feed_date,
+                        )
                         load_injuries_feed_frame.clear()
                         load_injuries_manual_frame.clear()
                         load_injuries_frame.clear()
-                        st.success(f"Replaced feed injuries in `{blob_name}` with {len(normalized_feed)} rows.")
+                        st.success(
+                            f"Replaced feed injuries for `{injury_feed_date.isoformat()}` in `{blob_name}` "
+                            f"with {len(normalized_feed)} rows."
+                        )
                 if clear_feed_clicked:
-                    deleted, blob_name = _delete_injuries_feed_csv(store)
+                    deleted, blob_name = _delete_injuries_feed_csv(store, selected_date=injury_feed_date)
                     load_injuries_feed_frame.clear()
                     load_injuries_manual_frame.clear()
                     load_injuries_frame.clear()
                     if deleted:
-                        st.success(f"Cleared feed injuries by deleting `{blob_name}`.")
+                        st.success(
+                            f"Cleared feed injuries for `{injury_feed_date.isoformat()}` by deleting `{blob_name}`."
+                        )
                     else:
-                        st.info(f"No feed injury file found at `{blob_name}`.")
+                        st.info(
+                            f"No feed injury file found for `{injury_feed_date.isoformat()}` at `{blob_name}`."
+                        )
 
                 feed_df = load_injuries_feed_frame(
                     bucket_name=bucket_name,
+                    selected_date=injury_feed_date,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -1622,6 +1679,7 @@ with tab_injuries:
                 )
                 effective_df = load_injuries_frame(
                     bucket_name=bucket_name,
+                    selected_date=injury_feed_date,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -1634,6 +1692,7 @@ with tab_injuries:
                 st.info("Reloaded injury data from GCS.")
                 feed_df = load_injuries_feed_frame(
                     bucket_name=bucket_name,
+                    selected_date=injury_feed_date,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -1646,6 +1705,7 @@ with tab_injuries:
                 )
                 effective_df = load_injuries_frame(
                     bucket_name=bucket_name,
+                    selected_date=injury_feed_date,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,

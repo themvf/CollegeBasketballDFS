@@ -7,6 +7,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     build_dk_upload_csv,
     build_player_pool,
     generate_lineups,
+    normalize_injuries_frame,
     remove_injured_players,
 )
 
@@ -137,6 +138,43 @@ def test_remove_injured_players_uses_unique_name_fallback_for_team_mismatch() ->
     filtered, removed = remove_injured_players(slate, injuries)
     assert "Guard 1" in removed["Name"].tolist()
     assert len(filtered) == len(slate) - 1
+
+
+def test_normalize_injuries_frame_handles_title_case_slate_feed_csv() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "Player": "Joe Hurlburt",
+                "Team": "Davidson",
+                "Pos": "C",
+                "Injury": "Undisclosed",
+                "Status": "Out",
+                "Est. Return": "Subscribers Only",
+            },
+            {
+                "Player": "Lucas Langarita",
+                "Team": "Utah",
+                "Pos": "G",
+                "Injury": "Lower Leg",
+                "Status": "Game Time Decision",
+                "Est. Return": "Subscribers Only",
+            },
+            {
+                "Player": "Xavier Brown",
+                "Team": "South Florida",
+                "Pos": "G",
+                "Injury": "Undisclosed",
+                "Status": "Out For Season",
+                "Est. Return": "Subscribers Only",
+            },
+        ]
+    )
+
+    normalized = normalize_injuries_frame(raw)
+    assert len(normalized) == 3
+    assert set(normalized["status"].tolist()) == {"out", "questionable"}
+    assert normalized.loc[normalized["player_name"] == "Joe Hurlburt", "team"].iloc[0] == "DAVIDSON"
+    assert "Undisclosed" in normalized.loc[normalized["player_name"] == "Joe Hurlburt", "notes"].iloc[0]
 
 
 def test_build_player_pool_merges_props() -> None:

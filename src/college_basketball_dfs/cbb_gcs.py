@@ -96,8 +96,10 @@ class CbbGcsStore:
     def injuries_blob_name(self) -> str:
         return f"{self.injuries_prefix}/injuries_master.csv"
 
-    def injuries_feed_blob_name(self) -> str:
-        return f"{self.injuries_prefix}/injuries_feed.csv"
+    def injuries_feed_blob_name(self, game_date: date | None = None) -> str:
+        if game_date is None:
+            return f"{self.injuries_prefix}/injuries_feed.csv"
+        return f"{self.injuries_prefix}/feed/{game_date.isoformat()}_injuries_feed.csv"
 
     def injuries_manual_blob_name(self) -> str:
         return f"{self.injuries_prefix}/injuries_manual.csv"
@@ -260,17 +262,29 @@ class CbbGcsStore:
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
 
-    def read_injuries_feed_csv(self) -> str | None:
-        blob = self.bucket.blob(self.injuries_feed_blob_name())
+    def read_injuries_feed_csv(self, game_date: date | None = None) -> str | None:
+        blob = self.bucket.blob(self.injuries_feed_blob_name(game_date))
         if not blob.exists():
+            if game_date is not None:
+                # Backward compatibility for older single-file feed storage.
+                legacy_blob = self.bucket.blob(self.injuries_feed_blob_name(None))
+                if legacy_blob.exists():
+                    return legacy_blob.download_as_text(encoding="utf-8")
             return None
         return blob.download_as_text(encoding="utf-8")
 
-    def write_injuries_feed_csv(self, csv_text: str) -> str:
-        blob_name = self.injuries_feed_blob_name()
+    def write_injuries_feed_csv(self, csv_text: str, game_date: date | None = None) -> str:
+        blob_name = self.injuries_feed_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
+
+    def delete_injuries_feed_csv(self, game_date: date | None = None) -> bool:
+        blob = self.bucket.blob(self.injuries_feed_blob_name(game_date))
+        if not blob.exists():
+            return False
+        blob.delete()
+        return True
 
     def read_injuries_manual_csv(self) -> str | None:
         blob = self.bucket.blob(self.injuries_manual_blob_name())

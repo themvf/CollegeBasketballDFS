@@ -72,37 +72,69 @@ def _game_key(value: Any) -> str:
     return text.split(" ")[0].upper()
 
 
+def _normalize_col_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
 def normalize_injuries_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     cols = ["player_name", "team", "status", "notes", "active", "updated_at"]
     if df is None or df.empty:
         return pd.DataFrame(columns=cols)
 
     out = df.copy()
+    normalized_columns = {_normalize_col_name(col): col for col in out.columns}
     rename_map = {
         "player": "player_name",
         "name": "player_name",
         "playername": "player_name",
         "athlete": "player_name",
-        "player_full_name": "player_name",
-        "injured_player": "player_name",
+        "playerfullname": "player_name",
+        "injuredplayer": "player_name",
+        "team": "team",
         "teamabbrev": "team",
-        "team_abbrev": "team",
+        "teamabbreviation": "team",
         "teamabbr": "team",
-        "team_abbreviation": "team",
-        "team_name": "team",
-        "injury_status": "status",
+        "teamname": "team",
+        "school": "team",
+        "status": "status",
+        "injurystatus": "status",
         "designation": "status",
-        "report_status": "status",
+        "reportstatus": "status",
+        "notes": "notes",
+        "injury": "injury_detail",
         "comment": "notes",
-        "injury_notes": "notes",
-        "is_active": "active",
+        "injurynotes": "notes",
+        "estreturn": "est_return",
+        "isactive": "active",
+        "active": "active",
         "enabled": "active",
+        "updatedat": "updated_at",
     }
-    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
+    resolved_rename: dict[str, str] = {}
+    for source_key, dest_col in rename_map.items():
+        source_col = normalized_columns.get(source_key)
+        if source_col:
+            resolved_rename[source_col] = dest_col
+    if resolved_rename:
+        out = out.rename(columns=resolved_rename)
     had_active_col = "active" in out.columns
     for col in cols:
         if col not in out.columns:
             out[col] = ""
+
+    injury_detail = out.get("injury_detail")
+    est_return = out.get("est_return")
+    if injury_detail is not None:
+        injury_text = injury_detail.astype(str).str.strip()
+        notes_blank = out["notes"].astype(str).str.strip() == ""
+        out.loc[notes_blank, "notes"] = injury_text.loc[notes_blank]
+        if est_return is not None:
+            est_text = est_return.astype(str).str.strip()
+            has_est = est_text != ""
+            use_est = notes_blank & has_est
+            out.loc[use_est, "notes"] = (
+                injury_text.loc[use_est] + " | Est Return: " + est_text.loc[use_est]
+            )
 
     out["player_name"] = out["player_name"].astype(str).str.strip()
     out["team"] = out["team"].astype(str).str.strip().str.upper()
@@ -110,10 +142,14 @@ def normalize_injuries_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     status_map = {
         "o": "out",
         "out": "out",
+        "outforseason": "out",
+        "season": "out",
         "d": "doubtful",
         "doubtful": "doubtful",
         "q": "questionable",
         "questionable": "questionable",
+        "gametimedecision": "questionable",
+        "daytoday": "questionable",
         "gtd": "questionable",
         "p": "probable",
         "probable": "probable",
@@ -121,7 +157,9 @@ def normalize_injuries_frame(df: pd.DataFrame | None) -> pd.DataFrame:
         "available": "available",
         "active": "available",
     }
-    out["status"] = out["status"].map(lambda x: status_map.get(str(x).strip().lower(), str(x).strip().lower()))
+    out["status"] = out["status"].map(
+        lambda x: status_map.get(_normalize_col_name(x), str(x).strip().lower())
+    )
     out["notes"] = out["notes"].astype(str).str.strip()
     out["updated_at"] = out["updated_at"].astype(str).str.strip()
     if had_active_col:

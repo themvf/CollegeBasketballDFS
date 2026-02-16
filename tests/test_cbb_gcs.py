@@ -70,6 +70,32 @@ def test_injuries_blob_name_and_rw() -> None:
     assert "A,AAA,Out,true" in (store.read_injuries_csv() or "")
 
 
+def test_injuries_feed_blob_name_and_date_scoped_rw() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    expected_date_blob = "cbb/injuries/feed/2026-02-14_injuries_feed.csv"
+    expected_legacy_blob = "cbb/injuries/injuries_feed.csv"
+
+    assert store.injuries_feed_blob_name(d) == expected_date_blob
+    assert store.injuries_feed_blob_name() == expected_legacy_blob
+
+    written = store.write_injuries_feed_csv("player_name,team,status\nA,AAA,out\n", game_date=d)
+    assert written == expected_date_blob
+    assert "AAA" in (store.read_injuries_feed_csv(d) or "")
+    assert store.delete_injuries_feed_csv(d) is True
+    assert store.read_injuries_feed_csv(d) is None
+
+
+def test_injuries_feed_date_read_falls_back_to_legacy_blob() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 15)
+    store.write_injuries_feed_csv("player_name,team,status\nLegacy,LEG,out\n")
+
+    text = store.read_injuries_feed_csv(d)
+    assert text is not None
+    assert "Legacy" in text
+
+
 def test_projections_blob_name_and_rw() -> None:
     store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
     d = date(2026, 2, 14)
