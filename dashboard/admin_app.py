@@ -2846,7 +2846,22 @@ with tab_tournament_review:
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
                 )
-                if projections_df.empty and not slate_df.empty:
+                projections_enriched_from_pool = False
+                need_pool_fallback = projections_df.empty
+                if not need_pool_fallback and not projections_df.empty:
+                    mins_last7 = (
+                        pd.to_numeric(projections_df.get("our_minutes_last7"), errors="coerce")
+                        if "our_minutes_last7" in projections_df.columns
+                        else pd.Series(dtype=float)
+                    )
+                    mins_avg = (
+                        pd.to_numeric(projections_df.get("our_minutes_avg"), errors="coerce")
+                        if "our_minutes_avg" in projections_df.columns
+                        else pd.Series(dtype=float)
+                    )
+                    need_pool_fallback = not bool(mins_last7.notna().any() or mins_avg.notna().any())
+
+                if need_pool_fallback and not slate_df.empty:
                     fallback_pool, _, _, _, _ = build_optimizer_pool_for_date(
                         bucket_name=bucket_name,
                         slate_date=tr_date,
@@ -2855,12 +2870,63 @@ with tab_tournament_review:
                         service_account_json=cred_json,
                         service_account_json_b64=cred_json_b64,
                     )
-                    projections_df = fallback_pool
+                    if projections_df.empty:
+                        projections_df = fallback_pool
+                        projections_enriched_from_pool = not projections_df.empty
+                    elif not fallback_pool.empty:
+                        projections_df = projections_df.copy()
+                        fallback_pool = fallback_pool.copy()
+                        projections_df["ID"] = projections_df.get("ID", "").astype(str).str.strip()
+                        projections_df["Name"] = projections_df.get("Name", "").astype(str).str.strip()
+                        projections_df["_name_norm"] = projections_df["Name"].map(
+                            lambda x: re.sub(r"[^a-z0-9]", "", str(x or "").strip().lower())
+                        )
+                        fallback_pool["ID"] = fallback_pool.get("ID", "").astype(str).str.strip()
+                        fallback_pool["Name"] = fallback_pool.get("Name", "").astype(str).str.strip()
+                        fallback_pool["_name_norm"] = fallback_pool["Name"].map(
+                            lambda x: re.sub(r"[^a-z0-9]", "", str(x or "").strip().lower())
+                        )
+                        enrich_cols = [
+                            "our_minutes_avg",
+                            "our_minutes_last7",
+                            "our_usage_proxy",
+                            "our_dk_projection",
+                            "blended_projection",
+                            "vegas_dk_projection",
+                        ]
+                        id_cols = ["ID"] + [c for c in enrich_cols if c in fallback_pool.columns]
+                        name_cols = ["_name_norm"] + [c for c in enrich_cols if c in fallback_pool.columns]
+                        fb_id = fallback_pool[id_cols].drop_duplicates(subset=["ID"])
+                        fb_name = fallback_pool[name_cols].drop_duplicates(subset=["_name_norm"])
+                        projections_df = projections_df.merge(fb_id, on="ID", how="left", suffixes=("", "_fb_id"))
+                        projections_df = projections_df.merge(fb_name, on="_name_norm", how="left", suffixes=("", "_fb_name"))
+                        for col in enrich_cols:
+                            if col not in projections_df.columns:
+                                projections_df[col] = pd.NA
+                            base_series = pd.to_numeric(projections_df.get(col), errors="coerce")
+                            id_series = pd.to_numeric(projections_df.get(f"{col}_fb_id"), errors="coerce")
+                            name_series = pd.to_numeric(projections_df.get(f"{col}_fb_name"), errors="coerce")
+                            projections_df[col] = base_series.where(base_series.notna(), id_series)
+                            projections_df[col] = pd.to_numeric(projections_df[col], errors="coerce").where(
+                                pd.to_numeric(projections_df[col], errors="coerce").notna(),
+                                name_series,
+                            )
+                        drop_cols = ["_name_norm"]
+                        for col in enrich_cols:
+                            drop_cols.append(f"{col}_fb_id")
+                            drop_cols.append(f"{col}_fb_name")
+                        projections_df = projections_df.drop(columns=drop_cols, errors="ignore")
+                        projections_enriched_from_pool = True
 
                 entries_df, expanded_df = build_field_entries_and_players(normalized_standings, slate_df)
                 if entries_df.empty:
                     st.warning("Could not parse lineup strings from this standings file.")
                 else:
+                    if projections_enriched_from_pool:
+                        st.caption(
+                            "Projection snapshot had missing minutes/projection fields. "
+                            "Filled from current Slate + Vegas pool for this date."
+                        )
                     entries_df = build_entry_actual_points_comparison(
                         entry_summary_df=entries_df,
                         expanded_players_df=expanded_df,
