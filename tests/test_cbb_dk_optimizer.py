@@ -112,6 +112,33 @@ def test_remove_injured_players_filters_out_and_doubtful() -> None:
     assert len(filtered) == len(slate) - 2
 
 
+def test_remove_injured_players_defaults_feed_rows_active_when_active_missing() -> None:
+    slate = _sample_slate()
+    injuries = pd.DataFrame(
+        [
+            {"player_name": "Guard 1", "team": "CCC", "status": "Out"},
+        ]
+    )
+
+    filtered, removed = remove_injured_players(slate, injuries)
+    assert "Guard 1" in removed["Name"].tolist()
+    assert len(filtered) == len(slate) - 1
+
+
+def test_remove_injured_players_uses_unique_name_fallback_for_team_mismatch() -> None:
+    slate = _sample_slate()
+    injuries = pd.DataFrame(
+        [
+            # Team label does not match slate abbreviation, but player name is unique in slate.
+            {"player_name": "Guard 1", "team": "SOMETEAM", "status": "Out", "active": True},
+        ]
+    )
+
+    filtered, removed = remove_injured_players(slate, injuries)
+    assert "Guard 1" in removed["Name"].tolist()
+    assert len(filtered) == len(slate) - 1
+
+
 def test_build_player_pool_merges_props() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     g1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]

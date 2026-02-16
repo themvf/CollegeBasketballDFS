@@ -96,6 +96,12 @@ class CbbGcsStore:
     def injuries_blob_name(self) -> str:
         return f"{self.injuries_prefix}/injuries_master.csv"
 
+    def injuries_feed_blob_name(self) -> str:
+        return f"{self.injuries_prefix}/injuries_feed.csv"
+
+    def injuries_manual_blob_name(self) -> str:
+        return f"{self.injuries_prefix}/injuries_manual.csv"
+
     def projections_blob_name(self, game_date: date) -> str:
         return f"{self.projections_prefix}/{game_date.isoformat()}_projections.csv"
 
@@ -250,6 +256,30 @@ class CbbGcsStore:
 
     def write_injuries_csv(self, csv_text: str) -> str:
         blob_name = self.injuries_blob_name()
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_injuries_feed_csv(self) -> str | None:
+        blob = self.bucket.blob(self.injuries_feed_blob_name())
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_injuries_feed_csv(self, csv_text: str) -> str:
+        blob_name = self.injuries_feed_blob_name()
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_injuries_manual_csv(self) -> str | None:
+        blob = self.bucket.blob(self.injuries_manual_blob_name())
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_injuries_manual_csv(self, csv_text: str) -> str:
+        blob_name = self.injuries_manual_blob_name()
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name

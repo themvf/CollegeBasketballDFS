@@ -134,6 +134,14 @@ def _injuries_blob_name() -> str:
     return "cbb/injuries/injuries_master.csv"
 
 
+def _injuries_feed_blob_name() -> str:
+    return "cbb/injuries/injuries_feed.csv"
+
+
+def _injuries_manual_blob_name() -> str:
+    return "cbb/injuries/injuries_manual.csv"
+
+
 def _read_injuries_csv(store: CbbGcsStore) -> str | None:
     reader = getattr(store, "read_injuries_csv", None)
     if callable(reader):
@@ -152,6 +160,55 @@ def _write_injuries_csv(store: CbbGcsStore, csv_text: str) -> str:
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
+
+
+def _read_injuries_feed_csv(store: CbbGcsStore) -> str | None:
+    reader = getattr(store, "read_injuries_feed_csv", None)
+    if callable(reader):
+        return reader()
+    blob = store.bucket.blob(_injuries_feed_blob_name())
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _write_injuries_feed_csv(store: CbbGcsStore, csv_text: str) -> str:
+    writer = getattr(store, "write_injuries_feed_csv", None)
+    if callable(writer):
+        return writer(csv_text)
+    blob_name = _injuries_feed_blob_name()
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
+def _read_injuries_manual_csv(store: CbbGcsStore) -> str | None:
+    reader = getattr(store, "read_injuries_manual_csv", None)
+    if callable(reader):
+        return reader()
+    blob = store.bucket.blob(_injuries_manual_blob_name())
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _write_injuries_manual_csv(store: CbbGcsStore, csv_text: str) -> str:
+    writer = getattr(store, "write_injuries_manual_csv", None)
+    if callable(writer):
+        return writer(csv_text)
+    blob_name = _injuries_manual_blob_name()
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
+def _delete_injuries_feed_csv(store: CbbGcsStore) -> tuple[bool, str]:
+    blob_name = _injuries_feed_blob_name()
+    blob = store.bucket.blob(blob_name)
+    if not blob.exists():
+        return False, blob_name
+    blob.delete()
+    return True, blob_name
 
 
 def _projections_blob_name(slate_date: date) -> str:
@@ -511,7 +568,7 @@ def load_dk_slate_frame_for_date(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
-def load_injuries_frame(
+def load_injuries_feed_frame(
     bucket_name: str,
     gcp_project: str | None,
     service_account_json: str | None,
@@ -523,11 +580,85 @@ def load_injuries_frame(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = _read_injuries_csv(store)
+    csv_text = _read_injuries_feed_csv(store)
     if not csv_text or not csv_text.strip():
         return normalize_injuries_frame(None)
     frame = pd.read_csv(io.StringIO(csv_text))
     return normalize_injuries_frame(frame)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_injuries_manual_frame(
+    bucket_name: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = _read_injuries_manual_csv(store)
+    if not csv_text or not csv_text.strip():
+        return normalize_injuries_frame(None)
+    frame = pd.read_csv(io.StringIO(csv_text))
+    return normalize_injuries_frame(frame)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_injuries_frame(
+    bucket_name: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    feed_df = load_injuries_feed_frame(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    manual_df = load_injuries_manual_frame(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if feed_df.empty and manual_df.empty:
+        # Backward compatibility: fall back to older single-source injuries file only when new layers are absent.
+        client = build_storage_client(
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+            project=gcp_project,
+        )
+        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+        legacy_csv = _read_injuries_csv(store)
+        if not legacy_csv or not legacy_csv.strip():
+            return normalize_injuries_frame(None)
+        legacy_frame = pd.read_csv(io.StringIO(legacy_csv))
+        return normalize_injuries_frame(legacy_frame)
+
+    frames: list[pd.DataFrame] = []
+    if not feed_df.empty:
+        feed = feed_df.copy()
+        feed["_source"] = "feed"
+        frames.append(feed)
+    if not manual_df.empty:
+        manual = manual_df.copy()
+        manual["_source"] = "manual"
+        frames.append(manual)
+
+    combined = pd.concat(frames, ignore_index=True)
+    combined["_injury_key"] = combined.apply(
+        lambda r: f"{str(r.get('player_name') or '').strip().lower()}|{str(r.get('team') or '').strip().lower()}",
+        axis=1,
+    )
+    # Manual rows are appended last and override feed rows on duplicate player+team keys.
+    combined = combined.drop_duplicates(subset=["_injury_key"], keep="last")
+    combined = combined.drop(columns=["_injury_key", "_source"], errors="ignore")
+    return normalize_injuries_frame(combined)
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
@@ -1400,11 +1531,132 @@ with tab_dk:
 
 with tab_injuries:
     st.subheader("Injuries")
-    st.caption("Persistent injury list stored in GCS by player + team.")
+    st.caption(
+        "Two-layer injury system: uploaded feed CSV replaces stale source injuries, "
+        "and manual entries persist as overrides for late news."
+    )
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to manage injuries.")
     else:
         try:
+            feed_df = load_injuries_feed_frame(
+                bucket_name=bucket_name,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            manual_df = load_injuries_manual_frame(
+                bucket_name=bucket_name,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            effective_df = load_injuries_frame(
+                bucket_name=bucket_name,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Feed Rows", int(len(feed_df)))
+            c2.metric("Manual Rows", int(len(manual_df)))
+            c3.metric("Effective Rows", int(len(effective_df)))
+
+            st.subheader("Injury Feed Upload (CSV Replace)")
+            st.caption(
+                "Upload your latest injury report CSV. This replaces prior feed injuries, "
+                "so players removed from the latest file are no longer auto-excluded."
+            )
+            feed_upload = st.file_uploader(
+                "Upload Injury Feed CSV",
+                type=["csv"],
+                key="injuries_feed_upload",
+            )
+            uf1, uf2, uf3 = st.columns(3)
+            replace_feed_clicked = uf1.button("Replace Feed CSV", key="replace_injury_feed_csv")
+            clear_feed_clicked = uf2.button("Clear Feed CSV", key="clear_injury_feed_csv")
+            reload_all_clicked = uf3.button("Reload Injury Data", key="reload_injury_data")
+
+            if replace_feed_clicked or clear_feed_clicked:
+                client = build_storage_client(
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                    project=gcp_project or None,
+                )
+                store = CbbGcsStore(bucket_name=bucket_name, client=client)
+
+                if replace_feed_clicked:
+                    if feed_upload is None:
+                        st.error("Choose an injury feed CSV file first.")
+                    else:
+                        csv_text = feed_upload.getvalue().decode("utf-8-sig")
+                        raw_feed = pd.read_csv(io.StringIO(csv_text))
+                        normalized_feed = normalize_injuries_frame(raw_feed)
+                        blob_name = _write_injuries_feed_csv(store, normalized_feed.to_csv(index=False))
+                        load_injuries_feed_frame.clear()
+                        load_injuries_manual_frame.clear()
+                        load_injuries_frame.clear()
+                        st.success(f"Replaced feed injuries in `{blob_name}` with {len(normalized_feed)} rows.")
+                if clear_feed_clicked:
+                    deleted, blob_name = _delete_injuries_feed_csv(store)
+                    load_injuries_feed_frame.clear()
+                    load_injuries_manual_frame.clear()
+                    load_injuries_frame.clear()
+                    if deleted:
+                        st.success(f"Cleared feed injuries by deleting `{blob_name}`.")
+                    else:
+                        st.info(f"No feed injury file found at `{blob_name}`.")
+
+                feed_df = load_injuries_feed_frame(
+                    bucket_name=bucket_name,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                manual_df = load_injuries_manual_frame(
+                    bucket_name=bucket_name,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                effective_df = load_injuries_frame(
+                    bucket_name=bucket_name,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+
+            if reload_all_clicked:
+                load_injuries_feed_frame.clear()
+                load_injuries_manual_frame.clear()
+                load_injuries_frame.clear()
+                st.info("Reloaded injury data from GCS.")
+                feed_df = load_injuries_feed_frame(
+                    bucket_name=bucket_name,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                manual_df = load_injuries_manual_frame(
+                    bucket_name=bucket_name,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                effective_df = load_injuries_frame(
+                    bucket_name=bucket_name,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+
+            if feed_df.empty:
+                st.caption("No feed injury CSV loaded yet.")
+            else:
+                st.dataframe(feed_df, hide_index=True, use_container_width=True)
+
+            st.subheader("Manual Injury Overrides")
             add_col1, add_col2, add_col3 = st.columns([2, 1, 1])
             with add_col1:
                 injury_player = st.text_input("Player Name", key="inj_player_name")
@@ -1418,14 +1670,7 @@ with tab_injuries:
                     key="inj_status",
                 )
             injury_notes = st.text_input("Notes (optional)", key="inj_notes")
-            add_injury_clicked = st.button("Add Injury", key="add_injury_button")
-
-            injuries_df = load_injuries_frame(
-                bucket_name=bucket_name,
-                gcp_project=gcp_project or None,
-                service_account_json=cred_json,
-                service_account_json_b64=cred_json_b64,
-            )
+            add_injury_clicked = st.button("Add Manual Injury", key="add_injury_button")
 
             if add_injury_clicked:
                 if not injury_player.strip() or not injury_team.strip():
@@ -1443,7 +1688,7 @@ with tab_injuries:
                             }
                         ]
                     )
-                    merged = pd.concat([injuries_df, new_row], ignore_index=True)
+                    merged = pd.concat([manual_df, new_row], ignore_index=True)
                     merged = normalize_injuries_frame(merged)
                     client = build_storage_client(
                         service_account_json=cred_json,
@@ -1451,26 +1696,28 @@ with tab_injuries:
                         project=gcp_project or None,
                     )
                     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                    _write_injuries_csv(store, merged.to_csv(index=False))
+                    _write_injuries_manual_csv(store, merged.to_csv(index=False))
+                    load_injuries_feed_frame.clear()
+                    load_injuries_manual_frame.clear()
                     load_injuries_frame.clear()
-                    st.success("Injury added.")
-                    injuries_df = load_injuries_frame(
+                    st.success("Manual injury added.")
+                    manual_df = load_injuries_manual_frame(
                         bucket_name=bucket_name,
                         gcp_project=gcp_project or None,
                         service_account_json=cred_json,
                         service_account_json_b64=cred_json_b64,
                     )
 
-            st.subheader("Injury List Editor")
+            st.subheader("Manual Injury List Editor")
             edited_injuries = st.data_editor(
-                injuries_df,
+                manual_df,
                 num_rows="dynamic",
                 use_container_width=True,
-                key="injuries_editor_df",
+                key="manual_injuries_editor_df",
             )
             save_col, reload_col = st.columns(2)
-            save_injuries_clicked = save_col.button("Save Injury List", key="save_injury_list")
-            reload_injuries_clicked = reload_col.button("Reload from GCS", key="reload_injury_list")
+            save_injuries_clicked = save_col.button("Save Manual Injury List", key="save_injury_list")
+            reload_injuries_clicked = reload_col.button("Reload Manual List", key="reload_injury_list")
 
             if save_injuries_clicked:
                 normalized = normalize_injuries_frame(edited_injuries)
@@ -1480,13 +1727,24 @@ with tab_injuries:
                     project=gcp_project or None,
                 )
                 store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                blob_name = _write_injuries_csv(store, normalized.to_csv(index=False))
+                blob_name = _write_injuries_manual_csv(store, normalized.to_csv(index=False))
+                load_injuries_feed_frame.clear()
+                load_injuries_manual_frame.clear()
                 load_injuries_frame.clear()
-                st.success(f"Saved injury list to `{blob_name}`")
+                st.success(f"Saved manual injury list to `{blob_name}`")
 
             if reload_injuries_clicked:
+                load_injuries_feed_frame.clear()
+                load_injuries_manual_frame.clear()
                 load_injuries_frame.clear()
-                st.info("Reloaded injury cache from GCS.")
+                st.info("Reloaded manual injury list from GCS.")
+
+            st.subheader("Effective Injury Filter (Feed + Manual)")
+            st.caption("This combined list is applied when building Slate + Vegas and generating lineups.")
+            if effective_df.empty:
+                st.info("No effective injuries loaded.")
+            else:
+                st.dataframe(effective_df, hide_index=True, use_container_width=True)
         except Exception as exc:
             st.exception(exc)
 

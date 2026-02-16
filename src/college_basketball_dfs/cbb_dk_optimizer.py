@@ -81,20 +81,62 @@ def normalize_injuries_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     rename_map = {
         "player": "player_name",
         "name": "player_name",
+        "playername": "player_name",
+        "athlete": "player_name",
+        "player_full_name": "player_name",
+        "injured_player": "player_name",
         "teamabbrev": "team",
         "team_abbrev": "team",
+        "teamabbr": "team",
+        "team_abbreviation": "team",
+        "team_name": "team",
+        "injury_status": "status",
+        "designation": "status",
+        "report_status": "status",
+        "comment": "notes",
+        "injury_notes": "notes",
+        "is_active": "active",
+        "enabled": "active",
     }
     out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
+    had_active_col = "active" in out.columns
     for col in cols:
         if col not in out.columns:
             out[col] = ""
 
     out["player_name"] = out["player_name"].astype(str).str.strip()
-    out["team"] = out["team"].astype(str).str.strip()
-    out["status"] = out["status"].astype(str).str.strip()
+    out["team"] = out["team"].astype(str).str.strip().str.upper()
+    out["status"] = out["status"].astype(str).str.strip().str.lower()
+    status_map = {
+        "o": "out",
+        "out": "out",
+        "d": "doubtful",
+        "doubtful": "doubtful",
+        "q": "questionable",
+        "questionable": "questionable",
+        "gtd": "questionable",
+        "p": "probable",
+        "probable": "probable",
+        "a": "available",
+        "available": "available",
+        "active": "available",
+    }
+    out["status"] = out["status"].map(lambda x: status_map.get(str(x).strip().lower(), str(x).strip().lower()))
     out["notes"] = out["notes"].astype(str).str.strip()
     out["updated_at"] = out["updated_at"].astype(str).str.strip()
-    out["active"] = out["active"].map(lambda x: str(x).strip().lower() in {"1", "true", "yes", "y"} if pd.notna(x) else False)
+    if had_active_col:
+        out["active"] = out["active"].map(
+            lambda x: str(x).strip().lower() in {"1", "true", "yes", "y"}
+            if pd.notna(x)
+            else False
+        )
+    else:
+        # Feed CSV rows are treated as active unless explicitly set otherwise.
+        out["active"] = True
+    out["updated_at"] = out["updated_at"].where(
+        out["updated_at"].astype(str).str.strip() != "",
+        pd.Timestamp.utcnow().strftime("%Y-%m-%d %H:%M:%SZ"),
+    )
 
     out = out.loc[(out["player_name"] != "") & (out["team"] != "")]
     out = out[cols].reset_index(drop=True)
@@ -114,24 +156,39 @@ def remove_injured_players(
         lambda r: _player_team_key(r.get("Name"), r.get("TeamAbbrev")),
         axis=1,
     )
+    if "Name" in working.columns:
+        working["_injury_name"] = working["Name"].map(_normalize_text)
+    else:
+        working["_injury_name"] = ""
 
     injuries = normalize_injuries_frame(injuries_df)
     if injuries.empty:
-        return working.drop(columns=["_injury_key"]), pd.DataFrame(columns=slate_df.columns)
+        return working.drop(columns=["_injury_key", "_injury_name"]), pd.DataFrame(columns=slate_df.columns)
 
     statuses = {s.strip().lower() for s in statuses_to_remove if s.strip()}
     active = injuries.loc[injuries["active"]].copy()
     active["status_norm"] = active["status"].astype(str).str.strip().str.lower()
     active = active.loc[active["status_norm"].isin(statuses)]
     if active.empty:
-        return working.drop(columns=["_injury_key"]), pd.DataFrame(columns=slate_df.columns)
+        return working.drop(columns=["_injury_key", "_injury_name"]), pd.DataFrame(columns=slate_df.columns)
 
     active["_injury_key"] = active.apply(lambda r: _player_team_key(r["player_name"], r["team"]), axis=1)
+    if "player_name" in active.columns:
+        active["_injury_name"] = active["player_name"].map(_normalize_text)
+    else:
+        active["_injury_name"] = ""
     blocked = set(active["_injury_key"].unique().tolist())
-    removed_mask = working["_injury_key"].isin(blocked)
+    blocked_names = set(active["_injury_name"].unique().tolist())
 
-    removed = working.loc[removed_mask].drop(columns=["_injury_key"]).copy()
-    filtered = working.loc[~removed_mask].drop(columns=["_injury_key"]).copy()
+    # Fallback to name-only matching when the slate name is unique to avoid team-label mismatch leakage.
+    name_counts = working["_injury_name"].value_counts(dropna=False)
+    unique_name_keys = set(name_counts.loc[name_counts == 1].index.tolist())
+    blocked_unique_names = blocked_names & unique_name_keys
+
+    removed_mask = working["_injury_key"].isin(blocked) | working["_injury_name"].isin(blocked_unique_names)
+
+    removed = working.loc[removed_mask].drop(columns=["_injury_key", "_injury_name"]).copy()
+    filtered = working.loc[~removed_mask].drop(columns=["_injury_key", "_injury_name"]).copy()
     return filtered, removed
 
 
