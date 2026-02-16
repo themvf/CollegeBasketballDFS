@@ -2530,19 +2530,20 @@ with tab_lineups:
                             version_meta_map = {str(v.get("version_key") or ""): v for v in versions_meta}
                             saved_version_keys = [k for k in version_meta_map.keys() if k]
                             if saved_version_keys:
-                                if str(st.session_state.get("saved_run_version_picker", "")) not in saved_version_keys:
-                                    st.session_state.pop("saved_run_version_picker", None)
-                                    selected_saved_version = st.selectbox(
-                                        "Saved Version",
-                                        options=saved_version_keys,
-                                        index=0,
-                                        format_func=lambda k: (
-                                            f"{version_meta_map[k].get('version_label', k)} "
-                                            f"[{k} | "
-                                            f"{(version_meta_map[k].get('model_profile') or ('tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'))}]"
-                                        ),
-                                        key="saved_run_version_picker",
-                                    )
+                                current_saved_version = str(st.session_state.get("saved_run_version_picker", "")).strip()
+                                if current_saved_version not in saved_version_keys:
+                                    st.session_state["saved_run_version_picker"] = saved_version_keys[0]
+                                selected_saved_version = st.selectbox(
+                                    "Saved Version",
+                                    options=saved_version_keys,
+                                    index=0,
+                                    format_func=lambda k: (
+                                        f"{version_meta_map[k].get('version_label', k)} "
+                                        f"[{k} | "
+                                        f"{(version_meta_map[k].get('model_profile') or ('tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'))}]"
+                                    ),
+                                    key="saved_run_version_picker",
+                                )
                                 saved_payload = load_saved_lineup_version_payload(
                                     bucket_name=bucket_name,
                                     selected_date=selected_manifest_date,
