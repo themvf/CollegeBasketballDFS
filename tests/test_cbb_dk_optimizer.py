@@ -218,10 +218,13 @@ def test_build_player_pool_blends_our_and_vegas_stats() -> None:
         bookmaker_filter="fanduel",
     )
     g1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
-    # Our points=20, Vegas points=18.5 => blend=19.25
-    assert round(float(g1["blend_points_proj"]), 2) == 19.25
+    # Our points=20, Vegas points=18.5, vegas_weight=0.35 (2 markets) => weighted blend=19.475
+    assert round(float(g1["blend_points_proj"]), 3) == 19.475
     # Rebounds missing in vegas for Guard 1, so blended should keep our rebounds=4
     assert round(float(g1["blend_rebounds_proj"]), 2) == 4.0
+    assert int(g1["vegas_markets_found"]) == 2
+    assert bool(g1["vegas_projection_usable"]) is True
+    assert round(float(g1["vegas_blend_weight"]), 2) == 0.35
     assert float(g1["our_minutes_avg"]) > 0
     assert float(g1["our_usage_proxy"]) > 0
     assert round(float(g1["blended_projection"]), 3) == round(float(g1["projected_dk_points"]), 3)
@@ -231,6 +234,17 @@ def test_build_player_pool_blends_our_and_vegas_stats() -> None:
     f1 = pool.loc[pool["Name"] == "Forward 1"].iloc[0]
     assert "vegas_over_our_flag" in f1.index
     assert "low_own_ceiling_flag" in f1.index
+    assert int(f1["vegas_markets_found"]) == 3
+    assert bool(f1["vegas_projection_usable"]) is True
+    assert round(float(f1["vegas_blend_weight"]), 2) == 0.55
+
+    # Guard 2 has no vegas markets, so vegas projection should be NA and blend falls back to our projection.
+    g2 = pool.loc[pool["Name"] == "Guard 2"].iloc[0]
+    assert int(g2["vegas_markets_found"]) == 0
+    assert bool(g2["vegas_projection_usable"]) is False
+    assert round(float(g2["vegas_blend_weight"]), 2) == 0.0
+    assert pd.isna(g2["vegas_dk_projection"])
+    assert round(float(g2["blend_points_proj"]), 3) == round(float(g2["our_points_proj"]), 3)
 
 
 def test_build_player_pool_attaches_tail_metrics_from_game_odds() -> None:

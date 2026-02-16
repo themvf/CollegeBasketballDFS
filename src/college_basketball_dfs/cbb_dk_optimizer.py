@@ -161,6 +161,24 @@ def _blend_stat(our_series: pd.Series, vegas_series: pd.Series) -> pd.Series:
     return out
 
 
+def _blend_stat_weighted(
+    our_series: pd.Series,
+    vegas_series: pd.Series,
+    vegas_weight_series: pd.Series,
+) -> pd.Series:
+    our = pd.to_numeric(our_series, errors="coerce")
+    vegas = pd.to_numeric(vegas_series, errors="coerce")
+    weight = pd.to_numeric(vegas_weight_series, errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
+    both = our.notna() & vegas.notna()
+    only_our = our.notna() & ~vegas.notna()
+    only_vegas = ~our.notna() & vegas.notna()
+    out = pd.Series(index=our.index, dtype="float64")
+    out.loc[both] = (our.loc[both] * (1.0 - weight.loc[both])) + (vegas.loc[both] * weight.loc[both])
+    out.loc[only_our] = our.loc[only_our]
+    out.loc[only_vegas] = vegas.loc[only_vegas]
+    return out
+
+
 def build_player_pool(
     slate_df: pd.DataFrame,
     props_df: pd.DataFrame | None,
@@ -369,11 +387,36 @@ def build_player_pool(
     out["our_blocks_proj"] = pd.to_numeric(out["our_blocks_avg"], errors="coerce")
     out["our_turnovers_proj"] = pd.to_numeric(out["our_turnovers_avg"], errors="coerce")
 
+    vegas_market_cols = ["vegas_points_line", "vegas_rebounds_line", "vegas_assists_line", "vegas_threes_line"]
+    out["vegas_markets_found"] = out[vegas_market_cols].notna().sum(axis=1).astype(int)
+    out["vegas_points_available"] = out["vegas_points_line"].notna()
+    out["vegas_projection_usable"] = out["vegas_points_available"] & (out["vegas_markets_found"] >= 2)
+    vegas_weight = pd.Series(0.0, index=out.index, dtype="float64")
+    vegas_weight.loc[out["vegas_points_available"] & (out["vegas_markets_found"] >= 3)] = 0.55
+    vegas_weight.loc[out["vegas_points_available"] & (out["vegas_markets_found"] == 2)] = 0.35
+    out["vegas_blend_weight"] = vegas_weight.where(out["vegas_projection_usable"], 0.0)
+
     # Blended guard-rail stat line. If Vegas is missing a stat, keep our projection.
-    out["blend_points_proj"] = _blend_stat(out["our_points_proj"], out["vegas_points_line"])
-    out["blend_rebounds_proj"] = _blend_stat(out["our_rebounds_proj"], out["vegas_rebounds_line"])
-    out["blend_assists_proj"] = _blend_stat(out["our_assists_proj"], out["vegas_assists_line"])
-    out["blend_threes_proj"] = _blend_stat(out["our_threes_proj"], out["vegas_threes_line"])
+    out["blend_points_proj"] = _blend_stat_weighted(
+        out["our_points_proj"],
+        out["vegas_points_line"],
+        out["vegas_blend_weight"],
+    )
+    out["blend_rebounds_proj"] = _blend_stat_weighted(
+        out["our_rebounds_proj"],
+        out["vegas_rebounds_line"],
+        out["vegas_blend_weight"],
+    )
+    out["blend_assists_proj"] = _blend_stat_weighted(
+        out["our_assists_proj"],
+        out["vegas_assists_line"],
+        out["vegas_blend_weight"],
+    )
+    out["blend_threes_proj"] = _blend_stat_weighted(
+        out["our_threes_proj"],
+        out["vegas_threes_line"],
+        out["vegas_blend_weight"],
+    )
 
     # Reference projections: pure "our" and pure "vegas-ish"
     out["our_dk_projection"] = (
@@ -385,7 +428,7 @@ def build_player_pool(
         - (0.5 * out["our_turnovers_proj"].fillna(0))
         + (0.5 * out["our_threes_proj"].fillna(0))
     )
-    out["vegas_dk_projection"] = (
+    vegas_dk_projection_raw = (
         out["vegas_points_line"].fillna(0)
         + (1.25 * out["vegas_rebounds_line"].fillna(0))
         + (1.5 * out["vegas_assists_line"].fillna(0))
@@ -394,6 +437,7 @@ def build_player_pool(
         + (2.0 * out["our_blocks_proj"].fillna(0))
         - (0.5 * out["our_turnovers_proj"].fillna(0))
     )
+    out["vegas_dk_projection"] = vegas_dk_projection_raw.where(out["vegas_projection_usable"], pd.NA)
 
     # Final V1 projected fantasy points: DK scoring from blended stat line + our defensive/TO estimates.
     dd_count = (

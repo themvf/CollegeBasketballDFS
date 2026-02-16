@@ -1588,6 +1588,10 @@ with tab_slate_vegas:
                         "vegas_rebounds_line",
                         "vegas_assists_line",
                         "vegas_threes_line",
+                        "vegas_markets_found",
+                        "vegas_points_available",
+                        "vegas_projection_usable",
+                        "vegas_blend_weight",
                         "vegas_dk_projection",
                     ]
                     existing_cols = [c for c in show_cols if c in pool_df.columns]
@@ -1627,6 +1631,8 @@ with tab_slate_vegas:
                         "vegas_rebounds_line",
                         "vegas_assists_line",
                         "vegas_threes_line",
+                        "vegas_markets_found",
+                        "vegas_blend_weight",
                         "vegas_dk_projection",
                     ]
                     for col in numeric_cols:
@@ -2395,6 +2401,8 @@ with tab_projection_review:
                     "blended_projection",
                     "our_dk_projection",
                     "vegas_dk_projection",
+                    "vegas_markets_found",
+                    "vegas_blend_weight",
                     "actual_dk_points",
                     "blend_error",
                     "our_error",
