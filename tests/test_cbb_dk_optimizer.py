@@ -188,6 +188,22 @@ def test_build_player_pool_merges_props() -> None:
     assert f1["projected_ownership"] > 0
 
 
+def test_build_player_pool_ownership_v2_has_slate_controls() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    assert not pool.empty
+    assert "projected_ownership_v1" in pool.columns
+    assert "ownership_model" in pool.columns
+    assert "ownership_temperature" in pool.columns
+    assert "ownership_target_total" in pool.columns
+    assert set(pool["ownership_model"].astype(str).unique().tolist()) == {"v2_softmax"}
+    own = pd.to_numeric(pool["projected_ownership"], errors="coerce")
+    assert own.notna().all()
+    assert (own >= 0).all()
+    assert (own <= 100).all()
+    # Ownership target is 800% across players before clipping.
+    assert abs(float(own.sum()) - 800.0) <= 5.0
+
+
 def test_generate_lineups_respects_locks_and_excludes() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     locked = ["1001"]

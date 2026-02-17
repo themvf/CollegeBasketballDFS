@@ -274,6 +274,71 @@ def _blend_stat_weighted(
     return out
 
 
+def _rank_pct_series(series: pd.Series) -> pd.Series:
+    return pd.to_numeric(series, errors="coerce").rank(method="average", pct=True).fillna(0.0)
+
+
+def _ownership_temperature_for_games(num_games: int) -> float:
+    # Fewer games -> lower temperature (more concentrated ownership); more games -> flatter.
+    n = max(1, int(num_games))
+    temp = 0.60 + (0.09 * max(0, n - 2))
+    return float(min(1.80, max(0.55, temp)))
+
+
+def _softmax(values: pd.Series, temperature: float) -> pd.Series:
+    v = pd.to_numeric(values, errors="coerce").fillna(0.0).astype(float)
+    temp = max(0.01, float(temperature))
+    centered = (v - float(v.mean())) / float(v.std(ddof=0) or 1.0)
+    scaled = centered / temp
+    shifted = scaled - float(scaled.max())
+    exp_vals = shifted.map(math.exp)
+    denom = float(exp_vals.sum())
+    if denom <= 0:
+        return pd.Series([1.0 / max(1, len(v))] * len(v), index=v.index, dtype="float64")
+    return exp_vals / denom
+
+
+def _allocate_ownership_with_cap(
+    probs: pd.Series,
+    target_total: float,
+    cap_per_player: float = 100.0,
+) -> pd.Series:
+    p = pd.to_numeric(probs, errors="coerce").fillna(0.0).clip(lower=0.0)
+    if p.empty:
+        return pd.Series(dtype="float64")
+    if float(p.sum()) <= 0:
+        p = pd.Series([1.0 / float(len(p))] * len(p), index=p.index, dtype="float64")
+
+    total_target = max(0.0, float(target_total))
+    cap = max(0.0, float(cap_per_player))
+    alloc = pd.Series([0.0] * len(p), index=p.index, dtype="float64")
+    remaining_mask = pd.Series([True] * len(p), index=p.index)
+
+    # Water-filling with cap: preserve total mass while respecting per-player max where feasible.
+    for _ in range(len(p)):
+        remaining_total = total_target - float(alloc.sum())
+        if remaining_total <= 0:
+            break
+
+        work = p.where(remaining_mask, 0.0)
+        denom = float(work.sum())
+        if denom <= 0:
+            break
+        tentative = remaining_total * (work / denom)
+        hit_cap = remaining_mask & (tentative >= (cap - 1e-9))
+
+        if not bool(hit_cap.any()):
+            alloc.loc[remaining_mask] = alloc.loc[remaining_mask] + tentative.loc[remaining_mask]
+            break
+
+        alloc.loc[hit_cap] = cap
+        remaining_mask.loc[hit_cap] = False
+        if not bool(remaining_mask.any()):
+            break
+
+    return alloc
+
+
 def build_player_pool(
     slate_df: pd.DataFrame,
     props_df: pd.DataFrame | None,
@@ -567,10 +632,44 @@ def build_player_pool(
         .astype(str)
     )
 
-    proj_pct = out["projected_dk_points"].rank(method="average", pct=True).fillna(0.0)
-    sal_pct = out["Salary"].rank(method="average", pct=True).fillna(0.0)
-    val_pct = out["value_per_1k"].rank(method="average", pct=True).fillna(0.0)
-    out["projected_ownership"] = (2.0 + 38.0 * ((0.5 * proj_pct) + (0.3 * sal_pct) + (0.2 * val_pct))).round(2)
+    proj_pct = _rank_pct_series(out["projected_dk_points"])
+    sal_pct = _rank_pct_series(out["Salary"])
+    val_pct = _rank_pct_series(out["value_per_1k"])
+    mins_signal = pd.to_numeric(out.get("our_minutes_last7"), errors="coerce")
+    mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"))
+    mins_pct = _rank_pct_series(mins_signal)
+    vegas_pts_pct = _rank_pct_series(pd.to_numeric(out.get("vegas_dk_projection"), errors="coerce"))
+
+    # Keep legacy ownership estimate for diagnostics.
+    out["projected_ownership_v1"] = (2.0 + 38.0 * ((0.5 * proj_pct) + (0.3 * sal_pct) + (0.2 * val_pct))).round(2)
+
+    # V2 ownership model: slate-size-aware softmax normalized to 8 roster slots (=800% total ownership mass).
+    own_score = (
+        (0.45 * proj_pct)
+        + (0.18 * sal_pct)
+        + (0.12 * val_pct)
+        + (0.15 * mins_pct)
+        + (0.10 * vegas_pts_pct)
+    )
+    unique_game_keys = {
+        str(x or "").strip().upper()
+        for x in out.get("game_key", pd.Series(dtype=str)).tolist()
+        if str(x or "").strip()
+    }
+    slate_game_count = max(1, len(unique_game_keys))
+    ownership_temperature = _ownership_temperature_for_games(slate_game_count)
+    ownership_probs = _softmax(own_score, temperature=ownership_temperature)
+    ownership_target_total = 800.0
+    ownership_alloc = _allocate_ownership_with_cap(
+        ownership_probs,
+        target_total=ownership_target_total,
+        cap_per_player=100.0,
+    )
+    out["ownership_model"] = "v2_softmax"
+    out["ownership_temperature"] = ownership_temperature
+    out["ownership_target_total"] = ownership_target_total
+    out["ownership_total_projected"] = float(ownership_alloc.sum())
+    out["projected_ownership"] = ownership_alloc.round(2)
 
     for col in ["game_p_plus_8", "game_p_plus_12", "game_volatility_score", "game_tail_residual_mu", "game_tail_sigma", "game_tail_match_score"]:
         if col not in out.columns:
