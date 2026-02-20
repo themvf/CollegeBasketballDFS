@@ -1146,7 +1146,7 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_agentic_review, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
+tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
     [
         "Game Data",
         "Prop Data",
@@ -1154,12 +1154,13 @@ tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_ag
         "DK Slate",
         "Injuries",
         "Slate + Vegas",
-        "Agentic Review",
         "Lineup Generator",
         "Projection Review",
         "Tournament Review",
     ]
 )
+# Render Agentic Review directly under Slate + Vegas (same tab container).
+tab_agentic_review = tab_slate_vegas
 
 with tab_game:
     st.subheader("Game Imports")
