@@ -29,7 +29,13 @@ from college_basketball_dfs.cbb_ai_review import (
 from college_basketball_dfs.cbb_backfill import iter_dates
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_ncaa import prior_day
-from college_basketball_dfs.cbb_tournament_review import build_projection_actual_comparison
+from college_basketball_dfs.cbb_tournament_review import (
+    build_field_entries_and_players,
+    build_player_exposure_comparison,
+    build_projection_actual_comparison,
+    extract_actual_ownership_from_standings,
+    normalize_contest_standings_frame,
+)
 
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 
@@ -54,6 +60,13 @@ def _resolve_credential_json_b64() -> str | None:
 
 def _to_ownership_float(value: object) -> float | None:
     if value is None:
+        return None
+    text = str(value).strip().replace("%", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
         return None
 
 
@@ -81,13 +94,15 @@ def _normalize_player_id(value: object) -> str:
         except (TypeError, ValueError):
             return text
     return re.sub(r"\s+", "", text)
-    text = str(value).strip().replace("%", "")
-    if not text:
-        return None
-    try:
-        return float(text)
-    except ValueError:
-        return None
+
+
+def _contest_id_from_blob_name(blob_name: str, selected_date: date) -> str:
+    filename = str(blob_name or "").split("/")[-1]
+    prefix = f"{selected_date.isoformat()}_"
+    if filename.startswith(prefix) and filename.endswith(".csv"):
+        cid = filename[len(prefix) : -4]
+        return cid or "contest"
+    return "contest"
 
 
 def _normalize_ownership_frame(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -188,6 +203,61 @@ def load_projection_snapshot_frame(
     if not csv_text or not csv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(csv_text))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_dk_slate_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = store.read_dk_slate_csv(selected_date)
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+    return pd.read_csv(io.StringIO(csv_text))
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_first_contest_standings_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> tuple[pd.DataFrame, str]:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}_"
+    blobs = list(store.bucket.list_blobs(prefix=prefix))
+    if not blobs:
+        return pd.DataFrame(), ""
+    blobs = sorted(blobs, key=lambda b: str(getattr(b, "name", "") or ""), reverse=True)
+    for blob in blobs:
+        try:
+            csv_text = blob.download_as_text(encoding="utf-8")
+        except Exception:
+            continue
+        if not csv_text or not csv_text.strip():
+            continue
+        try:
+            frame = pd.read_csv(io.StringIO(csv_text))
+        except Exception:
+            continue
+        if not frame.empty:
+            return frame, str(blob.name or "")
+    return pd.DataFrame(), ""
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -494,6 +564,7 @@ if build_packet_clicked:
         daily_packets: list[dict[str, Any]] = []
         scanned_dates = 0
         used_dates = 0
+        tournament_dates_used = 0
         for review_day in candidate_dates:
             scanned_dates += 1
             proj_df = load_projection_snapshot_frame(
@@ -520,14 +591,47 @@ if build_packet_clicked:
             if proj_compare_df.empty:
                 continue
 
-            own_df = load_ownership_frame_for_date(
+            contest_id = "global-review"
+            entries_df = pd.DataFrame()
+            exposure_df = pd.DataFrame()
+            standings_df, standings_blob = load_first_contest_standings_for_date(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
             )
-            exposure_df = _build_exposure_frame(proj_df, own_df)
+            if not standings_df.empty:
+                normalized = normalize_contest_standings_frame(standings_df)
+                slate_df = load_dk_slate_frame_for_date(
+                    bucket_name=bucket_name.strip(),
+                    selected_date=review_day,
+                    gcp_project=gcp_project.strip() or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                if not normalized.empty and not slate_df.empty:
+                    entries_df, expanded_df = build_field_entries_and_players(normalized, slate_df)
+                    if not entries_df.empty:
+                        tournament_dates_used += 1
+                        contest_id = _contest_id_from_blob_name(standings_blob, review_day)
+                        actual_own_df = extract_actual_ownership_from_standings(normalized)
+                        exposure_df = build_player_exposure_comparison(
+                            expanded_players_df=expanded_df,
+                            entry_count=int(len(entries_df)),
+                            projection_df=proj_df,
+                            actual_ownership_df=actual_own_df,
+                            actual_results_df=actual_df,
+                        )
+            if exposure_df.empty:
+                own_df = load_ownership_frame_for_date(
+                    bucket_name=bucket_name.strip(),
+                    selected_date=review_day,
+                    gcp_project=gcp_project.strip() or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                exposure_df = _build_exposure_frame(proj_df, own_df)
             phantom_summary_df = load_first_phantom_summary_for_date(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
@@ -537,9 +641,9 @@ if build_packet_clicked:
             )
             day_packet = build_daily_ai_review_packet(
                 review_date=review_day.isoformat(),
-                contest_id="global-review",
+                contest_id=contest_id,
                 projection_comparison_df=proj_compare_df,
-                entries_df=pd.DataFrame(),
+                entries_df=entries_df,
                 exposure_df=exposure_df,
                 phantom_summary_df=phantom_summary_df,
                 phantom_lineups_df=pd.DataFrame(),
@@ -563,6 +667,7 @@ if build_packet_clicked:
             "window_end": end_date.isoformat(),
             "lookback_days": lookback_days,
             "use_saved_run_dates": use_saved_run_dates,
+            "tournament_dates_used": tournament_dates_used,
         }
         st.success(f"Built global packet using {used_dates} of {scanned_dates} scanned dates.")
 
@@ -587,6 +692,7 @@ if isinstance(global_packet_state, dict) and global_packet_state:
         "Packet build summary: "
         f"scanned_dates={_safe_int(global_meta.get('scanned_dates'), default=0)}, "
         f"used_dates={_safe_int(global_meta.get('used_dates'), default=0)}, "
+        f"tournament_dates_used={_safe_int(global_meta.get('tournament_dates_used'), default=0)}, "
         f"window={global_meta.get('window_start', '')} to {global_meta.get('window_end', '')}"
     )
 
