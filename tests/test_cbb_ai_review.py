@@ -141,6 +141,37 @@ def test_request_openai_review_uses_output_text(monkeypatch) -> None:
     assert out == "Recommended change set"
 
 
+def test_request_openai_review_retries_model_not_found(monkeypatch) -> None:
+    class FakeResponse:
+        def __init__(self, status_code: int, text: str, body: dict[str, object]):
+            self.status_code = status_code
+            self.text = text
+            self._body = body
+
+        def json(self):
+            return self._body
+
+    calls: list[str] = []
+
+    def _fake_post(*args, **kwargs):
+        payload = kwargs.get("json") or {}
+        model = str(payload.get("model") or "")
+        calls.append(model)
+        if model == "gpt-5.1-mini":
+            return FakeResponse(
+                400,
+                '{"error":{"message":"The requested model \'gpt-5.1-mini\' does not exist.","code":"model_not_found"}}',
+                {},
+            )
+        return FakeResponse(200, "{}", {"output_text": "Recovered with fallback model"})
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_ai_review.requests.post", _fake_post)
+    out = request_openai_review(api_key="test-key", user_prompt="prompt", model="gpt-5.1-mini")
+    assert out == "Recovered with fallback model"
+    assert calls[0] == "gpt-5.1-mini"
+    assert len(calls) >= 2
+
+
 def test_build_global_ai_review_packet_aggregates_daily_packets() -> None:
     daily_a = build_daily_ai_review_packet(
         review_date="2026-02-18",

@@ -3744,9 +3744,9 @@ with tab_agentic_review:
                     st.caption("Optional: run GPT directly from this app using your OpenAI key.")
                     ai_model = st.text_input(
                         "OpenAI Model",
-                        value=str(st.session_state.get("ai_review_model", "gpt-5.1-mini")),
+                        value=str(st.session_state.get("ai_review_model", "gpt-5-mini")),
                         key="ai_review_model",
-                        help="Example: gpt-5.1, gpt-5.1-mini",
+                        help="Example: gpt-5-mini, gpt-5, gpt-4.1-mini",
                     ).strip()
                     ai_max_tokens = int(
                         st.number_input(
@@ -3769,7 +3769,7 @@ with tab_agentic_review:
                                         api_key=openai_key,
                                         user_prompt=ai_prompt_user,
                                         system_prompt=ai_prompt_system,
-                                        model=(ai_model or "gpt-5.1-mini"),
+                                        model=(ai_model or "gpt-5-mini"),
                                         max_output_tokens=ai_max_tokens,
                                     )
                                     st.session_state["cbb_ai_review_output"] = ai_text
@@ -4046,7 +4046,7 @@ with tab_agentic_review:
                                     api_key=openai_key,
                                     user_prompt=global_user_prompt,
                                     system_prompt=AI_REVIEW_SYSTEM_PROMPT,
-                                    model=str(st.session_state.get("ai_review_model", "gpt-5.1-mini")),
+                                    model=str(st.session_state.get("ai_review_model", "gpt-5-mini")),
                                     max_output_tokens=int(st.session_state.get("ai_review_max_output_tokens", 1800)),
                                 )
                                 st.session_state["cbb_global_ai_review_output"] = global_ai_text

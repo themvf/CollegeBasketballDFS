@@ -18,6 +18,14 @@ AI_REVIEW_SYSTEM_PROMPT = (
     "If confidence is low, state uncertainty explicitly."
 )
 
+DEFAULT_OPENAI_REVIEW_MODEL = "gpt-5-mini"
+OPENAI_REVIEW_MODEL_FALLBACKS = (
+    "gpt-5-mini",
+    "gpt-5",
+    "gpt-4.1-mini",
+    "gpt-4.1",
+)
+
 
 class OpenAIReviewError(RuntimeError):
     """Raised when OpenAI review generation fails."""
@@ -539,7 +547,7 @@ def request_openai_review(
     api_key: str,
     user_prompt: str,
     system_prompt: str = AI_REVIEW_SYSTEM_PROMPT,
-    model: str = "gpt-5.1-mini",
+    model: str = DEFAULT_OPENAI_REVIEW_MODEL,
     max_output_tokens: int = 1800,
     timeout_seconds: int = 90,
 ) -> str:
@@ -547,8 +555,15 @@ def request_openai_review(
     if not key:
         raise OpenAIReviewError("OpenAI API key is required.")
 
-    payload = {
-        "model": str(model or "gpt-5.1-mini"),
+    requested_model = str(model or "").strip()
+    model_candidates: list[str] = []
+    if requested_model:
+        model_candidates.append(requested_model)
+    for fallback_model in OPENAI_REVIEW_MODEL_FALLBACKS:
+        if fallback_model not in model_candidates:
+            model_candidates.append(fallback_model)
+
+    base_payload = {
         "max_output_tokens": int(max(200, max_output_tokens)),
         "input": [
             {
@@ -562,46 +577,65 @@ def request_openai_review(
         ],
     }
     headers = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}
-    try:
-        response = requests.post(
-            "https://api.openai.com/v1/responses",
-            headers=headers,
-            json=payload,
-            timeout=timeout_seconds,
-        )
-    except requests.RequestException as exc:
-        raise OpenAIReviewError(f"OpenAI request failed: {exc}") from exc
+    model_errors: list[str] = []
+    for candidate_model in model_candidates:
+        payload = dict(base_payload)
+        payload["model"] = candidate_model
+        try:
+            response = requests.post(
+                "https://api.openai.com/v1/responses",
+                headers=headers,
+                json=payload,
+                timeout=timeout_seconds,
+            )
+        except requests.RequestException as exc:
+            raise OpenAIReviewError(f"OpenAI request failed: {exc}") from exc
 
-    if response.status_code >= 400:
-        detail = response.text[:1000]
-        raise OpenAIReviewError(f"OpenAI API error ({response.status_code}): {detail}")
-
-    try:
-        body = response.json()
-    except ValueError as exc:
-        raise OpenAIReviewError("OpenAI API returned invalid JSON.") from exc
-
-    direct_text = body.get("output_text")
-    if isinstance(direct_text, str) and direct_text.strip():
-        return direct_text.strip()
-
-    output = body.get("output")
-    collected: list[str] = []
-    if isinstance(output, list):
-        for item in output:
-            if not isinstance(item, dict):
+        if response.status_code >= 400:
+            detail = response.text[:1000]
+            detail_lower = detail.lower()
+            retryable_model_error = (
+                response.status_code == 400
+                and ("model_not_found" in detail_lower or "does not exist" in detail_lower)
+            )
+            if retryable_model_error:
+                model_errors.append(f"{candidate_model}: {detail}")
                 continue
-            content = item.get("content")
-            if not isinstance(content, list):
-                continue
-            for part in content:
-                if not isinstance(part, dict):
+            raise OpenAIReviewError(f"OpenAI API error ({response.status_code}): {detail}")
+
+        try:
+            body = response.json()
+        except ValueError as exc:
+            raise OpenAIReviewError("OpenAI API returned invalid JSON.") from exc
+
+        direct_text = body.get("output_text")
+        if isinstance(direct_text, str) and direct_text.strip():
+            return direct_text.strip()
+
+        output = body.get("output")
+        collected: list[str] = []
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
                     continue
-                part_type = str(part.get("type") or "").strip().lower()
-                text = part.get("text")
-                if part_type in {"output_text", "text"} and isinstance(text, str) and text.strip():
-                    collected.append(text.strip())
-    if collected:
-        return "\n\n".join(collected)
+                content = item.get("content")
+                if not isinstance(content, list):
+                    continue
+                for part in content:
+                    if not isinstance(part, dict):
+                        continue
+                    part_type = str(part.get("type") or "").strip().lower()
+                    text = part.get("text")
+                    if part_type in {"output_text", "text"} and isinstance(text, str) and text.strip():
+                        collected.append(text.strip())
+        if collected:
+            return "\n\n".join(collected)
+        raise OpenAIReviewError("OpenAI API response did not include output text.")
 
-    raise OpenAIReviewError("OpenAI API response did not include output text.")
+    attempted = ", ".join(model_candidates)
+    details = " | ".join(model_errors[-2:]) if model_errors else "no model details returned"
+    raise OpenAIReviewError(
+        "OpenAI model not available for this API key. "
+        f"Tried: {attempted}. Set a valid model in the app's `OpenAI Model` field. "
+        f"Last errors: {details}"
+    )
