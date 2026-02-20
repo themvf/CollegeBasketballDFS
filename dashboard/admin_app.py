@@ -4719,7 +4719,7 @@ with tab_game:
                 + ("loaded from secrets/env (`OPENAI_API_KEY` or `openai_api_key`)" if openai_key else "not set")
             )
 
-            ga1, ga2, ga3 = st.columns([1, 1, 1])
+            ga1, ga2, ga3, ga4 = st.columns([1, 1, 1, 1])
             game_agent_focus_limit = int(
                 ga1.slider(
                     "Focus Games",
@@ -4744,6 +4744,16 @@ with tab_game:
                     value=int(st.session_state.get("game_slate_ai_max_output_tokens", 1400)),
                     step=100,
                     key="game_slate_ai_max_output_tokens",
+                )
+            )
+            game_agent_timeout_seconds = int(
+                ga4.number_input(
+                    "Request Timeout (sec)",
+                    min_value=30,
+                    max_value=600,
+                    value=int(st.session_state.get("game_slate_ai_timeout_seconds", 180)),
+                    step=10,
+                    key="game_slate_ai_timeout_seconds",
                 )
             )
 
@@ -4914,6 +4924,7 @@ with tab_game:
                                     system_prompt=game_prompt_system,
                                     model=(game_agent_model or "gpt-5-mini"),
                                     max_output_tokens=game_agent_max_tokens,
+                                    timeout_seconds=game_agent_timeout_seconds,
                                 )
                                 st.session_state["cbb_game_slate_ai_output"] = game_ai_text
                             except Exception as exc:

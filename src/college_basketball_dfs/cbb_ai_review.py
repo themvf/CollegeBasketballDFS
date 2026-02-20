@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime, timezone
 from typing import Any
 
@@ -1446,7 +1447,9 @@ def request_openai_review(
     system_prompt: str = AI_REVIEW_SYSTEM_PROMPT,
     model: str = DEFAULT_OPENAI_REVIEW_MODEL,
     max_output_tokens: int = 1800,
-    timeout_seconds: int = 90,
+    timeout_seconds: int = 180,
+    max_request_retries: int = 2,
+    retry_backoff_seconds: float = 1.5,
 ) -> str:
     key = str(api_key or "").strip()
     if not key:
@@ -1478,34 +1481,59 @@ def request_openai_review(
     for candidate_model in model_candidates:
         payload = dict(base_payload)
         payload["model"] = candidate_model
-        try:
-            response = requests.post(
-                "https://api.openai.com/v1/responses",
-                headers=headers,
-                json=payload,
-                timeout=timeout_seconds,
-            )
-        except requests.RequestException as exc:
-            raise OpenAIReviewError(f"OpenAI request failed: {exc}") from exc
+        model_not_found = False
+        attempts = int(max(0, max_request_retries)) + 1
+        for attempt in range(attempts):
+            try:
+                response = requests.post(
+                    "https://api.openai.com/v1/responses",
+                    headers=headers,
+                    json=payload,
+                    timeout=timeout_seconds,
+                )
+            except requests.RequestException as exc:
+                if attempt < attempts - 1:
+                    delay = float(retry_backoff_seconds) * float(2**attempt)
+                    time.sleep(max(0.0, delay))
+                    continue
+                raise OpenAIReviewError(
+                    "OpenAI request failed after retries: "
+                    f"{exc}. timeout_seconds={int(timeout_seconds)}"
+                ) from exc
 
-        if response.status_code >= 400:
-            detail = response.text[:1000]
-            detail_lower = detail.lower()
-            retryable_model_error = (
-                response.status_code == 400
-                and ("model_not_found" in detail_lower or "does not exist" in detail_lower)
-            )
-            if retryable_model_error:
-                model_errors.append(f"{candidate_model}: {detail}")
-                continue
-            raise OpenAIReviewError(f"OpenAI API error ({response.status_code}): {detail}")
+            if response.status_code >= 400:
+                detail = response.text[:1000]
+                detail_lower = detail.lower()
+                retryable_model_error = (
+                    response.status_code == 400
+                    and ("model_not_found" in detail_lower or "does not exist" in detail_lower)
+                )
+                if retryable_model_error:
+                    model_errors.append(f"{candidate_model}: {detail}")
+                    model_not_found = True
+                    break
 
-        try:
-            body = response.json()
-        except ValueError as exc:
-            raise OpenAIReviewError("OpenAI API returned invalid JSON.") from exc
+                retryable_http_error = response.status_code in {408, 429, 500, 502, 503, 504}
+                if retryable_http_error and attempt < attempts - 1:
+                    delay = float(retry_backoff_seconds) * float(2**attempt)
+                    time.sleep(max(0.0, delay))
+                    continue
 
-        return _extract_openai_output_text(body)
+                raise OpenAIReviewError(f"OpenAI API error ({response.status_code}): {detail}")
+
+            try:
+                body = response.json()
+            except ValueError as exc:
+                if attempt < attempts - 1:
+                    delay = float(retry_backoff_seconds) * float(2**attempt)
+                    time.sleep(max(0.0, delay))
+                    continue
+                raise OpenAIReviewError("OpenAI API returned invalid JSON.") from exc
+
+            return _extract_openai_output_text(body)
+
+        if model_not_found:
+            continue
 
     attempted = ", ".join(model_candidates)
     details = " | ".join(model_errors[-2:]) if model_errors else "no model details returned"

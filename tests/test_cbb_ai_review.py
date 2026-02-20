@@ -1,4 +1,5 @@
 import pandas as pd
+import requests
 
 from college_basketball_dfs.cbb_ai_review import (
     AI_REVIEW_SCHEMA_VERSION,
@@ -385,6 +386,34 @@ def test_request_openai_review_parses_refusal_text(monkeypatch) -> None:
     monkeypatch.setattr("college_basketball_dfs.cbb_ai_review.requests.post", _fake_post)
     out = request_openai_review(api_key="test-key", user_prompt="prompt")
     assert out == "Cannot provide that request."
+
+
+def test_request_openai_review_retries_request_timeout(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {"output_text": "Recovered after timeout retry"}
+
+    calls = {"count": 0}
+
+    def _fake_post(*args, **kwargs):
+        calls["count"] += 1
+        if calls["count"] == 1:
+            raise requests.exceptions.ReadTimeout("timed out")
+        return FakeResponse()
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_ai_review.requests.post", _fake_post)
+    monkeypatch.setattr("college_basketball_dfs.cbb_ai_review.time.sleep", lambda *_args, **_kwargs: None)
+    out = request_openai_review(
+        api_key="test-key",
+        user_prompt="prompt",
+        timeout_seconds=1,
+        max_request_retries=1,
+    )
+    assert out == "Recovered after timeout retry"
+    assert calls["count"] == 2
 
 
 def test_build_global_ai_review_packet_aggregates_daily_packets() -> None:
