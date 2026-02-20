@@ -4801,15 +4801,17 @@ with tab_game:
                         service_account_json=cred_json,
                         service_account_json_b64=cred_json_b64,
                     )
-                    game_packet = build_game_slate_ai_review_packet(
-                        review_date=game_selected_date.isoformat(),
-                        odds_df=odds_agent_df,
-                        player_pool_df=pool_df_agent,
-                        prior_boxscore_df=prior_boxscore_df,
-                        vegas_history_df=vegas_history_df,
-                        vegas_review_df=vegas_review_df,
-                        focus_limit=game_agent_focus_limit,
-                    )
+                    game_packet_kwargs: dict[str, Any] = {
+                        "review_date": game_selected_date.isoformat(),
+                        "odds_df": odds_agent_df,
+                        "prior_boxscore_df": prior_boxscore_df,
+                        "vegas_history_df": vegas_history_df,
+                        "vegas_review_df": vegas_review_df,
+                        "focus_limit": game_agent_focus_limit,
+                    }
+                    if "player_pool_df" in inspect.signature(build_game_slate_ai_review_packet).parameters:
+                        game_packet_kwargs["player_pool_df"] = pool_df_agent
+                    game_packet = build_game_slate_ai_review_packet(**game_packet_kwargs)
                     st.session_state["cbb_game_slate_ai_packet"] = game_packet
                     st.session_state["cbb_game_slate_ai_prompt_system"] = GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT
                     st.session_state["cbb_game_slate_ai_prompt_user"] = build_game_slate_ai_review_user_prompt(game_packet)
