@@ -172,6 +172,62 @@ def test_request_openai_review_retries_model_not_found(monkeypatch) -> None:
     assert len(calls) >= 2
 
 
+def test_request_openai_review_parses_nested_output_text_value(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": {"value": "Nested output text"},
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    def _fake_post(*args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_ai_review.requests.post", _fake_post)
+    out = request_openai_review(api_key="test-key", user_prompt="prompt")
+    assert out == "Nested output text"
+
+
+def test_request_openai_review_parses_refusal_text(monkeypatch) -> None:
+    class FakeResponse:
+        status_code = 200
+        text = "{}"
+
+        def json(self):
+            return {
+                "output": [
+                    {
+                        "type": "message",
+                        "content": [
+                            {
+                                "type": "refusal",
+                                "refusal": "Cannot provide that request.",
+                            }
+                        ],
+                    }
+                ]
+            }
+
+    def _fake_post(*args, **kwargs):
+        return FakeResponse()
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_ai_review.requests.post", _fake_post)
+    out = request_openai_review(api_key="test-key", user_prompt="prompt")
+    assert out == "Cannot provide that request."
+
+
 def test_build_global_ai_review_packet_aggregates_daily_packets() -> None:
     daily_a = build_daily_ai_review_packet(
         review_date="2026-02-18",

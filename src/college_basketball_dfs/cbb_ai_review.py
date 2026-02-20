@@ -542,6 +542,71 @@ def build_global_ai_review_user_prompt(global_packet: dict[str, Any]) -> str:
     )
 
 
+def _collect_response_text_parts(value: Any) -> list[str]:
+    parts: list[str] = []
+    if isinstance(value, str):
+        text = value.strip()
+        if text:
+            parts.append(text)
+        return parts
+    if isinstance(value, list):
+        for item in value:
+            parts.extend(_collect_response_text_parts(item))
+        return parts
+    if isinstance(value, dict):
+        for key in ("output_text", "text", "value", "refusal", "summary"):
+            if key in value:
+                parts.extend(_collect_response_text_parts(value.get(key)))
+        return parts
+    return parts
+
+
+def _extract_openai_output_text(body: dict[str, Any]) -> str:
+    collected: list[str] = []
+
+    collected.extend(_collect_response_text_parts(body.get("output_text")))
+    if collected:
+        return "\n\n".join(collected)
+
+    output = body.get("output")
+    if isinstance(output, list):
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            collected.extend(_collect_response_text_parts(item.get("refusal")))
+            content = item.get("content")
+            if isinstance(content, list):
+                for part in content:
+                    if not isinstance(part, dict):
+                        collected.extend(_collect_response_text_parts(part))
+                        continue
+                    part_type = str(part.get("type") or "").strip().lower()
+                    if part_type in {"output_text", "text", "refusal", "summary_text", "reasoning"}:
+                        collected.extend(_collect_response_text_parts(part))
+                    else:
+                        collected.extend(_collect_response_text_parts(part.get("text")))
+                        collected.extend(_collect_response_text_parts(part.get("value")))
+            else:
+                collected.extend(_collect_response_text_parts(content))
+    if collected:
+        return "\n\n".join(collected)
+
+    status = str(body.get("status") or "").strip().lower()
+    incomplete_details = body.get("incomplete_details")
+    if status == "incomplete" and isinstance(incomplete_details, dict):
+        reason = str(incomplete_details.get("reason") or "unknown")
+        raise OpenAIReviewError(
+            "OpenAI API response was incomplete and had no output text "
+            f"(reason: {reason}). Try increasing max output tokens."
+        )
+
+    body_preview = json.dumps(body, ensure_ascii=True)[:1000]
+    raise OpenAIReviewError(
+        "OpenAI API response did not include output text. "
+        f"Response preview: {body_preview}"
+    )
+
+
 def request_openai_review(
     *,
     api_key: str,
@@ -608,29 +673,7 @@ def request_openai_review(
         except ValueError as exc:
             raise OpenAIReviewError("OpenAI API returned invalid JSON.") from exc
 
-        direct_text = body.get("output_text")
-        if isinstance(direct_text, str) and direct_text.strip():
-            return direct_text.strip()
-
-        output = body.get("output")
-        collected: list[str] = []
-        if isinstance(output, list):
-            for item in output:
-                if not isinstance(item, dict):
-                    continue
-                content = item.get("content")
-                if not isinstance(content, list):
-                    continue
-                for part in content:
-                    if not isinstance(part, dict):
-                        continue
-                    part_type = str(part.get("type") or "").strip().lower()
-                    text = part.get("text")
-                    if part_type in {"output_text", "text"} and isinstance(text, str) and text.strip():
-                        collected.append(text.strip())
-        if collected:
-            return "\n\n".join(collected)
-        raise OpenAIReviewError("OpenAI API response did not include output text.")
+        return _extract_openai_output_text(body)
 
     attempted = ", ".join(model_candidates)
     details = " | ".join(model_errors[-2:]) if model_errors else "no model details returned"
