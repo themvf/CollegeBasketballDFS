@@ -166,6 +166,83 @@ def _sample_vegas_history() -> pd.DataFrame:
     )
 
 
+def _sample_player_pool_for_gpp() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Name": "Alpha Lead Guard",
+                "TeamAbbrev": "ALP",
+                "Position": "G",
+                "Salary": 8600,
+                "projected_dk_points": 38.5,
+                "projected_ownership": 18.0,
+                "leverage_score": 31.2,
+                "value_per_1k": 4.48,
+                "game_key": "ALP@BET",
+                "game_tail_score": 74.0,
+                "game_total_line": 151.5,
+                "game_spread_line": -3.5,
+            },
+            {
+                "Name": "Alpha Wing",
+                "TeamAbbrev": "ALP",
+                "Position": "F",
+                "Salary": 7200,
+                "projected_dk_points": 31.0,
+                "projected_ownership": 14.0,
+                "leverage_score": 27.4,
+                "value_per_1k": 4.31,
+                "game_key": "ALP@BET",
+                "game_tail_score": 74.0,
+                "game_total_line": 151.5,
+                "game_spread_line": -3.5,
+            },
+            {
+                "Name": "Beta Scorer",
+                "TeamAbbrev": "BET",
+                "Position": "G",
+                "Salary": 7800,
+                "projected_dk_points": 34.0,
+                "projected_ownership": 12.0,
+                "leverage_score": 30.1,
+                "value_per_1k": 4.36,
+                "game_key": "ALP@BET",
+                "game_tail_score": 74.0,
+                "game_total_line": 151.5,
+                "game_spread_line": 3.5,
+            },
+            {
+                "Name": "Gamma Center",
+                "TeamAbbrev": "GAM",
+                "Position": "F",
+                "Salary": 8400,
+                "projected_dk_points": 36.0,
+                "projected_ownership": 20.0,
+                "leverage_score": 24.0,
+                "value_per_1k": 4.29,
+                "game_key": "GAM@DEL",
+                "game_tail_score": 62.0,
+                "game_total_line": 146.0,
+                "game_spread_line": -5.0,
+            },
+            {
+                "Name": "Delta Guard",
+                "TeamAbbrev": "DEL",
+                "Position": "G",
+                "Salary": 6900,
+                "projected_dk_points": 30.0,
+                "projected_ownership": 9.0,
+                "leverage_score": 33.0,
+                "value_per_1k": 4.35,
+                "game_key": "GAM@DEL",
+                "game_tail_score": 62.0,
+                "game_total_line": 146.0,
+                "game_spread_line": 5.0,
+            },
+        ]
+    )
+
+
 def test_build_daily_ai_review_packet_has_expected_schema() -> None:
     packet = build_daily_ai_review_packet(
         review_date="2026-02-18",
@@ -349,6 +426,7 @@ def test_build_game_slate_ai_review_packet_and_prompt() -> None:
     packet = build_game_slate_ai_review_packet(
         review_date="2026-02-20",
         odds_df=_sample_odds_games(),
+        player_pool_df=_sample_player_pool_for_gpp(),
         prior_boxscore_df=_sample_prior_boxscore(),
         vegas_history_df=_sample_vegas_history(),
         vegas_review_df=pd.DataFrame(),
@@ -361,8 +439,11 @@ def test_build_game_slate_ai_review_packet_and_prompt() -> None:
     focus_tables = packet.get("focus_tables") or {}
     assert len(focus_tables.get("stack_candidates_top") or []) > 0
     assert len(focus_tables.get("winner_calls") or []) > 0
+    assert len(focus_tables.get("gpp_game_stack_targets") or []) > 0
+    assert len(focus_tables.get("gpp_team_stack_targets") or []) > 0
+    assert len(focus_tables.get("gpp_player_core_targets") or []) > 0
     assert len(focus_tables.get("games_table") or []) > 0
 
     prompt = build_game_slate_ai_review_user_prompt(packet)
-    assert "Best Games to Stack" in prompt
+    assert "GPP Game Stack Tiers" in prompt
     assert '"schema_version": "v1_game_slate"' in prompt

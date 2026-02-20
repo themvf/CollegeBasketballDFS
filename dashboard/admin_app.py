@@ -4762,6 +4762,23 @@ with tab_game:
                 if odds_agent_df.empty:
                     st.warning("No cached odds found for selected date. Run `Run Odds Import` first.")
                 else:
+                    pool_bookmakers = _csv_values(game_bookmakers_filter)
+                    pool_bookmaker = pool_bookmakers[0] if pool_bookmakers else None
+                    pool_df_agent = pd.DataFrame()
+                    raw_slate_df_agent = pd.DataFrame()
+                    try:
+                        pool_df_agent, _, raw_slate_df_agent, _, _ = build_optimizer_pool_for_date(
+                            bucket_name=bucket_name,
+                            slate_date=game_selected_date,
+                            bookmaker=pool_bookmaker,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                    except Exception:
+                        pool_df_agent = pd.DataFrame()
+                        raw_slate_df_agent = pd.DataFrame()
+
                     prior_boxscore_date = game_selected_date - timedelta(days=1)
                     prior_boxscore_df = load_actual_results_frame_for_date(
                         bucket_name=bucket_name,
@@ -4787,6 +4804,7 @@ with tab_game:
                     game_packet = build_game_slate_ai_review_packet(
                         review_date=game_selected_date.isoformat(),
                         odds_df=odds_agent_df,
+                        player_pool_df=pool_df_agent,
                         prior_boxscore_df=prior_boxscore_df,
                         vegas_history_df=vegas_history_df,
                         vegas_review_df=vegas_review_df,
@@ -4799,6 +4817,8 @@ with tab_game:
                         "review_date": game_selected_date.isoformat(),
                         "prior_boxscore_date": prior_boxscore_date.isoformat(),
                         "focus_limit": int(game_agent_focus_limit),
+                        "player_pool_rows": int(len(pool_df_agent)),
+                        "dk_slate_rows": int(len(raw_slate_df_agent)),
                     }
                     st.session_state.pop("cbb_game_slate_ai_output", None)
                     st.success("Game Slate AI packet built.")
@@ -4821,20 +4841,39 @@ with tab_game:
                 market_summary = game_packet_state.get("market_summary") or {}
                 vegas_summary = game_packet_state.get("vegas_calibration") or {}
                 focus_tables = game_packet_state.get("focus_tables") or {}
-                gm1, gm2, gm3, gm4 = st.columns(4)
+                gpp_team_targets = focus_tables.get("gpp_team_stack_targets") or []
+                gpp_game_targets = focus_tables.get("gpp_game_stack_targets") or []
+                gpp_player_targets = focus_tables.get("gpp_player_core_targets") or []
+                gm1, gm2, gm3, gm4, gm5 = st.columns(5)
                 gm1.metric("Games", int(_safe_int_value(market_summary.get("games"), default=0)))
                 gm2.metric("Avg Total", f"{_safe_float_value(market_summary.get('avg_total_line'), default=0.0):.1f}")
-                gm3.metric("Stack Candidates", int(len(focus_tables.get("stack_candidates_top") or [])))
+                gm3.metric("GPP Team Targets", int(len(gpp_team_targets)))
                 gm4.metric(
                     "Vegas Winner Acc %",
                     f"{_safe_float_value(vegas_summary.get('winner_pick_accuracy_pct'), default=0.0):.1f}",
                 )
+                gm5.metric("Player Pool Rows", int(_safe_int_value(game_meta.get("player_pool_rows"), default=0)))
 
                 st.caption(
                     "Packet context: "
                     f"review_date={packet_review_date or 'n/a'}, "
-                    f"prior_boxscore_date={str(game_meta.get('prior_boxscore_date') or 'n/a')}"
+                    f"prior_boxscore_date={str(game_meta.get('prior_boxscore_date') or 'n/a')}, "
+                    f"dk_slate_rows={int(_safe_int_value(game_meta.get('dk_slate_rows'), default=0))}"
                 )
+                if gpp_game_targets:
+                    st.markdown("**GPP Game Stack Targets**")
+                    st.dataframe(pd.DataFrame(gpp_game_targets), hide_index=True, use_container_width=True)
+                if gpp_team_targets:
+                    st.markdown("**GPP Team Stack Cores**")
+                    st.dataframe(pd.DataFrame(gpp_team_targets), hide_index=True, use_container_width=True)
+                if gpp_player_targets:
+                    st.markdown("**GPP Player Core Targets**")
+                    st.dataframe(pd.DataFrame(gpp_player_targets), hide_index=True, use_container_width=True)
+                else:
+                    st.info(
+                        "No player-level stack cores found. "
+                        "Upload DK slate and build the active pool in `Slate + Vegas` for player-specific stack targets."
+                    )
 
                 game_packet_json = json.dumps(game_packet_state, indent=2, ensure_ascii=True)
                 st.download_button(

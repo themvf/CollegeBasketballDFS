@@ -21,8 +21,8 @@ AI_REVIEW_SYSTEM_PROMPT = (
 
 GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT = (
     "You are an expert college basketball DFS game-slate analyst. "
-    "Use only the evidence in the JSON packet to identify stacking opportunities, "
-    "winner confidence, and leverage/upset angles. "
+    "Use only the evidence in the JSON packet to identify high-upside GPP game stacks, "
+    "team cores, bring-back options, winner confidence, and leverage/upset angles. "
     "Rank recommendations by expected DFS impact and state confidence per call."
 )
 
@@ -653,6 +653,188 @@ def _build_prior_team_form_frame(prior_boxscore_df: pd.DataFrame) -> pd.DataFram
     return pd.DataFrame(rows).sort_values("team_dk_points", ascending=False).reset_index(drop=True)
 
 
+def _opponent_from_game_key(game_key: str, team_abbrev: str) -> str:
+    key = str(game_key or "").strip().upper()
+    team = str(team_abbrev or "").strip().upper()
+    if not key or "@" not in key or not team:
+        return ""
+    away, home = key.split("@", 1)
+    away = away.strip().upper()
+    home = home.strip().upper()
+    if team == away:
+        return home
+    if team == home:
+        return away
+    return ""
+
+
+def _build_gpp_stack_targets_from_pool(
+    player_pool_df: pd.DataFrame,
+    focus_limit: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
+    if player_pool_df.empty:
+        return [], [], []
+
+    pool = player_pool_df.copy()
+    if "Name" not in pool.columns or "TeamAbbrev" not in pool.columns:
+        return [], [], []
+
+    pool["Name"] = pool["Name"].astype(str).str.strip()
+    pool["TeamAbbrev"] = pool["TeamAbbrev"].astype(str).str.strip().str.upper()
+    pool["Position"] = pool["Position"].astype(str).str.strip().str.upper() if "Position" in pool.columns else ""
+    pool["game_key"] = pool["game_key"].astype(str).str.strip().str.upper() if "game_key" in pool.columns else ""
+    pool["Salary"] = pd.to_numeric(pool["Salary"], errors="coerce") if "Salary" in pool.columns else pd.NA
+    pool["projected_dk_points"] = pd.to_numeric(pool.get("projected_dk_points"), errors="coerce")
+    pool["projected_ownership"] = pd.to_numeric(pool.get("projected_ownership"), errors="coerce")
+    pool["leverage_score"] = pd.to_numeric(pool.get("leverage_score"), errors="coerce")
+    pool["value_per_1k"] = pd.to_numeric(pool.get("value_per_1k"), errors="coerce")
+    pool["game_tail_score"] = pd.to_numeric(pool.get("game_tail_score"), errors="coerce")
+    pool["game_total_line"] = pd.to_numeric(pool.get("game_total_line"), errors="coerce")
+    pool["game_spread_line"] = pd.to_numeric(pool.get("game_spread_line"), errors="coerce")
+    pool = pool.loc[(pool["Name"] != "") & (pool["TeamAbbrev"] != "")]
+    if pool.empty:
+        return [], [], []
+
+    pool["player_priority"] = (
+        pool["projected_dk_points"].fillna(0.0)
+        + (0.32 * pool["leverage_score"].fillna(0.0))
+        + (2.0 * pool["value_per_1k"].fillna(0.0))
+        - (0.10 * pool["projected_ownership"].fillna(0.0))
+    )
+
+    team_rows: list[dict[str, Any]] = []
+    player_rows: list[dict[str, Any]] = []
+    for (game_key, team_abbrev), grp in pool.groupby(["game_key", "TeamAbbrev"], dropna=False):
+        working = grp.sort_values("player_priority", ascending=False).reset_index(drop=True)
+        if working.empty:
+            continue
+
+        top_players = working.head(3).copy()
+        top2_proj_sum = float(pd.to_numeric(top_players["projected_dk_points"], errors="coerce").head(2).fillna(0.0).sum())
+        top3_proj_sum = float(pd.to_numeric(top_players["projected_dk_points"], errors="coerce").fillna(0.0).sum())
+        avg_own = float(pd.to_numeric(top_players["projected_ownership"], errors="coerce").fillna(0.0).mean())
+        avg_lev = float(pd.to_numeric(top_players["leverage_score"], errors="coerce").fillna(0.0).mean())
+        avg_value = float(pd.to_numeric(top_players["value_per_1k"], errors="coerce").fillna(0.0).mean())
+        tail_signal = float(pd.to_numeric(working["game_tail_score"], errors="coerce").fillna(0.0).mean())
+        total_line = float(pd.to_numeric(working["game_total_line"], errors="coerce").dropna().median()) if pd.to_numeric(working["game_total_line"], errors="coerce").notna().any() else 0.0
+        abs_spread = float(pd.to_numeric(working["game_spread_line"], errors="coerce").dropna().abs().median()) if pd.to_numeric(working["game_spread_line"], errors="coerce").notna().any() else 0.0
+
+        team_stack_score = (
+            (0.55 * top3_proj_sum)
+            + (6.0 * avg_value)
+            + (3.0 * avg_lev)
+            - (0.20 * avg_own)
+            + (0.06 * tail_signal)
+        )
+        team_rows.append(
+            {
+                "game_key": str(game_key or ""),
+                "team_abbrev": str(team_abbrev or ""),
+                "opponent_team": _opponent_from_game_key(str(game_key or ""), str(team_abbrev or "")),
+                "team_stack_score": round(float(team_stack_score), 4),
+                "team_top2_projection_sum": round(float(top2_proj_sum), 4),
+                "team_top3_projection_sum": round(float(top3_proj_sum), 4),
+                "team_avg_projected_ownership": round(float(avg_own), 4),
+                "team_avg_leverage_score": round(float(avg_lev), 4),
+                "team_avg_value_per_1k": round(float(avg_value), 4),
+                "game_total_line": round(float(total_line), 4),
+                "game_abs_spread": round(float(abs_spread), 4),
+            }
+        )
+
+        for _, p in top_players.iterrows():
+            player_rows.append(
+                {
+                    "game_key": str(game_key or ""),
+                    "team_abbrev": str(team_abbrev or ""),
+                    "player_name": str(p.get("Name") or "").strip(),
+                    "position": str(p.get("Position") or "").strip(),
+                    "salary": int(_to_int(p.get("Salary"), default=0)),
+                    "projected_dk_points": round(float(_to_float(p.get("projected_dk_points")) or 0.0), 4),
+                    "projected_ownership": round(float(_to_float(p.get("projected_ownership")) or 0.0), 4),
+                    "leverage_score": round(float(_to_float(p.get("leverage_score")) or 0.0), 4),
+                    "value_per_1k": round(float(_to_float(p.get("value_per_1k")) or 0.0), 4),
+                    "player_priority": round(float(_to_float(p.get("player_priority")) or 0.0), 4),
+                }
+            )
+
+    if not team_rows:
+        return [], [], []
+
+    team_targets_df = pd.DataFrame(team_rows).sort_values("team_stack_score", ascending=False).reset_index(drop=True)
+    if not team_targets_df.empty:
+        chalk_cutoff = float(team_targets_df["team_avg_projected_ownership"].quantile(0.67))
+        leverage_cutoff = float(team_targets_df["team_avg_leverage_score"].quantile(0.67))
+
+        def _label_stack_tier(row: pd.Series) -> str:
+            own = float(_to_float(row.get("team_avg_projected_ownership")) or 0.0)
+            lev = float(_to_float(row.get("team_avg_leverage_score")) or 0.0)
+            if own >= chalk_cutoff:
+                return "Tier 1 Chalk Core"
+            if lev >= leverage_cutoff:
+                return "Tier 2 Contrarian Core"
+            return "Tier 3 Balanced Core"
+
+        team_targets_df["stack_tier"] = team_targets_df.apply(_label_stack_tier, axis=1)
+
+    player_targets_df = pd.DataFrame(player_rows).sort_values("player_priority", ascending=False).reset_index(drop=True)
+    if not player_targets_df.empty:
+        opponent_top: dict[tuple[str, str], str] = {}
+        for _, row in player_targets_df.iterrows():
+            game_key = str(row.get("game_key") or "")
+            team_abbrev = str(row.get("team_abbrev") or "")
+            if not game_key or not team_abbrev:
+                continue
+            opponent = _opponent_from_game_key(game_key, team_abbrev)
+            if not opponent:
+                continue
+            key = (game_key, opponent)
+            if key in opponent_top:
+                continue
+            opp_rows = player_targets_df.loc[
+                (player_targets_df["game_key"] == game_key) & (player_targets_df["team_abbrev"] == opponent)
+            ]
+            if opp_rows.empty:
+                continue
+            opponent_top[key] = str(opp_rows.iloc[0].get("player_name") or "")
+
+        bring_back: list[str] = []
+        for _, row in team_targets_df.iterrows():
+            key = (str(row.get("game_key") or ""), str(row.get("team_abbrev") or ""))
+            bring_back.append(str(opponent_top.get(key, "")))
+        team_targets_df["suggested_bring_back"] = bring_back
+
+    # Build game-level stack targets by pairing top team + opposing bring-back team.
+    game_rows: list[dict[str, Any]] = []
+    for game_key, game_df in team_targets_df.groupby("game_key", dropna=False):
+        if game_df.empty:
+            continue
+        ordered = game_df.sort_values("team_stack_score", ascending=False).reset_index(drop=True)
+        primary = ordered.iloc[0]
+        secondary = ordered.iloc[1] if len(ordered) > 1 else ordered.iloc[0]
+        game_score = float(primary.get("team_stack_score") or 0.0) + (0.7 * float(secondary.get("team_stack_score") or 0.0))
+        game_rows.append(
+            {
+                "game_key": str(game_key or ""),
+                "game_stack_score": round(float(game_score), 4),
+                "primary_team": str(primary.get("team_abbrev") or ""),
+                "secondary_team": str(secondary.get("team_abbrev") or ""),
+                "primary_stack_tier": str(primary.get("stack_tier") or ""),
+                "secondary_stack_tier": str(secondary.get("stack_tier") or ""),
+                "suggested_bring_back": str(primary.get("suggested_bring_back") or ""),
+                "game_total_line": round(float(_to_float(primary.get("game_total_line")) or 0.0), 4),
+                "game_abs_spread": round(float(_to_float(primary.get("game_abs_spread")) or 0.0), 4),
+            }
+        )
+
+    game_targets_df = pd.DataFrame(game_rows).sort_values("game_stack_score", ascending=False).reset_index(drop=True)
+    limit_n = int(max(3, focus_limit))
+    game_targets = game_targets_df.head(limit_n).to_dict(orient="records") if not game_targets_df.empty else []
+    team_targets = team_targets_df.head(limit_n * 2).to_dict(orient="records") if not team_targets_df.empty else []
+    player_targets = player_targets_df.head(limit_n * 3).to_dict(orient="records") if not player_targets_df.empty else []
+    return game_targets, team_targets, player_targets
+
+
 def _summarize_vegas_history_for_game_slate(vegas_history_df: pd.DataFrame) -> dict[str, Any]:
     if vegas_history_df.empty:
         return {
@@ -749,22 +931,32 @@ def build_game_slate_ai_review_packet(
     *,
     review_date: str,
     odds_df: pd.DataFrame,
+    player_pool_df: pd.DataFrame | None = None,
     prior_boxscore_df: pd.DataFrame | None = None,
     vegas_history_df: pd.DataFrame | None = None,
     vegas_review_df: pd.DataFrame | None = None,
     focus_limit: int = 8,
 ) -> dict[str, Any]:
     odds = odds_df.copy() if isinstance(odds_df, pd.DataFrame) else pd.DataFrame()
+    player_pool_df = player_pool_df.copy() if isinstance(player_pool_df, pd.DataFrame) else pd.DataFrame()
     prior_boxscore_df = prior_boxscore_df.copy() if isinstance(prior_boxscore_df, pd.DataFrame) else pd.DataFrame()
     vegas_history_df = vegas_history_df.copy() if isinstance(vegas_history_df, pd.DataFrame) else pd.DataFrame()
     vegas_review_df = vegas_review_df.copy() if isinstance(vegas_review_df, pd.DataFrame) else pd.DataFrame()
     focus_n = int(max(3, focus_limit))
+    gpp_game_stack_targets, gpp_team_stack_targets, gpp_player_core_targets = _build_gpp_stack_targets_from_pool(
+        player_pool_df=player_pool_df,
+        focus_limit=focus_n,
+    )
 
     if odds.empty:
         return {
             "schema_version": GAME_SLATE_AI_REVIEW_SCHEMA_VERSION,
             "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
-            "review_context": {"review_date": str(review_date), "odds_rows": 0},
+            "review_context": {
+                "review_date": str(review_date),
+                "odds_rows": 0,
+                "player_pool_rows": int(len(player_pool_df)),
+            },
             "market_summary": {
                 "games": 0,
                 "avg_total_line": 0.0,
@@ -785,6 +977,9 @@ def build_game_slate_ai_review_packet(
                 "stack_candidates_top": [],
                 "winner_calls": [],
                 "upset_candidates": [],
+                "gpp_game_stack_targets": gpp_game_stack_targets,
+                "gpp_team_stack_targets": gpp_team_stack_targets,
+                "gpp_player_core_targets": gpp_player_core_targets,
                 "prior_day_team_form_top": [],
                 "prior_day_high_concentration_teams": [],
                 "games_table": [],
@@ -1126,6 +1321,7 @@ def build_game_slate_ai_review_packet(
         "review_context": {
             "review_date": str(review_date),
             "odds_rows": int(len(odds)),
+            "player_pool_rows": int(len(player_pool_df)),
             "prior_boxscore_rows": int(len(prior_boxscore_df)),
             "vegas_history_rows": int(len(vegas_history_df)),
             "vegas_review_rows": int(len(vegas_review_df)),
@@ -1137,12 +1333,16 @@ def build_game_slate_ai_review_packet(
             "stack_candidates_top": stack_candidates,
             "winner_calls": winner_calls,
             "upset_candidates": upset_candidates,
+            "gpp_game_stack_targets": gpp_game_stack_targets,
+            "gpp_team_stack_targets": gpp_team_stack_targets,
+            "gpp_player_core_targets": gpp_player_core_targets,
             "prior_day_team_form_top": prior_day_team_form_top,
             "prior_day_high_concentration_teams": prior_day_high_concentration_teams,
             "games_table": games_export.head(max(focus_n * 4, 20)).to_dict(orient="records"),
         },
         "notes_for_agent": [
             "Prioritize stacks where stack_score is high and blowout_risk_score is moderate or low.",
+            "Use gpp_game_stack_targets and gpp_player_core_targets first when they are available.",
             "Use winner_confidence_pct and upset_score for confidence tiers, not binary locks.",
             "If data is sparse for a game, mark confidence Low and explain what is missing.",
         ],
@@ -1155,13 +1355,17 @@ def build_game_slate_ai_review_user_prompt(packet: dict[str, Any]) -> str:
         "Review this college basketball game-slate packet and provide actionable DFS game-level guidance.\n\n"
         "Required output format:\n"
         "1) Slate Summary (3-5 bullets)\n"
-        "2) Best Games to Stack (ranked; include why + risk)\n"
-        "3) Winner Leans by Game (team + confidence + one-line rationale)\n"
-        "4) Upset/Leverage Angles (if any)\n"
-        "5) Fade or One-Off-Only Games\n"
-        "6) Action Plan for This Slate (max 8 bullets)\n\n"
+        "2) GPP Game Stack Tiers (Tier 1/2/3; ranked; include why + risk)\n"
+        "3) Team Stack Cores + Bring-Backs (specific teams and 2-3 player cores)\n"
+        "4) Winner Leans by Game (team + confidence + one-line rationale)\n"
+        "5) Upset/Leverage Angles (if any)\n"
+        "6) Fade or One-Off-Only Games\n"
+        "7) Action Plan for This Slate (max 8 bullets)\n\n"
         "Constraints:\n"
         "- Use only evidence in the JSON packet.\n"
+        "- If `focus_tables.gpp_game_stack_targets` exists, anchor your stack section to those rows first.\n"
+        "- If `focus_tables.gpp_player_core_targets` exists, name players directly from that table.\n"
+        "- Provide at least 3 stack recommendations when there are 3+ games available.\n"
         "- Cite exact metric names/values when making claims.\n"
         "- Mark confidence per recommendation as High/Medium/Low.\n"
         "- If data is missing, say exactly what is missing.\n\n"
