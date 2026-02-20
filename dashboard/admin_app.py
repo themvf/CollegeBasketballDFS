@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import inspect
+import json
 import os
 import re
 import sys
@@ -51,6 +52,14 @@ from college_basketball_dfs.cbb_tournament_review import (
     normalize_contest_standings_frame,
     extract_actual_ownership_from_standings,
 )
+from college_basketball_dfs.cbb_ai_review import (
+    AI_REVIEW_SYSTEM_PROMPT,
+    build_ai_review_user_prompt,
+    build_daily_ai_review_packet,
+    build_global_ai_review_packet,
+    build_global_ai_review_user_prompt,
+    request_openai_review,
+)
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 
 
@@ -97,6 +106,22 @@ def _csv_values(text: str | None) -> list[str]:
         return []
     parts = [str(x).strip().lower() for x in str(text).split(",")]
     return [x for x in parts if x]
+
+
+def _safe_float_value(value: object, default: float = 0.0) -> float:
+    try:
+        if value is None:
+            return float(default)
+        text = str(value).strip().replace("%", "")
+        if text == "":
+            return float(default)
+        return float(text)
+    except (TypeError, ValueError):
+        return float(default)
+
+
+def _safe_int_value(value: object, default: int = 0) -> int:
+    return int(_safe_float_value(value, float(default)))
 
 
 def _merged_bookmakers(selected: list[str] | None, custom_csv: str | None = None) -> list[str]:
@@ -1121,7 +1146,7 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
+tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_agentic_review, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
     [
         "Game Data",
         "Prop Data",
@@ -1129,6 +1154,7 @@ tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_li
         "DK Slate",
         "Injuries",
         "Slate + Vegas",
+        "Agentic Review",
         "Lineup Generator",
         "Projection Review",
         "Tournament Review",
@@ -2837,6 +2863,9 @@ with tab_tournament_review:
         st.session_state.pop("cbb_phantom_review_df", None)
         st.session_state.pop("cbb_phantom_summary_df", None)
         st.session_state.pop("cbb_phantom_review_meta", None)
+        st.session_state.pop("cbb_ai_review_packet", None)
+        st.session_state.pop("cbb_ai_review_prompt_user", None)
+        st.session_state.pop("cbb_ai_review_prompt_system", None)
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to run tournament review.")
@@ -2878,6 +2907,14 @@ with tab_tournament_review:
             )
 
             field_entries_df = pd.DataFrame()
+            entries_df = pd.DataFrame()
+            exposure_df = pd.DataFrame()
+            proj_compare_df = pd.DataFrame()
+            adjust_df = pd.DataFrame()
+            st.session_state["cbb_tr_entries_df"] = entries_df.copy()
+            st.session_state["cbb_tr_exposure_df"] = exposure_df.copy()
+            st.session_state["cbb_tr_projection_compare_df"] = proj_compare_df.copy()
+            st.session_state["cbb_tr_adjust_df"] = adjust_df.copy()
             if standings_df.empty:
                 st.warning("No contest standings loaded. Upload a CSV or save/load one from GCS.")
             else:
@@ -3284,6 +3321,11 @@ with tab_tournament_review:
                         key="download_tournament_exposure",
                     )
 
+                    st.session_state["cbb_tr_entries_df"] = entries_df.copy()
+                    st.session_state["cbb_tr_exposure_df"] = exposure_df.copy()
+                    st.session_state["cbb_tr_projection_compare_df"] = proj_compare_df.copy()
+                    st.session_state["cbb_tr_adjust_df"] = adjust_df.copy()
+
             st.markdown("---")
             st.subheader("Phantom Entries (Saved Runs)")
             st.caption(
@@ -3555,6 +3597,476 @@ with tab_tournament_review:
                     mime="text/csv",
                     key="download_phantom_lineups_csv",
                 )
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_agentic_review:
+    st.subheader("Agentic Review")
+    st.caption(
+        "Global AI diagnostics across slates for projection quality, ownership quality, "
+        "and lineup-process changes. Optional single-slate drilldown is included below."
+    )
+    ar_date = st.date_input("Agentic Review Date", value=lineup_slate_date, key="agentic_review_date")
+    ar_contest_default = str(st.session_state.get("tournament_review_contest_id", "contest"))
+    ar_contest_id = st.text_input("Agentic Contest ID", value=ar_contest_default, key="agentic_review_contest_id")
+
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to run agentic review.")
+    else:
+        try:
+            openai_key = (os.getenv("OPENAI_API_KEY", "").strip() or (_secret("openai_api_key") or "").strip())
+            st.caption(
+                "OpenAI key: "
+                + ("loaded from secrets/env (`OPENAI_API_KEY` or `openai_api_key`)" if openai_key else "not set")
+            )
+
+            st.subheader("Single-Slate Drilldown (Optional)")
+            st.caption(
+                "Uses outputs from Tournament Review (entries, exposure, projection comparison, phantom summaries) "
+                "to build a deterministic packet and recommendation prompt."
+            )
+
+            phantom_df_state = st.session_state.get("cbb_phantom_review_df")
+            phantom_summary_state = st.session_state.get("cbb_phantom_summary_df")
+
+            ai_entries_df = st.session_state.get("cbb_tr_entries_df")
+            ai_exposure_df = st.session_state.get("cbb_tr_exposure_df")
+            ai_proj_compare_df = st.session_state.get("cbb_tr_projection_compare_df")
+            ai_adjust_df = st.session_state.get("cbb_tr_adjust_df")
+            if not isinstance(ai_entries_df, pd.DataFrame):
+                ai_entries_df = pd.DataFrame()
+            if not isinstance(ai_exposure_df, pd.DataFrame):
+                ai_exposure_df = pd.DataFrame()
+            if not isinstance(ai_proj_compare_df, pd.DataFrame):
+                ai_proj_compare_df = pd.DataFrame()
+            if not isinstance(ai_adjust_df, pd.DataFrame):
+                ai_adjust_df = pd.DataFrame()
+            ai_phantom_df = phantom_df_state if isinstance(phantom_df_state, pd.DataFrame) else pd.DataFrame()
+            ai_phantom_summary_df = (
+                phantom_summary_state if isinstance(phantom_summary_state, pd.DataFrame) else pd.DataFrame()
+            )
+
+            if ai_entries_df.empty or ai_exposure_df.empty or ai_proj_compare_df.empty:
+                st.info(
+                    "Run Tournament Review first (with standings + projections + actuals) to populate "
+                    "single-slate packet inputs."
+                )
+            else:
+                aic1, aic2 = st.columns([1, 1])
+                focus_limit = int(
+                    aic1.slider(
+                        "Focus Items",
+                        min_value=5,
+                        max_value=40,
+                        value=15,
+                        step=1,
+                        key="ai_review_focus_limit",
+                    )
+                )
+                rebuild_packet = aic2.button("Build AI Review Packet", key="build_ai_review_packet")
+
+                if rebuild_packet or ("cbb_ai_review_packet" not in st.session_state):
+                    ai_packet = build_daily_ai_review_packet(
+                        review_date=ar_date.isoformat(),
+                        contest_id=ar_contest_id,
+                        projection_comparison_df=ai_proj_compare_df,
+                        entries_df=ai_entries_df,
+                        exposure_df=ai_exposure_df,
+                        phantom_summary_df=ai_phantom_summary_df,
+                        phantom_lineups_df=ai_phantom_df,
+                        adjustment_factors_df=ai_adjust_df,
+                        focus_limit=focus_limit,
+                    )
+                    st.session_state["cbb_ai_review_packet"] = ai_packet
+                    st.session_state["cbb_ai_review_prompt_system"] = AI_REVIEW_SYSTEM_PROMPT
+                    st.session_state["cbb_ai_review_prompt_user"] = build_ai_review_user_prompt(ai_packet)
+
+                ai_packet_state = st.session_state.get("cbb_ai_review_packet")
+                ai_prompt_system = str(st.session_state.get("cbb_ai_review_prompt_system") or AI_REVIEW_SYSTEM_PROMPT)
+                ai_prompt_user = str(st.session_state.get("cbb_ai_review_prompt_user") or "")
+                if isinstance(ai_packet_state, dict) and ai_packet_state:
+                    scorecards = ai_packet_state.get("scorecards") or {}
+                    projection_quality = scorecards.get("projection_quality") or {}
+                    ownership_quality = scorecards.get("ownership_quality") or {}
+                    lineup_quality = scorecards.get("lineup_quality") or {}
+
+                    am1, am2, am3, am4 = st.columns(4)
+                    am1.metric(
+                        "Projection Rows",
+                        _safe_int_value((projection_quality or {}).get("matched_rows"), default=0),
+                    )
+                    am2.metric(
+                        "Blend MAE",
+                        f"{_safe_float_value((projection_quality or {}).get('blend_mae'), default=0.0):.2f}",
+                    )
+                    am3.metric(
+                        "Ownership MAE",
+                        f"{_safe_float_value((ownership_quality or {}).get('ownership_mae'), default=0.0):.2f}",
+                    )
+                    am4.metric(
+                        "Lineups Scored",
+                        _safe_int_value((lineup_quality or {}).get("lineups_scored"), default=0),
+                    )
+
+                    packet_json = json.dumps(ai_packet_state, indent=2, ensure_ascii=True)
+                    st.download_button(
+                        "Download AI Review Packet JSON",
+                        data=packet_json,
+                        file_name=f"ai_review_packet_{ar_date.isoformat()}_{ar_contest_id}.json",
+                        mime="application/json",
+                        key="download_ai_review_packet_json",
+                    )
+                    st.download_button(
+                        "Download AI System Prompt TXT",
+                        data=ai_prompt_system,
+                        file_name=f"ai_system_prompt_{ar_date.isoformat()}_{ar_contest_id}.txt",
+                        mime="text/plain",
+                        key="download_ai_system_prompt_txt",
+                    )
+                    st.download_button(
+                        "Download AI User Prompt TXT",
+                        data=ai_prompt_user,
+                        file_name=f"ai_user_prompt_{ar_date.isoformat()}_{ar_contest_id}.txt",
+                        mime="text/plain",
+                        key="download_ai_user_prompt_txt",
+                    )
+                    with st.expander("Packet Preview"):
+                        st.json(ai_packet_state)
+                    with st.expander("Prompt Preview"):
+                        st.text_area(
+                            "User Prompt",
+                            value=ai_prompt_user,
+                            height=260,
+                            key="ai_review_prompt_preview_text",
+                        )
+
+                    st.caption("Optional: run GPT directly from this app using your OpenAI key.")
+                    ai_model = st.text_input(
+                        "OpenAI Model",
+                        value=str(st.session_state.get("ai_review_model", "gpt-5.1-mini")),
+                        key="ai_review_model",
+                        help="Example: gpt-5.1, gpt-5.1-mini",
+                    ).strip()
+                    ai_max_tokens = int(
+                        st.number_input(
+                            "Max Output Tokens",
+                            min_value=200,
+                            max_value=8000,
+                            value=1800,
+                            step=100,
+                            key="ai_review_max_output_tokens",
+                        )
+                    )
+                    run_openai_review_clicked = st.button("Run OpenAI Review", key="run_openai_review")
+                    if run_openai_review_clicked:
+                        if not openai_key:
+                            st.error("Set `OPENAI_API_KEY` or Streamlit secret `openai_api_key` first.")
+                        else:
+                            with st.spinner("Generating AI recommendations..."):
+                                try:
+                                    ai_text = request_openai_review(
+                                        api_key=openai_key,
+                                        user_prompt=ai_prompt_user,
+                                        system_prompt=ai_prompt_system,
+                                        model=(ai_model or "gpt-5.1-mini"),
+                                        max_output_tokens=ai_max_tokens,
+                                    )
+                                    st.session_state["cbb_ai_review_output"] = ai_text
+                                except Exception as exc:
+                                    st.exception(exc)
+
+                    ai_review_output = str(st.session_state.get("cbb_ai_review_output") or "").strip()
+                    if ai_review_output:
+                        st.subheader("AI Recommendations")
+                        st.text_area(
+                            "Model Output",
+                            value=ai_review_output,
+                            height=360,
+                            key="ai_review_output_preview",
+                        )
+                        st.download_button(
+                            "Download AI Recommendations TXT",
+                            data=ai_review_output,
+                            file_name=f"ai_recommendations_{ar_date.isoformat()}_{ar_contest_id}.txt",
+                            mime="text/plain",
+                            key="download_ai_recommendations_txt",
+                        )
+
+            st.markdown("---")
+            st.subheader("Global Agentic Review (Multi-Slate)")
+            st.caption(
+                "Build a running review across a lookback window to identify global projection, ownership, "
+                "and lineup-process changes."
+            )
+            g1, g2, g3 = st.columns(3)
+            lookback_days = int(
+                g1.slider(
+                    "Lookback Days",
+                    min_value=7,
+                    max_value=180,
+                    value=30,
+                    step=1,
+                    key="global_ai_review_lookback_days",
+                )
+            )
+            global_focus_limit = int(
+                g2.slider(
+                    "Global Focus Players",
+                    min_value=5,
+                    max_value=60,
+                    value=25,
+                    step=1,
+                    key="global_ai_review_focus_limit",
+                )
+            )
+            use_saved_run_dates = bool(
+                g3.checkbox(
+                    "Use Saved Run Dates Only",
+                    value=True,
+                    key="global_ai_use_saved_run_dates",
+                    help="If enabled, only dates with saved lineup runs are scanned.",
+                )
+            )
+            build_global_packet_clicked = st.button("Build Global AI Packet", key="build_global_ai_packet")
+
+            if build_global_packet_clicked:
+                try:
+                    today = date.today()
+                    cutoff = today - timedelta(days=max(1, lookback_days))
+                    store = None
+                    try:
+                        client = build_storage_client(
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                            project=gcp_project or None,
+                        )
+                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                    except Exception:
+                        store = None
+                    if use_saved_run_dates:
+                        candidate_dates = load_saved_lineup_run_dates(
+                            bucket_name=bucket_name,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                    else:
+                        candidate_dates = [d for d in iter_dates(cutoff, today)]
+                    candidate_dates = [d for d in candidate_dates if isinstance(d, date) and d >= cutoff]
+                    candidate_dates = sorted(set(candidate_dates))
+
+                    daily_packets: list[dict[str, Any]] = []
+                    scanned_dates = 0
+                    used_dates = 0
+                    for review_day in candidate_dates:
+                        scanned_dates += 1
+                        proj_snap_df = load_projection_snapshot_frame(
+                            bucket_name=bucket_name,
+                            selected_date=review_day,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        actual_day_df = load_actual_results_frame_for_date(
+                            bucket_name=bucket_name,
+                            selected_date=review_day,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        if proj_snap_df.empty or actual_day_df.empty:
+                            continue
+
+                        proj_cmp_day_df = build_projection_actual_comparison(
+                            projection_df=proj_snap_df,
+                            actual_results_df=actual_day_df,
+                        )
+                        if proj_cmp_day_df.empty:
+                            continue
+
+                        own_day_df = load_ownership_frame_for_date(
+                            bucket_name=bucket_name,
+                            selected_date=review_day,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        expo_day_df = pd.DataFrame()
+                        if not own_day_df.empty:
+                            proj_base = proj_snap_df.copy()
+                            if "ID" in proj_base.columns:
+                                proj_base["ID"] = proj_base["ID"].astype(str).str.strip()
+                            if "Name" in proj_base.columns:
+                                proj_base["Name"] = proj_base["Name"].astype(str).str.strip()
+                            if "TeamAbbrev" in proj_base.columns:
+                                proj_base["TeamAbbrev"] = proj_base["TeamAbbrev"].astype(str).str.strip().str.upper()
+                            if "ID" in own_day_df.columns:
+                                own_day_df["ID"] = own_day_df["ID"].astype(str).str.strip()
+                            if "Name" in own_day_df.columns:
+                                own_day_df["Name"] = own_day_df["Name"].astype(str).str.strip()
+
+                            if "ID" in proj_base.columns and "ID" in own_day_df.columns:
+                                expo_day_df = proj_base.merge(
+                                    own_day_df[["ID", "actual_ownership"]],
+                                    on="ID",
+                                    how="left",
+                                )
+                            elif "Name" in proj_base.columns and "Name" in own_day_df.columns:
+                                expo_day_df = proj_base.merge(
+                                    own_day_df[["Name", "actual_ownership"]],
+                                    on="Name",
+                                    how="left",
+                                )
+                            else:
+                                expo_day_df = proj_base.copy()
+                                expo_day_df["actual_ownership"] = pd.NA
+
+                            expo_day_df["projected_ownership"] = pd.to_numeric(
+                                expo_day_df.get("projected_ownership"), errors="coerce"
+                            )
+                            expo_day_df["actual_ownership_from_file"] = pd.to_numeric(
+                                expo_day_df.get("actual_ownership"), errors="coerce"
+                            )
+                            expo_day_df["ownership_diff_vs_proj"] = (
+                                expo_day_df["actual_ownership_from_file"] - expo_day_df["projected_ownership"]
+                            )
+                            expo_day_df["field_ownership_pct"] = expo_day_df["actual_ownership_from_file"]
+
+                        phantom_summary_day_df = pd.DataFrame()
+                        if store is not None:
+                            try:
+                                run_ids = store.list_lineup_run_ids(review_day)
+                                for run_id in run_ids:
+                                    summary_payload = store.read_phantom_review_summary_json(review_day, run_id)
+                                    if not isinstance(summary_payload, dict):
+                                        continue
+                                    summary_rows = summary_payload.get("summary_rows")
+                                    if not isinstance(summary_rows, list) or not summary_rows:
+                                        continue
+                                    phantom_summary_day_df = pd.DataFrame(summary_rows)
+                                    if not phantom_summary_day_df.empty:
+                                        break
+                            except Exception:
+                                phantom_summary_day_df = pd.DataFrame()
+
+                        day_packet = build_daily_ai_review_packet(
+                            review_date=review_day.isoformat(),
+                            contest_id=f"{ar_contest_id}-global",
+                            projection_comparison_df=proj_cmp_day_df,
+                            entries_df=pd.DataFrame(),
+                            exposure_df=expo_day_df,
+                            phantom_summary_df=phantom_summary_day_df,
+                            phantom_lineups_df=pd.DataFrame(),
+                            adjustment_factors_df=pd.DataFrame(),
+                            focus_limit=global_focus_limit,
+                        )
+                        daily_packets.append(day_packet)
+                        used_dates += 1
+
+                    global_packet = build_global_ai_review_packet(
+                        daily_packets=daily_packets,
+                        focus_limit=global_focus_limit,
+                    )
+                    global_user_prompt = build_global_ai_review_user_prompt(global_packet)
+                    st.session_state["cbb_global_ai_review_packet"] = global_packet
+                    st.session_state["cbb_global_ai_review_user_prompt"] = global_user_prompt
+                    st.session_state["cbb_global_ai_review_meta"] = {
+                        "scanned_dates": scanned_dates,
+                        "used_dates": used_dates,
+                        "lookback_days": lookback_days,
+                        "use_saved_run_dates": use_saved_run_dates,
+                    }
+                except Exception as exc:
+                    st.exception(exc)
+
+            global_packet_state = st.session_state.get("cbb_global_ai_review_packet")
+            global_user_prompt = str(st.session_state.get("cbb_global_ai_review_user_prompt") or "").strip()
+            global_meta = st.session_state.get("cbb_global_ai_review_meta") or {}
+            if isinstance(global_packet_state, dict) and global_packet_state:
+                w = global_packet_state.get("window_summary") or {}
+                gs = global_packet_state.get("global_scorecards") or {}
+                gp = gs.get("projection") or {}
+                go = gs.get("ownership") or {}
+                gl = gs.get("lineup") or {}
+                gm1, gm2, gm3, gm4 = st.columns(4)
+                gm1.metric("Slates Used", int(_safe_int_value(w.get("slate_count"), default=0)))
+                gm2.metric(
+                    "Weighted Blend MAE",
+                    f"{_safe_float_value(gp.get('weighted_blend_mae'), default=0.0):.2f}",
+                )
+                gm3.metric(
+                    "Weighted Ownership MAE",
+                    f"{_safe_float_value(go.get('weighted_ownership_mae'), default=0.0):.2f}",
+                )
+                gm4.metric(
+                    "Lineups Scored",
+                    int(_safe_int_value(gl.get("total_lineups_scored"), default=0)),
+                )
+                st.caption(
+                    "Global packet build summary: "
+                    f"scanned_dates={int(_safe_int_value(global_meta.get('scanned_dates'), default=0))}, "
+                    f"used_dates={int(_safe_int_value(global_meta.get('used_dates'), default=0))}, "
+                    f"lookback_days={int(_safe_int_value(global_meta.get('lookback_days'), default=0))}"
+                )
+
+                global_packet_json = json.dumps(global_packet_state, indent=2, ensure_ascii=True)
+                st.download_button(
+                    "Download Global AI Packet JSON",
+                    data=global_packet_json,
+                    file_name=f"global_ai_review_packet_{ar_date.isoformat()}_{ar_contest_id}.json",
+                    mime="application/json",
+                    key="download_global_ai_review_packet_json",
+                )
+                st.download_button(
+                    "Download Global AI User Prompt TXT",
+                    data=global_user_prompt,
+                    file_name=f"global_ai_user_prompt_{ar_date.isoformat()}_{ar_contest_id}.txt",
+                    mime="text/plain",
+                    key="download_global_ai_user_prompt_txt",
+                )
+                with st.expander("Global Packet Preview"):
+                    st.json(global_packet_state)
+                with st.expander("Global Prompt Preview"):
+                    st.text_area(
+                        "Global User Prompt",
+                        value=global_user_prompt,
+                        height=260,
+                        key="global_ai_prompt_preview_text",
+                    )
+
+                run_global_openai = st.button("Run Global OpenAI Review", key="run_global_openai_review")
+                if run_global_openai:
+                    if not openai_key:
+                        st.error("Set `OPENAI_API_KEY` or Streamlit secret `openai_api_key` first.")
+                    else:
+                        with st.spinner("Generating global AI recommendations..."):
+                            try:
+                                global_ai_text = request_openai_review(
+                                    api_key=openai_key,
+                                    user_prompt=global_user_prompt,
+                                    system_prompt=AI_REVIEW_SYSTEM_PROMPT,
+                                    model=str(st.session_state.get("ai_review_model", "gpt-5.1-mini")),
+                                    max_output_tokens=int(st.session_state.get("ai_review_max_output_tokens", 1800)),
+                                )
+                                st.session_state["cbb_global_ai_review_output"] = global_ai_text
+                            except Exception as exc:
+                                st.exception(exc)
+                global_ai_output = str(st.session_state.get("cbb_global_ai_review_output") or "").strip()
+                if global_ai_output:
+                    st.subheader("Global AI Recommendations")
+                    st.text_area(
+                        "Global Model Output",
+                        value=global_ai_output,
+                        height=360,
+                        key="global_ai_review_output_preview",
+                    )
+                    st.download_button(
+                        "Download Global AI Recommendations TXT",
+                        data=global_ai_output,
+                        file_name=f"global_ai_recommendations_{ar_date.isoformat()}_{ar_contest_id}.txt",
+                        mime="text/plain",
+                        key="download_global_ai_recommendations_txt",
+                    )
         except Exception as exc:
             st.exception(exc)
 

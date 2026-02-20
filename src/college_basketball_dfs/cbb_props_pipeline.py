@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import time
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
@@ -276,7 +277,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     parser.add_argument("--odds-base-url", type=str, default="https://api.the-odds-api.com/v4")
     parser.add_argument("--sport-key", type=str, default="basketball_ncaab")
     parser.add_argument("--regions", type=str, default="us")
-    parser.add_argument("--markets", type=str, default="player_points,player_rebounds,player_assists")
+    parser.add_argument(
+        "--markets",
+        type=str,
+        default=os.getenv("CBB_ODDS_MARKETS", "player_points,player_rebounds,player_assists"),
+    )
     parser.add_argument(
         "--bookmakers",
         type=str,
@@ -297,10 +302,39 @@ def build_arg_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _resolve_markets_argument(
+    parser: argparse.ArgumentParser,
+    markets_csv: str,
+    unknown_args: list[str],
+) -> str:
+    # Cloud Run --args is comma-delimited; malformed deploy commands can split CSV markets into bare tokens.
+    resolved = [x.strip() for x in str(markets_csv or "").split(",") if x.strip()]
+
+    for raw in unknown_args:
+        token = str(raw or "").strip()
+        if not token:
+            continue
+        if token.startswith("-"):
+            parser.error(f"unrecognized arguments: {token}")
+        for part in token.split(","):
+            market = part.strip()
+            if not market:
+                continue
+            if re.fullmatch(r"[A-Za-z0-9_]+", market) is None:
+                parser.error(f"invalid market token: {market}")
+            resolved.append(market)
+
+    if not resolved:
+        parser.error("at least one market is required for props import")
+    return ",".join(resolved)
+
+
 def main() -> None:
-    args = build_arg_parser().parse_args()
+    parser = build_arg_parser()
+    args, unknown_args = parser.parse_known_args()
     requested_date = parse_iso_date(args.date)
     game_date = requested_date or prior_day()
+    markets = _resolve_markets_argument(parser, args.markets, unknown_args)
     summary = run_cbb_props_pipeline(
         game_date=game_date,
         bucket_name=args.bucket,
@@ -308,7 +342,7 @@ def main() -> None:
         odds_base_url=args.odds_base_url,
         sport_key=args.sport_key,
         regions=args.regions,
-        markets=args.markets,
+        markets=markets,
         bookmakers=(args.bookmakers or None),
         historical_mode=args.historical_mode,
         historical_snapshot_time=args.historical_snapshot_time,

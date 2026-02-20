@@ -1,7 +1,13 @@
 from datetime import date
 
+import pytest
+
 from college_basketball_dfs.cbb_odds import flatten_player_props_payload
-from college_basketball_dfs.cbb_props_pipeline import run_cbb_props_pipeline
+from college_basketball_dfs.cbb_props_pipeline import (
+    _resolve_markets_argument,
+    build_arg_parser,
+    run_cbb_props_pipeline,
+)
 
 
 def _sample_props_payload() -> dict:
@@ -197,3 +203,23 @@ def test_props_pipeline_applies_inter_event_sleep(monkeypatch) -> None:
         store=store,
     )
     assert sleep_calls == [0.25]
+
+
+def test_resolve_markets_argument_handles_split_cloud_run_args() -> None:
+    parser = build_arg_parser()
+    resolved = _resolve_markets_argument(
+        parser=parser,
+        markets_csv="player_points",
+        unknown_args=["player_rebounds", "player_assists"],
+    )
+    assert resolved == "player_points,player_rebounds,player_assists"
+
+
+def test_resolve_markets_argument_rejects_unknown_flags() -> None:
+    parser = build_arg_parser()
+    with pytest.raises(SystemExit):
+        _resolve_markets_argument(
+            parser=parser,
+            markets_csv="player_points",
+            unknown_args=["--unexpected-flag"],
+        )

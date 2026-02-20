@@ -120,6 +120,22 @@ For Streamlit Community Cloud, set entrypoint:
 Secrets template:
 - `.streamlit/secrets.toml.example`
 
+## AI Review Packet
+
+Tournament Review now includes an `AI Review Packet (GPT)` section that:
+- builds a structured daily diagnostics packet from projection/ownership/lineup review tables
+- generates a ready-to-send system prompt and user prompt template
+- can run an in-app OpenAI review call when `openai_api_key` / `OPENAI_API_KEY` is configured
+- lets you download JSON + prompt artifacts for model runs
+
+Tournament Review also includes `Rolling Global Review (Multi-Slate)` for running diagnostics:
+- scans a lookback window of slates
+- aggregates weighted scorecards and trends
+- generates a global prompt and optional in-app OpenAI recommendations
+
+Reference:
+- `AI_REVIEW_AGENT.md`
+
 ## GCS Paths
 
 - Raw JSON: `cbb/raw/YYYY-MM-DD.json`
