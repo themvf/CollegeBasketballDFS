@@ -55,8 +55,11 @@ from college_basketball_dfs.cbb_tournament_review import (
 )
 from college_basketball_dfs.cbb_ai_review import (
     AI_REVIEW_SYSTEM_PROMPT,
+    GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT,
     build_ai_review_user_prompt,
     build_daily_ai_review_packet,
+    build_game_slate_ai_review_packet,
+    build_game_slate_ai_review_user_prompt,
     build_global_ai_review_packet,
     build_global_ai_review_user_prompt,
     request_openai_review,
@@ -895,6 +898,27 @@ def load_odds_frame_for_date(
     frame = pd.DataFrame(rows)
     frame["game_date"] = pd.to_datetime(frame["game_date"], errors="coerce").dt.strftime("%Y-%m-%d")
     return frame
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_vegas_review_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    raw_payload = store.read_raw_json(selected_date)
+    odds_payload = store.read_odds_json(selected_date)
+    if not isinstance(raw_payload, dict) or not isinstance(odds_payload, dict):
+        return pd.DataFrame()
+    return build_vegas_review_games_frame(raw_payloads=[raw_payload], odds_payloads=[odds_payload])
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -4676,6 +4700,201 @@ with tab_game:
                     "Moneyline (Away)",
                 ]
                 st.dataframe(display[table_cols], hide_index=True, use_container_width=True)
+        except Exception as exc:
+            st.exception(exc)
+
+with tab_game:
+    st.subheader("Game Slate Agent")
+    st.caption(
+        "AI scout for game-level DFS context. Combines today's odds, prior-day box score form, "
+        "and season Vegas review calibration to rank stack and winner angles."
+    )
+    if not bucket_name:
+        st.info("Set a GCS bucket in sidebar to run Game Slate Agent.")
+    else:
+        try:
+            openai_key = (os.getenv("OPENAI_API_KEY", "").strip() or (_secret("openai_api_key") or "").strip())
+            st.caption(
+                "OpenAI key: "
+                + ("loaded from secrets/env (`OPENAI_API_KEY` or `openai_api_key`)" if openai_key else "not set")
+            )
+
+            ga1, ga2, ga3 = st.columns([1, 1, 1])
+            game_agent_focus_limit = int(
+                ga1.slider(
+                    "Focus Games",
+                    min_value=3,
+                    max_value=20,
+                    value=8,
+                    step=1,
+                    key="game_slate_ai_focus_limit",
+                )
+            )
+            game_agent_model = ga2.text_input(
+                "OpenAI Model",
+                value=str(st.session_state.get("game_slate_ai_model", "gpt-5-mini")),
+                key="game_slate_ai_model",
+                help="Example: gpt-5-mini, gpt-5, gpt-4.1-mini",
+            ).strip()
+            game_agent_max_tokens = int(
+                ga3.number_input(
+                    "Max Output Tokens",
+                    min_value=200,
+                    max_value=8000,
+                    value=int(st.session_state.get("game_slate_ai_max_output_tokens", 1400)),
+                    step=100,
+                    key="game_slate_ai_max_output_tokens",
+                )
+            )
+
+            gb1, gb2 = st.columns([1, 1])
+            build_game_slate_packet = gb1.button("Build Game Slate Packet", key="build_game_slate_ai_packet")
+            run_game_slate_agent = gb2.button("Run Game Slate Agent", key="run_game_slate_ai_review")
+
+            if build_game_slate_packet:
+                odds_agent_df = load_odds_frame_for_date(
+                    bucket_name=bucket_name,
+                    selected_date=game_selected_date,
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                if odds_agent_df.empty:
+                    st.warning("No cached odds found for selected date. Run `Run Odds Import` first.")
+                else:
+                    prior_boxscore_date = game_selected_date - timedelta(days=1)
+                    prior_boxscore_df = load_actual_results_frame_for_date(
+                        bucket_name=bucket_name,
+                        selected_date=prior_boxscore_date,
+                        gcp_project=gcp_project or None,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                    )
+                    vegas_history_df = load_season_vegas_history_frame(
+                        bucket_name=bucket_name,
+                        selected_date=game_selected_date,
+                        gcp_project=gcp_project or None,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                    )
+                    vegas_review_df = load_vegas_review_frame_for_date(
+                        bucket_name=bucket_name,
+                        selected_date=game_selected_date,
+                        gcp_project=gcp_project or None,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                    )
+                    game_packet = build_game_slate_ai_review_packet(
+                        review_date=game_selected_date.isoformat(),
+                        odds_df=odds_agent_df,
+                        prior_boxscore_df=prior_boxscore_df,
+                        vegas_history_df=vegas_history_df,
+                        vegas_review_df=vegas_review_df,
+                        focus_limit=game_agent_focus_limit,
+                    )
+                    st.session_state["cbb_game_slate_ai_packet"] = game_packet
+                    st.session_state["cbb_game_slate_ai_prompt_system"] = GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT
+                    st.session_state["cbb_game_slate_ai_prompt_user"] = build_game_slate_ai_review_user_prompt(game_packet)
+                    st.session_state["cbb_game_slate_ai_meta"] = {
+                        "review_date": game_selected_date.isoformat(),
+                        "prior_boxscore_date": prior_boxscore_date.isoformat(),
+                        "focus_limit": int(game_agent_focus_limit),
+                    }
+                    st.session_state.pop("cbb_game_slate_ai_output", None)
+                    st.success("Game Slate AI packet built.")
+
+            game_packet_state = st.session_state.get("cbb_game_slate_ai_packet")
+            game_prompt_system = str(
+                st.session_state.get("cbb_game_slate_ai_prompt_system") or GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT
+            )
+            game_prompt_user = str(st.session_state.get("cbb_game_slate_ai_prompt_user") or "")
+            game_meta = st.session_state.get("cbb_game_slate_ai_meta") or {}
+
+            if isinstance(game_packet_state, dict) and game_packet_state:
+                packet_review_date = str((game_packet_state.get("review_context") or {}).get("review_date") or "")
+                if packet_review_date and packet_review_date != game_selected_date.isoformat():
+                    st.warning(
+                        f"Packet is for `{packet_review_date}` while Game Data is set to `{game_selected_date.isoformat()}`. "
+                        "Rebuild the packet to align dates."
+                    )
+
+                market_summary = game_packet_state.get("market_summary") or {}
+                vegas_summary = game_packet_state.get("vegas_calibration") or {}
+                focus_tables = game_packet_state.get("focus_tables") or {}
+                gm1, gm2, gm3, gm4 = st.columns(4)
+                gm1.metric("Games", int(_safe_int_value(market_summary.get("games"), default=0)))
+                gm2.metric("Avg Total", f"{_safe_float_value(market_summary.get('avg_total_line'), default=0.0):.1f}")
+                gm3.metric("Stack Candidates", int(len(focus_tables.get("stack_candidates_top") or [])))
+                gm4.metric(
+                    "Vegas Winner Acc %",
+                    f"{_safe_float_value(vegas_summary.get('winner_pick_accuracy_pct'), default=0.0):.1f}",
+                )
+
+                st.caption(
+                    "Packet context: "
+                    f"review_date={packet_review_date or 'n/a'}, "
+                    f"prior_boxscore_date={str(game_meta.get('prior_boxscore_date') or 'n/a')}"
+                )
+
+                game_packet_json = json.dumps(game_packet_state, indent=2, ensure_ascii=True)
+                st.download_button(
+                    "Download Game Slate Packet JSON",
+                    data=game_packet_json,
+                    file_name=f"game_slate_ai_packet_{game_selected_date.isoformat()}.json",
+                    mime="application/json",
+                    key="download_game_slate_ai_packet_json",
+                )
+                st.download_button(
+                    "Download Game Slate Prompt TXT",
+                    data=game_prompt_user,
+                    file_name=f"game_slate_ai_prompt_{game_selected_date.isoformat()}.txt",
+                    mime="text/plain",
+                    key="download_game_slate_ai_prompt_txt",
+                )
+                with st.expander("Game Slate Packet Preview"):
+                    st.json(game_packet_state)
+                with st.expander("Game Slate Prompt Preview"):
+                    st.text_area(
+                        "Game Slate User Prompt",
+                        value=game_prompt_user,
+                        height=260,
+                        key="game_slate_ai_prompt_preview_text",
+                    )
+
+                if run_game_slate_agent:
+                    if not openai_key:
+                        st.error("Set `OPENAI_API_KEY` or Streamlit secret `openai_api_key` first.")
+                    else:
+                        with st.spinner("Generating game-slate AI recommendations..."):
+                            try:
+                                game_ai_text = request_openai_review(
+                                    api_key=openai_key,
+                                    user_prompt=game_prompt_user,
+                                    system_prompt=game_prompt_system,
+                                    model=(game_agent_model or "gpt-5-mini"),
+                                    max_output_tokens=game_agent_max_tokens,
+                                )
+                                st.session_state["cbb_game_slate_ai_output"] = game_ai_text
+                            except Exception as exc:
+                                st.exception(exc)
+                game_ai_output = str(st.session_state.get("cbb_game_slate_ai_output") or "").strip()
+                if game_ai_output:
+                    st.subheader("Game Slate AI Recommendations")
+                    st.text_area(
+                        "Game Slate Model Output",
+                        value=game_ai_output,
+                        height=340,
+                        key="game_slate_ai_output_preview",
+                    )
+                    st.download_button(
+                        "Download Game Slate Recommendations TXT",
+                        data=game_ai_output,
+                        file_name=f"game_slate_ai_recommendations_{game_selected_date.isoformat()}.txt",
+                        mime="text/plain",
+                        key="download_game_slate_ai_recommendations_txt",
+                    )
+            elif run_game_slate_agent:
+                st.error("Build Game Slate packet first.")
         except Exception as exc:
             st.exception(exc)
 

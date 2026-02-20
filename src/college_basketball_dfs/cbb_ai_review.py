@@ -9,6 +9,7 @@ import requests
 
 
 AI_REVIEW_SCHEMA_VERSION = "v1"
+GAME_SLATE_AI_REVIEW_SCHEMA_VERSION = "v1_game_slate"
 
 AI_REVIEW_SYSTEM_PROMPT = (
     "You are an expert college basketball DFS review analyst. "
@@ -16,6 +17,13 @@ AI_REVIEW_SYSTEM_PROMPT = (
     "Prioritize actionable recommendations that can improve projection calibration, "
     "ownership calibration, and lineup construction. "
     "If confidence is low, state uncertainty explicitly."
+)
+
+GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT = (
+    "You are an expert college basketball DFS game-slate analyst. "
+    "Use only the evidence in the JSON packet to identify stacking opportunities, "
+    "winner confidence, and leverage/upset angles. "
+    "Rank recommendations by expected DFS impact and state confidence per call."
 )
 
 DEFAULT_OPENAI_REVIEW_MODEL = "gpt-5-mini"
@@ -537,6 +545,626 @@ def build_global_ai_review_user_prompt(global_packet: dict[str, Any]) -> str:
         "- Distinguish one-off noise vs recurring signal.\n"
         "- For each recommendation, include expected impact and confidence.\n"
         "- Cite exact metric names/values.\n\n"
+        "JSON packet:\n"
+        f"{payload_json}\n"
+    )
+
+
+def _safe_pct_value(numerator: float, denominator: float) -> float:
+    if denominator <= 0:
+        return 0.0
+    return float((numerator / denominator) * 100.0)
+
+
+def _american_to_implied_probability(value: Any) -> float | None:
+    price = _to_float(value)
+    if price is None or price == 0:
+        return None
+    if price > 0:
+        return float(100.0 / (price + 100.0))
+    abs_price = abs(price)
+    return float(abs_price / (abs_price + 100.0))
+
+
+def _normalize_win_probabilities(
+    home_prob: float | None,
+    away_prob: float | None,
+) -> tuple[float | None, float | None]:
+    h = float(home_prob) if home_prob is not None else None
+    a = float(away_prob) if away_prob is not None else None
+    if h is None and a is None:
+        return None, None
+    if h is None and a is not None:
+        if 0.0 <= a <= 1.0:
+            return float(1.0 - a), a
+        return None, None
+    if a is None and h is not None:
+        if 0.0 <= h <= 1.0:
+            return h, float(1.0 - h)
+        return None, None
+    total = float((h or 0.0) + (a or 0.0))
+    if total <= 0:
+        return None, None
+    return float(h / total), float(a / total)
+
+
+def _build_prior_team_form_frame(prior_boxscore_df: pd.DataFrame) -> pd.DataFrame:
+    if prior_boxscore_df.empty or "team_name" not in prior_boxscore_df.columns:
+        return pd.DataFrame(
+            columns=[
+                "team_name",
+                "players_logged",
+                "team_dk_points",
+                "team_minutes",
+                "top3_dk_share_pct",
+                "value_score",
+            ]
+        )
+
+    base = prior_boxscore_df.copy()
+    base["team_name"] = base.get("team_name", "").astype(str).str.strip()
+    base["actual_dk_points"] = pd.to_numeric(base.get("actual_dk_points"), errors="coerce").fillna(0.0)
+    base["actual_minutes"] = pd.to_numeric(base.get("actual_minutes"), errors="coerce").fillna(0.0)
+    base = base.loc[base["team_name"] != ""].reset_index(drop=True)
+    if base.empty:
+        return pd.DataFrame(
+            columns=[
+                "team_name",
+                "players_logged",
+                "team_dk_points",
+                "team_minutes",
+                "top3_dk_share_pct",
+                "value_score",
+            ]
+        )
+
+    rows: list[dict[str, Any]] = []
+    for team_name, team_df in base.groupby("team_name", dropna=False):
+        team_points = float(team_df["actual_dk_points"].sum())
+        team_minutes = float(team_df["actual_minutes"].sum())
+        players_logged = int(len(team_df))
+        top3_points = float(team_df["actual_dk_points"].nlargest(3).sum())
+        top3_share = 0.0 if team_points <= 0 else (top3_points / team_points)
+
+        # Higher value_score means broader production (lower concentration at the top).
+        value_score = float(team_points * (1.0 - min(1.0, max(0.0, top3_share))))
+        rows.append(
+            {
+                "team_name": str(team_name),
+                "players_logged": players_logged,
+                "team_dk_points": round(team_points, 4),
+                "team_minutes": round(team_minutes, 4),
+                "top3_dk_share_pct": round(top3_share * 100.0, 4),
+                "value_score": round(value_score, 4),
+            }
+        )
+
+    if not rows:
+        return pd.DataFrame(
+            columns=[
+                "team_name",
+                "players_logged",
+                "team_dk_points",
+                "team_minutes",
+                "top3_dk_share_pct",
+                "value_score",
+            ]
+        )
+    return pd.DataFrame(rows).sort_values("team_dk_points", ascending=False).reset_index(drop=True)
+
+
+def _summarize_vegas_history_for_game_slate(vegas_history_df: pd.DataFrame) -> dict[str, Any]:
+    if vegas_history_df.empty:
+        return {
+            "games": 0,
+            "total_line_games": 0,
+            "spread_line_games": 0,
+            "total_mae": 0.0,
+            "spread_mae": 0.0,
+            "winner_pick_accuracy_pct": 0.0,
+            "high_total_over_rate_pct": 0.0,
+            "close_spread_winner_accuracy_pct": 0.0,
+        }
+
+    base = vegas_history_df.copy()
+    if "has_total_line" in base.columns:
+        base["has_total_line"] = base["has_total_line"].astype(bool)
+    else:
+        base["has_total_line"] = False
+    if "has_spread_line" in base.columns:
+        base["has_spread_line"] = base["has_spread_line"].astype(bool)
+    else:
+        base["has_spread_line"] = False
+    base["total_points"] = pd.to_numeric(
+        base["total_points"] if "total_points" in base.columns else pd.Series(pd.NA, index=base.index),
+        errors="coerce",
+    )
+    base["vegas_home_margin"] = pd.to_numeric(
+        base["vegas_home_margin"] if "vegas_home_margin" in base.columns else pd.Series(pd.NA, index=base.index),
+        errors="coerce",
+    )
+    base["total_abs_error"] = pd.to_numeric(
+        base["total_abs_error"] if "total_abs_error" in base.columns else pd.Series(pd.NA, index=base.index),
+        errors="coerce",
+    )
+    base["spread_abs_error"] = pd.to_numeric(
+        base["spread_abs_error"] if "spread_abs_error" in base.columns else pd.Series(pd.NA, index=base.index),
+        errors="coerce",
+    )
+
+    total_line_df = base.loc[base["has_total_line"]].copy()
+    spread_line_df = base.loc[base["has_spread_line"]].copy()
+    actual_winner_side = (
+        base["actual_winner_side"].astype(str)
+        if "actual_winner_side" in base.columns
+        else pd.Series([""] * len(base), index=base.index)
+    )
+    predicted_winner_side = (
+        base["predicted_winner_side"].astype(str)
+        if "predicted_winner_side" in base.columns
+        else pd.Series([""] * len(base), index=base.index)
+    )
+    winner_pick_mask = (
+        base["has_spread_line"]
+        & actual_winner_side.isin(["home", "away"])
+        & predicted_winner_side.isin(["home", "away"])
+    )
+
+    high_total_over_rate = 0.0
+    if not total_line_df.empty:
+        cutoff = float(total_line_df["total_points"].dropna().quantile(0.75))
+        high_total_df = total_line_df.loc[total_line_df["total_points"] >= cutoff].copy()
+        if not high_total_df.empty:
+            total_result = (
+                high_total_df["total_result"].astype(str)
+                if "total_result" in high_total_df.columns
+                else pd.Series([""] * len(high_total_df), index=high_total_df.index)
+            )
+            high_total_over_rate = _safe_pct_value(float((total_result == "Over").sum()), float(len(high_total_df)))
+
+    close_spread_winner_accuracy = 0.0
+    if not spread_line_df.empty:
+        close_df = spread_line_df.loc[spread_line_df["vegas_home_margin"].abs() <= 3.0].copy()
+        if not close_df.empty:
+            correct = pd.to_numeric(close_df.get("winner_pick_correct"), errors="coerce").fillna(0.0).sum()
+            close_spread_winner_accuracy = _safe_pct_value(float(correct), float(len(close_df)))
+
+    winner_pick_correct = pd.to_numeric(base.loc[winner_pick_mask, "winner_pick_correct"], errors="coerce").fillna(0.0)
+    return {
+        "games": int(len(base)),
+        "total_line_games": int(len(total_line_df)),
+        "spread_line_games": int(len(spread_line_df)),
+        "total_mae": round(float(total_line_df["total_abs_error"].mean()) if not total_line_df.empty else 0.0, 4),
+        "spread_mae": round(float(spread_line_df["spread_abs_error"].mean()) if not spread_line_df.empty else 0.0, 4),
+        "winner_pick_accuracy_pct": round(
+            _safe_pct_value(float(winner_pick_correct.sum()), float(len(winner_pick_correct))),
+            4,
+        ),
+        "high_total_over_rate_pct": round(float(high_total_over_rate), 4),
+        "close_spread_winner_accuracy_pct": round(float(close_spread_winner_accuracy), 4),
+    }
+
+
+def build_game_slate_ai_review_packet(
+    *,
+    review_date: str,
+    odds_df: pd.DataFrame,
+    prior_boxscore_df: pd.DataFrame | None = None,
+    vegas_history_df: pd.DataFrame | None = None,
+    vegas_review_df: pd.DataFrame | None = None,
+    focus_limit: int = 8,
+) -> dict[str, Any]:
+    odds = odds_df.copy() if isinstance(odds_df, pd.DataFrame) else pd.DataFrame()
+    prior_boxscore_df = prior_boxscore_df.copy() if isinstance(prior_boxscore_df, pd.DataFrame) else pd.DataFrame()
+    vegas_history_df = vegas_history_df.copy() if isinstance(vegas_history_df, pd.DataFrame) else pd.DataFrame()
+    vegas_review_df = vegas_review_df.copy() if isinstance(vegas_review_df, pd.DataFrame) else pd.DataFrame()
+    focus_n = int(max(3, focus_limit))
+
+    if odds.empty:
+        return {
+            "schema_version": GAME_SLATE_AI_REVIEW_SCHEMA_VERSION,
+            "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "review_context": {"review_date": str(review_date), "odds_rows": 0},
+            "market_summary": {
+                "games": 0,
+                "avg_total_line": 0.0,
+                "avg_abs_spread": 0.0,
+                "close_spread_games": 0,
+                "high_total_games": 0,
+                "heavy_favorite_games": 0,
+            },
+            "vegas_calibration": _summarize_vegas_history_for_game_slate(vegas_history_df),
+            "today_vegas_review": {
+                "rows": 0,
+                "matched_rows": 0,
+                "winner_pick_accuracy_pct": 0.0,
+                "total_mae": 0.0,
+                "spread_mae": 0.0,
+            },
+            "focus_tables": {
+                "stack_candidates_top": [],
+                "winner_calls": [],
+                "upset_candidates": [],
+                "prior_day_team_form_top": [],
+                "prior_day_high_concentration_teams": [],
+                "games_table": [],
+            },
+            "notes_for_agent": [
+                "No odds rows were available for the selected date.",
+                "Use cached odds import before running this review.",
+            ],
+        }
+
+    odds["game_date"] = (
+        odds["game_date"].astype(str).str.strip()
+        if "game_date" in odds.columns
+        else pd.Series([""] * len(odds), index=odds.index)
+    )
+    odds["home_team"] = (
+        odds["home_team"].astype(str).str.strip()
+        if "home_team" in odds.columns
+        else pd.Series([""] * len(odds), index=odds.index)
+    )
+    odds["away_team"] = (
+        odds["away_team"].astype(str).str.strip()
+        if "away_team" in odds.columns
+        else pd.Series([""] * len(odds), index=odds.index)
+    )
+    odds["bookmakers_count"] = pd.to_numeric(
+        odds["bookmakers_count"] if "bookmakers_count" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["total_points"] = pd.to_numeric(
+        odds["total_points"] if "total_points" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["spread_home"] = pd.to_numeric(
+        odds["spread_home"] if "spread_home" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["spread_away"] = pd.to_numeric(
+        odds["spread_away"] if "spread_away" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["moneyline_home"] = pd.to_numeric(
+        odds["moneyline_home"] if "moneyline_home" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["moneyline_away"] = pd.to_numeric(
+        odds["moneyline_away"] if "moneyline_away" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["p_plus_8"] = pd.to_numeric(
+        odds["p_plus_8"] if "p_plus_8" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["p_plus_12"] = pd.to_numeric(
+        odds["p_plus_12"] if "p_plus_12" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+    odds["tail_sigma"] = pd.to_numeric(
+        odds["tail_sigma"] if "tail_sigma" in odds.columns else pd.Series(pd.NA, index=odds.index),
+        errors="coerce",
+    )
+
+    odds["abs_spread"] = pd.to_numeric(odds["spread_home"], errors="coerce").abs()
+    odds["abs_spread"] = odds["abs_spread"].where(odds["abs_spread"].notna(), pd.to_numeric(odds["spread_away"], errors="coerce").abs())
+    odds["abs_spread"] = odds["abs_spread"].fillna(0.0)
+
+    odds["implied_home_win_prob"] = odds["moneyline_home"].map(_american_to_implied_probability)
+    odds["implied_away_win_prob"] = odds["moneyline_away"].map(_american_to_implied_probability)
+
+    normalized_probs = odds.apply(
+        lambda row: _normalize_win_probabilities(
+            row.get("implied_home_win_prob"),
+            row.get("implied_away_win_prob"),
+        ),
+        axis=1,
+    )
+    odds["home_win_prob"] = normalized_probs.map(lambda x: x[0] if isinstance(x, tuple) else None)
+    odds["away_win_prob"] = normalized_probs.map(lambda x: x[1] if isinstance(x, tuple) else None)
+
+    spread_conf = (odds["abs_spread"] * 0.035).clip(lower=0.0, upper=0.45)
+    spread_home_favored = odds["spread_home"] <= 0
+    spread_home_prob = pd.Series(0.5, index=odds.index, dtype="float64")
+    spread_home_prob = spread_home_prob.where(~spread_home_favored, 0.5 + spread_conf)
+    spread_home_prob = spread_home_prob.where(spread_home_favored, 0.5 - spread_conf)
+
+    odds["home_win_prob"] = pd.to_numeric(odds["home_win_prob"], errors="coerce").where(
+        pd.to_numeric(odds["home_win_prob"], errors="coerce").notna(),
+        spread_home_prob,
+    )
+    odds["away_win_prob"] = pd.to_numeric(odds["away_win_prob"], errors="coerce").where(
+        pd.to_numeric(odds["away_win_prob"], errors="coerce").notna(),
+        1.0 - odds["home_win_prob"],
+    )
+    odds["home_win_prob"] = odds["home_win_prob"].clip(lower=0.01, upper=0.99)
+    odds["away_win_prob"] = odds["away_win_prob"].clip(lower=0.01, upper=0.99)
+
+    odds["favorite_team"] = odds.apply(
+        lambda row: str(row.get("home_team") or "")
+        if float(pd.to_numeric(row.get("home_win_prob"), errors="coerce") or 0.0)
+        >= float(pd.to_numeric(row.get("away_win_prob"), errors="coerce") or 0.0)
+        else str(row.get("away_team") or ""),
+        axis=1,
+    )
+    odds["projected_winner"] = odds["favorite_team"]
+    odds["winner_confidence_pct"] = (
+        pd.concat([odds["home_win_prob"], odds["away_win_prob"]], axis=1).max(axis=1).fillna(0.5) * 100.0
+    )
+
+    odds["underdog_team"] = odds.apply(
+        lambda row: str(row.get("home_team") or "")
+        if float(pd.to_numeric(row.get("home_win_prob"), errors="coerce") or 0.0)
+        < float(pd.to_numeric(row.get("away_win_prob"), errors="coerce") or 0.0)
+        else str(row.get("away_team") or ""),
+        axis=1,
+    )
+    odds["underdog_win_prob"] = pd.concat([odds["home_win_prob"], odds["away_win_prob"]], axis=1).min(axis=1)
+
+    total_series = pd.to_numeric(odds["total_points"], errors="coerce")
+    total_center = float(total_series.dropna().median()) if total_series.notna().any() else 150.0
+    total_scale = float(total_series.dropna().std()) if total_series.notna().sum() >= 2 else 0.0
+    if total_scale <= 1e-6:
+        odds["total_z"] = 0.0
+    else:
+        odds["total_z"] = ((total_series - total_center) / total_scale).clip(lower=-3.0, upper=3.0).fillna(0.0)
+
+    odds["close_game_score"] = (1.0 - (odds["abs_spread"] / 14.0)).clip(lower=0.0, upper=1.0)
+
+    volatility = pd.to_numeric(odds["p_plus_12"], errors="coerce")
+    if volatility.notna().any():
+        odds["volatility_signal"] = volatility.clip(lower=0.0, upper=1.0).fillna(float(volatility.median()))
+    else:
+        volatility = pd.to_numeric(odds["p_plus_8"], errors="coerce")
+        if volatility.notna().any():
+            odds["volatility_signal"] = volatility.clip(lower=0.0, upper=1.0).fillna(float(volatility.median()))
+        else:
+            sigma = pd.to_numeric(odds["tail_sigma"], errors="coerce")
+            if sigma.notna().any():
+                sigma_center = float(sigma.dropna().median())
+                sigma_scale = float(sigma.dropna().std()) if sigma.notna().sum() >= 2 else 0.0
+                if sigma_scale <= 1e-6:
+                    odds["volatility_signal"] = 0.5
+                else:
+                    odds["volatility_signal"] = ((sigma - sigma_center) / sigma_scale).clip(-2.0, 2.0)
+                    odds["volatility_signal"] = (0.5 + (0.2 * odds["volatility_signal"])).clip(0.0, 1.0).fillna(0.5)
+            else:
+                odds["volatility_signal"] = 0.5
+
+    odds["stack_score"] = (
+        55.0
+        + (14.0 * odds["total_z"])
+        + (22.0 * odds["close_game_score"])
+        + (16.0 * odds["volatility_signal"])
+    ).clip(lower=0.0, upper=100.0)
+    odds["blowout_risk_score"] = ((odds["abs_spread"] / 15.0) * 100.0).clip(lower=0.0, upper=100.0)
+    odds["upset_score"] = (
+        100.0 * ((0.65 * odds["underdog_win_prob"].fillna(0.35)) + (0.35 * odds["close_game_score"]))
+    ).clip(lower=0.0, upper=100.0)
+
+    prior_form_df = _build_prior_team_form_frame(prior_boxscore_df)
+    vegas_calibration = _summarize_vegas_history_for_game_slate(vegas_history_df)
+
+    today_vegas_summary = {
+        "rows": 0,
+        "matched_rows": 0,
+        "winner_pick_accuracy_pct": 0.0,
+        "total_mae": 0.0,
+        "spread_mae": 0.0,
+    }
+    if not vegas_review_df.empty:
+        today = vegas_review_df.copy()
+        if "has_odds_match" in today.columns:
+            today["has_odds_match"] = today["has_odds_match"].astype(bool)
+        else:
+            today["has_odds_match"] = False
+        today["total_abs_error"] = pd.to_numeric(
+            today["total_abs_error"] if "total_abs_error" in today.columns else pd.Series(pd.NA, index=today.index),
+            errors="coerce",
+        )
+        today["spread_abs_error"] = pd.to_numeric(
+            today["spread_abs_error"] if "spread_abs_error" in today.columns else pd.Series(pd.NA, index=today.index),
+            errors="coerce",
+        )
+        today_actual_winner = (
+            today["actual_winner_side"].astype(str)
+            if "actual_winner_side" in today.columns
+            else pd.Series([""] * len(today), index=today.index)
+        )
+        today_predicted_winner = (
+            today["predicted_winner_side"].astype(str)
+            if "predicted_winner_side" in today.columns
+            else pd.Series([""] * len(today), index=today.index)
+        )
+        winner_mask = (
+            today_actual_winner.isin(["home", "away"])
+            & today_predicted_winner.isin(["home", "away"])
+        )
+        winner_correct = pd.to_numeric(today.loc[winner_mask, "winner_pick_correct"], errors="coerce").fillna(0.0)
+        today_vegas_summary = {
+            "rows": int(len(today)),
+            "matched_rows": int(today["has_odds_match"].sum()),
+            "winner_pick_accuracy_pct": round(
+                _safe_pct_value(float(winner_correct.sum()), float(len(winner_correct))),
+                4,
+            ),
+            "total_mae": round(float(today["total_abs_error"].mean()) if today["total_abs_error"].notna().any() else 0.0, 4),
+            "spread_mae": round(float(today["spread_abs_error"].mean()) if today["spread_abs_error"].notna().any() else 0.0, 4),
+        }
+
+    games_table_cols = [
+        "game_date",
+        "event_id",
+        "home_team",
+        "away_team",
+        "bookmakers_count",
+        "total_points",
+        "abs_spread",
+        "spread_home",
+        "spread_away",
+        "moneyline_home",
+        "moneyline_away",
+        "favorite_team",
+        "projected_winner",
+        "winner_confidence_pct",
+        "underdog_team",
+        "underdog_win_prob",
+        "stack_score",
+        "upset_score",
+        "blowout_risk_score",
+        "close_game_score",
+        "volatility_signal",
+    ]
+    games_export = odds[[c for c in games_table_cols if c in odds.columns]].copy()
+    numeric_round_cols = [
+        "bookmakers_count",
+        "total_points",
+        "abs_spread",
+        "spread_home",
+        "spread_away",
+        "moneyline_home",
+        "moneyline_away",
+        "winner_confidence_pct",
+        "underdog_win_prob",
+        "stack_score",
+        "upset_score",
+        "blowout_risk_score",
+        "close_game_score",
+        "volatility_signal",
+    ]
+    for col in numeric_round_cols:
+        if col in games_export.columns:
+            games_export[col] = pd.to_numeric(games_export[col], errors="coerce").round(4)
+
+    stack_candidates = _top_records(
+        games_export,
+        keep_cols=[
+            "game_date",
+            "home_team",
+            "away_team",
+            "total_points",
+            "abs_spread",
+            "stack_score",
+            "blowout_risk_score",
+            "projected_winner",
+            "winner_confidence_pct",
+            "volatility_signal",
+        ],
+        sort_col="stack_score",
+        ascending=False,
+        limit=focus_n,
+    )
+    winner_calls = _top_records(
+        games_export,
+        keep_cols=[
+            "game_date",
+            "home_team",
+            "away_team",
+            "projected_winner",
+            "winner_confidence_pct",
+            "favorite_team",
+            "moneyline_home",
+            "moneyline_away",
+            "spread_home",
+            "spread_away",
+        ],
+        sort_col="winner_confidence_pct",
+        ascending=False,
+        limit=max(focus_n, int(len(games_export))),
+    )
+
+    upset_pool = games_export.copy()
+    upset_pool = upset_pool.loc[
+        (pd.to_numeric(upset_pool.get("underdog_win_prob"), errors="coerce") >= 0.18)
+        & (pd.to_numeric(upset_pool.get("underdog_win_prob"), errors="coerce") <= 0.48)
+    ]
+    if upset_pool.empty:
+        upset_pool = games_export.copy()
+    upset_candidates = _top_records(
+        upset_pool,
+        keep_cols=[
+            "game_date",
+            "home_team",
+            "away_team",
+            "underdog_team",
+            "underdog_win_prob",
+            "upset_score",
+            "projected_winner",
+            "winner_confidence_pct",
+            "spread_home",
+            "spread_away",
+        ],
+        sort_col="upset_score",
+        ascending=False,
+        limit=focus_n,
+    )
+
+    prior_day_team_form_top = (
+        prior_form_df.head(focus_n).to_dict(orient="records") if not prior_form_df.empty else []
+    )
+    prior_day_high_concentration_teams = []
+    if not prior_form_df.empty and "top3_dk_share_pct" in prior_form_df.columns:
+        high_concentration = prior_form_df.sort_values("top3_dk_share_pct", ascending=False).head(focus_n)
+        prior_day_high_concentration_teams = high_concentration.to_dict(orient="records")
+
+    total_values = pd.to_numeric(odds["total_points"], errors="coerce")
+    abs_spread_values = pd.to_numeric(odds["abs_spread"], errors="coerce")
+    high_total_cutoff = float(total_values.quantile(0.75)) if total_values.notna().any() else 0.0
+    market_summary = {
+        "games": int(len(odds)),
+        "avg_total_line": round(float(total_values.mean()) if total_values.notna().any() else 0.0, 4),
+        "avg_abs_spread": round(float(abs_spread_values.mean()) if abs_spread_values.notna().any() else 0.0, 4),
+        "close_spread_games": int((abs_spread_values <= 4.0).sum()),
+        "high_total_games": int((total_values >= high_total_cutoff).sum()) if high_total_cutoff > 0 else 0,
+        "heavy_favorite_games": int((abs_spread_values >= 8.0).sum()),
+    }
+
+    return {
+        "schema_version": GAME_SLATE_AI_REVIEW_SCHEMA_VERSION,
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "review_context": {
+            "review_date": str(review_date),
+            "odds_rows": int(len(odds)),
+            "prior_boxscore_rows": int(len(prior_boxscore_df)),
+            "vegas_history_rows": int(len(vegas_history_df)),
+            "vegas_review_rows": int(len(vegas_review_df)),
+        },
+        "market_summary": market_summary,
+        "vegas_calibration": vegas_calibration,
+        "today_vegas_review": today_vegas_summary,
+        "focus_tables": {
+            "stack_candidates_top": stack_candidates,
+            "winner_calls": winner_calls,
+            "upset_candidates": upset_candidates,
+            "prior_day_team_form_top": prior_day_team_form_top,
+            "prior_day_high_concentration_teams": prior_day_high_concentration_teams,
+            "games_table": games_export.head(max(focus_n * 4, 20)).to_dict(orient="records"),
+        },
+        "notes_for_agent": [
+            "Prioritize stacks where stack_score is high and blowout_risk_score is moderate or low.",
+            "Use winner_confidence_pct and upset_score for confidence tiers, not binary locks.",
+            "If data is sparse for a game, mark confidence Low and explain what is missing.",
+        ],
+    }
+
+
+def build_game_slate_ai_review_user_prompt(packet: dict[str, Any]) -> str:
+    payload_json = json.dumps(packet, indent=2, ensure_ascii=True)
+    return (
+        "Review this college basketball game-slate packet and provide actionable DFS game-level guidance.\n\n"
+        "Required output format:\n"
+        "1) Slate Summary (3-5 bullets)\n"
+        "2) Best Games to Stack (ranked; include why + risk)\n"
+        "3) Winner Leans by Game (team + confidence + one-line rationale)\n"
+        "4) Upset/Leverage Angles (if any)\n"
+        "5) Fade or One-Off-Only Games\n"
+        "6) Action Plan for This Slate (max 8 bullets)\n\n"
+        "Constraints:\n"
+        "- Use only evidence in the JSON packet.\n"
+        "- Cite exact metric names/values when making claims.\n"
+        "- Mark confidence per recommendation as High/Medium/Low.\n"
+        "- If data is missing, say exactly what is missing.\n\n"
         "JSON packet:\n"
         f"{payload_json}\n"
     )

@@ -2,8 +2,11 @@ import pandas as pd
 
 from college_basketball_dfs.cbb_ai_review import (
     AI_REVIEW_SCHEMA_VERSION,
+    GAME_SLATE_AI_REVIEW_SCHEMA_VERSION,
     build_ai_review_user_prompt,
     build_daily_ai_review_packet,
+    build_game_slate_ai_review_packet,
+    build_game_slate_ai_review_user_prompt,
     build_global_ai_review_packet,
     build_global_ai_review_user_prompt,
     request_openai_review,
@@ -80,6 +83,85 @@ def _sample_phantom() -> pd.DataFrame:
         [
             {"actual_minus_projected": 8.0, "actual_points": 328.2, "would_beat_pct": 94.0, "salary_left": 300},
             {"actual_minus_projected": -4.0, "actual_points": 309.5, "would_beat_pct": 61.0, "salary_left": 700},
+        ]
+    )
+
+
+def _sample_odds_games() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "game_date": "2026-02-20",
+                "event_id": "ev1",
+                "home_team": "Alpha U",
+                "away_team": "Beta U",
+                "bookmakers_count": 8,
+                "moneyline_home": -180,
+                "moneyline_away": 150,
+                "spread_home": -4.5,
+                "spread_away": 4.5,
+                "total_points": 149.5,
+                "p_plus_8": 0.31,
+                "p_plus_12": 0.19,
+            },
+            {
+                "game_date": "2026-02-20",
+                "event_id": "ev2",
+                "home_team": "Gamma U",
+                "away_team": "Delta U",
+                "bookmakers_count": 7,
+                "moneyline_home": -110,
+                "moneyline_away": -110,
+                "spread_home": -1.0,
+                "spread_away": 1.0,
+                "total_points": 158.0,
+                "p_plus_8": 0.42,
+                "p_plus_12": 0.28,
+            },
+        ]
+    )
+
+
+def _sample_prior_boxscore() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {"team_name": "Alpha U", "actual_minutes": 34, "actual_dk_points": 33.0},
+            {"team_name": "Alpha U", "actual_minutes": 31, "actual_dk_points": 27.5},
+            {"team_name": "Alpha U", "actual_minutes": 28, "actual_dk_points": 19.0},
+            {"team_name": "Gamma U", "actual_minutes": 35, "actual_dk_points": 30.0},
+            {"team_name": "Gamma U", "actual_minutes": 30, "actual_dk_points": 22.0},
+            {"team_name": "Gamma U", "actual_minutes": 26, "actual_dk_points": 16.0},
+        ]
+    )
+
+
+def _sample_vegas_history() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "has_total_line": True,
+                "has_spread_line": True,
+                "total_points": 152.5,
+                "vegas_home_margin": -3.5,
+                "total_abs_error": 8.0,
+                "spread_abs_error": 4.5,
+                "actual_winner_side": "home",
+                "predicted_winner_side": "home",
+                "winner_pick_correct": True,
+                "total_result": "Over",
+            },
+            {
+                "has_total_line": True,
+                "has_spread_line": True,
+                "total_points": 145.0,
+                "vegas_home_margin": 2.0,
+                "total_abs_error": 6.0,
+                "spread_abs_error": 2.0,
+                "actual_winner_side": "away",
+                "predicted_winner_side": "home",
+                "winner_pick_correct": False,
+                "total_result": "Under",
+            },
         ]
     )
 
@@ -261,3 +343,26 @@ def test_build_global_ai_review_packet_aggregates_daily_packets() -> None:
     prompt = build_global_ai_review_user_prompt(global_packet)
     assert "Global Diagnostic Summary" in prompt
     assert '"schema_version": "v1_global"' in prompt
+
+
+def test_build_game_slate_ai_review_packet_and_prompt() -> None:
+    packet = build_game_slate_ai_review_packet(
+        review_date="2026-02-20",
+        odds_df=_sample_odds_games(),
+        prior_boxscore_df=_sample_prior_boxscore(),
+        vegas_history_df=_sample_vegas_history(),
+        vegas_review_df=pd.DataFrame(),
+        focus_limit=5,
+    )
+
+    assert packet["schema_version"] == GAME_SLATE_AI_REVIEW_SCHEMA_VERSION
+    assert packet["review_context"]["review_date"] == "2026-02-20"
+    assert int(packet["market_summary"]["games"]) == 2
+    focus_tables = packet.get("focus_tables") or {}
+    assert len(focus_tables.get("stack_candidates_top") or []) > 0
+    assert len(focus_tables.get("winner_calls") or []) > 0
+    assert len(focus_tables.get("games_table") or []) > 0
+
+    prompt = build_game_slate_ai_review_user_prompt(packet)
+    assert "Best Games to Stack" in prompt
+    assert '"schema_version": "v1_game_slate"' in prompt
