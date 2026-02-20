@@ -3,6 +3,7 @@ from collections import Counter
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
+    apply_projection_calibration,
     apply_contest_objective,
     build_dk_upload_csv,
     build_player_pool,
@@ -384,3 +385,17 @@ def test_apply_contest_objective_can_toggle_tail_signals() -> None:
     assert "objective_score" in legacy.columns
     assert "objective_score" in tail.columns
     assert float(tail["objective_score"].mean()) > float(legacy["objective_score"].mean())
+
+
+def test_apply_projection_calibration_scales_projection_columns() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    base = pool.loc[:, ["projected_dk_points", "blended_projection", "our_dk_projection"]].copy()
+    scaled = apply_projection_calibration(pool, projection_scale=0.9)
+
+    assert "projection_calibration_scale" in scaled.columns
+    assert float(scaled["projection_calibration_scale"].iloc[0]) == 0.9
+    for col in ["projected_dk_points", "blended_projection", "our_dk_projection"]:
+        b = pd.to_numeric(base[col], errors="coerce")
+        s = pd.to_numeric(scaled[col], errors="coerce")
+        diff = (s - (b * 0.9)).abs().fillna(0.0)
+        assert float(diff.max()) < 1e-6

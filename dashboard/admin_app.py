@@ -99,6 +99,7 @@ COMMON_ODDS_BOOKMAKER_KEYS = [
     "betonlineag",
     "bovada",
 ]
+NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
 def _csv_values(text: str | None) -> list[str]:
@@ -122,6 +123,32 @@ def _safe_float_value(value: object, default: float = 0.0) -> float:
 
 def _safe_int_value(value: object, default: int = 0) -> int:
     return int(_safe_float_value(value, float(default)))
+
+
+def _norm_name_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _norm_name_key_loose(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [tok for tok in text.split() if tok and tok not in NAME_SUFFIX_TOKENS]
+    return "".join(tokens)
+
+
+def _normalize_player_id(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return ""
+    text = text.replace(",", "")
+    if re.fullmatch(r"-?\d+(?:\.0+)?", text):
+        try:
+            return str(int(float(text)))
+        except (TypeError, ValueError):
+            return text
+    return re.sub(r"\s+", "", text)
 
 
 def _merged_bookmakers(selected: list[str] | None, custom_csv: str | None = None) -> list[str]:
@@ -509,6 +536,110 @@ def load_saved_lineup_run_dates(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def compute_projection_calibration_from_phantom(
+    bucket_name: str,
+    selected_date: date,
+    lookback_days: int,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> dict[str, Any]:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    end_date = selected_date - timedelta(days=1)
+    if lookback_days <= 0 or end_date < date(2000, 1, 1):
+        return {
+            "scale": 1.0,
+            "raw_scale": 1.0,
+            "used_dates": 0,
+            "lineups": 0,
+            "weighted_avg_actual": 0.0,
+            "weighted_avg_projected": 0.0,
+            "weighted_avg_delta": 0.0,
+        }
+    start_date = end_date - timedelta(days=max(1, int(lookback_days)) - 1)
+    run_dates = store.list_lineup_run_dates()
+    candidate_dates = [d for d in run_dates if isinstance(d, date) and start_date <= d <= end_date]
+    if not candidate_dates:
+        return {
+            "scale": 1.0,
+            "raw_scale": 1.0,
+            "used_dates": 0,
+            "lineups": 0,
+            "weighted_avg_actual": 0.0,
+            "weighted_avg_projected": 0.0,
+            "weighted_avg_delta": 0.0,
+        }
+
+    total_actual = 0.0
+    total_projected = 0.0
+    total_lineups = 0.0
+    used_dates = 0
+    for run_date in sorted(candidate_dates, reverse=True):
+        run_ids = store.list_lineup_run_ids(run_date)
+        summary_df = pd.DataFrame()
+        for run_id in run_ids:
+            payload = store.read_phantom_review_summary_json(run_date, run_id)
+            if not isinstance(payload, dict):
+                continue
+            rows = payload.get("summary_rows")
+            if not isinstance(rows, list) or not rows:
+                continue
+            summary_df = pd.DataFrame(rows)
+            if not summary_df.empty:
+                break
+        if summary_df.empty:
+            continue
+
+        lineups = pd.to_numeric(summary_df.get("lineups"), errors="coerce").fillna(0.0)
+        avg_actual = pd.to_numeric(summary_df.get("avg_actual_points"), errors="coerce").fillna(0.0)
+        avg_proj = pd.to_numeric(summary_df.get("avg_projected_points"), errors="coerce").fillna(0.0)
+        use_mask = (lineups > 0.0) & (avg_proj > 0.0)
+        if not bool(use_mask.any()):
+            continue
+
+        weighted_actual = float((lineups[use_mask] * avg_actual[use_mask]).sum())
+        weighted_proj = float((lineups[use_mask] * avg_proj[use_mask]).sum())
+        weighted_lineups = float(lineups[use_mask].sum())
+        if weighted_proj <= 0.0 or weighted_lineups <= 0.0:
+            continue
+        total_actual += weighted_actual
+        total_projected += weighted_proj
+        total_lineups += weighted_lineups
+        used_dates += 1
+
+    if total_projected <= 0.0 or total_lineups <= 0.0:
+        return {
+            "scale": 1.0,
+            "raw_scale": 1.0,
+            "used_dates": used_dates,
+            "lineups": int(total_lineups),
+            "weighted_avg_actual": 0.0,
+            "weighted_avg_projected": 0.0,
+            "weighted_avg_delta": 0.0,
+        }
+
+    raw_scale = float(total_actual / total_projected)
+    clipped_scale = float(min(1.05, max(0.75, raw_scale)))
+    avg_actual = float(total_actual / total_lineups)
+    avg_projected = float(total_projected / total_lineups)
+    avg_delta = float(avg_actual - avg_projected)
+    return {
+        "scale": clipped_scale,
+        "raw_scale": raw_scale,
+        "used_dates": int(used_dates),
+        "lineups": int(total_lineups),
+        "weighted_avg_actual": avg_actual,
+        "weighted_avg_projected": avg_projected,
+        "weighted_avg_delta": avg_delta,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def load_saved_lineup_version_payload(
     bucket_name: str,
     selected_date: date,
@@ -861,29 +992,51 @@ def normalize_ownership_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
         return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership"])
     out = df.copy()
-    rename_map = {
+    normalized_columns = {re.sub(r"[^a-z0-9]", "", str(c).strip().lower()): c for c in out.columns}
+    rename_aliases = {
         "id": "ID",
-        "player_id": "ID",
+        "playerid": "ID",
+        "dkid": "ID",
+        "draftkingsid": "ID",
+        "nameid": "ID",
         "name": "Name",
-        "player_name": "Name",
+        "playername": "Name",
+        "player": "Name",
+        "athlete": "Name",
         "team": "TeamAbbrev",
-        "team_abbrev": "TeamAbbrev",
         "teamabbrev": "TeamAbbrev",
+        "teamabbr": "TeamAbbrev",
+        "teamabbreviation": "TeamAbbrev",
         "ownership": "actual_ownership",
-        "own%": "actual_ownership",
-        "own_pct": "actual_ownership",
-        "actual_own": "actual_ownership",
+        "own": "actual_ownership",
+        "ownpct": "actual_ownership",
+        "actualown": "actual_ownership",
+        "actualownership": "actual_ownership",
+        "drafted": "actual_ownership",
+        "pctdrafted": "actual_ownership",
+        "fieldownership": "actual_ownership",
     }
-    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
+    resolved_rename: dict[str, str] = {}
+    for alias, dest in rename_aliases.items():
+        source = normalized_columns.get(alias)
+        if source:
+            resolved_rename[source] = dest
+    if resolved_rename:
+        out = out.rename(columns=resolved_rename)
     for col in ["ID", "Name", "TeamAbbrev", "actual_ownership"]:
         if col not in out.columns:
             out[col] = ""
-    out["ID"] = out["ID"].astype(str).str.strip()
+    out["ID"] = out["ID"].map(_normalize_player_id)
     out["Name"] = out["Name"].astype(str).str.strip()
     out["TeamAbbrev"] = out["TeamAbbrev"].astype(str).str.strip().str.upper()
     out["actual_ownership"] = out["actual_ownership"].map(_ownership_to_float)
+    out["name_key"] = out["Name"].map(_norm_name_key)
+    out["name_key_loose"] = out["Name"].map(_norm_name_key_loose)
     out = out.loc[(out["ID"] != "") | (out["Name"] != "")]
-    return out[["ID", "Name", "TeamAbbrev", "actual_ownership"]].reset_index(drop=True)
+    out = out.sort_values(["ID", "Name"], ascending=[True, True]).drop_duplicates(
+        subset=["ID", "name_key", "TeamAbbrev"], keep="last"
+    )
+    return out[["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"]].reset_index(drop=True)
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -922,7 +1075,7 @@ def load_ownership_frame_for_date(
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
     csv_text = _read_ownership_csv(store, selected_date)
     if not csv_text or not csv_text.strip():
-        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership"])
+        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
     df = pd.read_csv(io.StringIO(csv_text))
     return normalize_ownership_frame(df)
 
@@ -2147,8 +2300,8 @@ with tab_lineups:
             "Max Salary Left Per Lineup",
             min_value=0,
             max_value=10000,
-            value=500,
-            step=100,
+            value=50,
+            step=50,
             help="Lineups must use at least 50000 - this value in salary.",
         )
     )
@@ -2162,6 +2315,44 @@ with tab_lineups:
             help="Caps every player's max lineup rate across the run (locks override this cap).",
         )
     )
+    s1, s2, s3 = st.columns(3)
+    strict_salary_utilization = bool(
+        s1.checkbox(
+            "Strict Salary Utilization",
+            value=True,
+            help="When enabled, lineups are constrained to use at least 49,950 salary.",
+        )
+    )
+    salary_left_target = int(
+        s2.slider(
+            "Salary Left Target",
+            min_value=0,
+            max_value=500,
+            value=50,
+            step=10,
+            help="Scoring penalty targets this salary-left value.",
+        )
+    )
+    auto_projection_calibration = bool(
+        s3.checkbox(
+            "Auto Projection Calibration",
+            value=True,
+            help="Scale projections from recent phantom review actual-vs-projected results.",
+        )
+    )
+    calibration_lookback_days = 14
+    if auto_projection_calibration:
+        calibration_lookback_days = int(
+            st.slider(
+                "Calibration Lookback Days",
+                min_value=3,
+                max_value=60,
+                value=14,
+                step=1,
+                help="Uses prior phantom review summaries to estimate projection scale.",
+            )
+        )
+    effective_max_salary_left = min(max_salary_left, 50) if strict_salary_utilization else max_salary_left
     spike_max_pair_overlap = 4
     if run_mode_key == "all" or lineup_strategy == "spike":
         spike_max_pair_overlap = int(
@@ -2238,6 +2429,30 @@ with tab_lineups:
                     excluded_ids = [label_to_id[x] for x in excluded_labels]
                     progress_text = st.empty()
                     progress_bar = st.progress(0, text="Starting lineup generation...")
+                    projection_scale = 1.0
+                    calibration_meta: dict[str, Any] = {}
+                    if auto_projection_calibration:
+                        calibration_meta = compute_projection_calibration_from_phantom(
+                            bucket_name=bucket_name,
+                            selected_date=lineup_slate_date,
+                            lookback_days=calibration_lookback_days,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        projection_scale = float(calibration_meta.get("scale") or 1.0)
+                        st.caption(
+                            "Projection calibration applied: "
+                            f"scale={projection_scale:.4f} (raw={float(calibration_meta.get('raw_scale') or 1.0):.4f}, "
+                            f"used_dates={int(calibration_meta.get('used_dates') or 0)}, "
+                            f"lineups={int(calibration_meta.get('lineups') or 0)}, "
+                            f"avg_delta={float(calibration_meta.get('weighted_avg_delta') or 0.0):.2f})"
+                        )
+                    if strict_salary_utilization and effective_max_salary_left < max_salary_left:
+                        st.caption(
+                            f"Strict salary utilization enabled: max salary left tightened from "
+                            f"`{max_salary_left}` to `{effective_max_salary_left}`."
+                        )
 
                     if run_mode_key == "all":
                         version_plan = [
@@ -2346,12 +2561,14 @@ with tab_lineups:
                             excluded_ids=excluded_ids,
                             exposure_caps_pct=exposure_caps,
                             global_max_exposure_pct=global_max_exposure_pct,
-                            max_salary_left=max_salary_left,
+                            max_salary_left=effective_max_salary_left,
                             lineup_strategy=str(version_cfg["lineup_strategy"]),
                             include_tail_signals=bool(version_cfg.get("include_tail_signals", False)),
                             spike_max_pair_overlap=int(version_cfg["spike_max_pair_overlap"]),
                             cluster_target_count=int(version_cfg.get("cluster_target_count", 15)),
                             cluster_variants_per_cluster=int(version_cfg.get("cluster_variants_per_cluster", 10)),
+                            projection_scale=projection_scale,
+                            salary_left_target=salary_left_target,
                             random_seed=lineup_seed + version_idx,
                             progress_callback=_lineup_progress,
                         )
@@ -2379,11 +2596,18 @@ with tab_lineups:
                             "lineup_count": lineup_count,
                             "contest_type": contest_type,
                             "lineup_seed": lineup_seed,
-                            "max_salary_left": max_salary_left,
+                            "max_salary_left": effective_max_salary_left,
+                            "requested_max_salary_left": max_salary_left,
+                            "strict_salary_utilization": strict_salary_utilization,
+                            "salary_left_target": salary_left_target,
                             "global_max_exposure_pct": global_max_exposure_pct,
                             "spike_max_pair_overlap": spike_max_pair_overlap,
                             "cluster_target_count": 15,
                             "cluster_variants_per_cluster": 10,
+                            "projection_scale": projection_scale,
+                            "auto_projection_calibration": auto_projection_calibration,
+                            "calibration_lookback_days": calibration_lookback_days,
+                            "calibration_meta": calibration_meta,
                             "bookmaker": lineup_bookmaker.strip(),
                             "locked_ids": locked_ids,
                             "excluded_ids": excluded_ids,
@@ -2738,10 +2962,64 @@ with tab_projection_review:
                     review = review.merge(actual_df, on="Name", how="left", suffixes=("", "_actual"))
 
                 if not own_df.empty:
-                    if "ID" in review.columns:
-                        review = review.merge(own_df[["ID", "actual_ownership"]], on="ID", how="left")
-                    elif "Name" in review.columns:
-                        review = review.merge(own_df[["Name", "actual_ownership"]], on="Name", how="left")
+                    review["actual_ownership"] = pd.NA
+                    own_lookup = own_df.copy()
+                    if "ID" in review.columns and "ID" in own_lookup.columns:
+                        review["ID"] = review["ID"].map(_normalize_player_id)
+                        own_lookup["ID"] = own_lookup["ID"].map(_normalize_player_id)
+                        by_id = (
+                            own_lookup.loc[own_lookup["ID"] != "", ["ID", "actual_ownership"]]
+                            .dropna(subset=["actual_ownership"])
+                            .drop_duplicates("ID")
+                        )
+                        if not by_id.empty:
+                            review = review.merge(by_id, on="ID", how="left", suffixes=("", "_own_id"))
+                            review["actual_ownership"] = pd.to_numeric(
+                                review.get("actual_ownership_own_id"), errors="coerce"
+                            )
+                    if "Name" in review.columns and "Name" in own_lookup.columns:
+                        review["name_key"] = review["Name"].map(_norm_name_key)
+                        review["name_key_loose"] = review["Name"].map(_norm_name_key_loose)
+                        own_lookup["name_key"] = own_lookup["Name"].map(_norm_name_key)
+                        own_lookup["name_key_loose"] = own_lookup["Name"].map(_norm_name_key_loose)
+                        by_name = (
+                            own_lookup.loc[own_lookup["name_key"] != "", ["name_key", "actual_ownership"]]
+                            .dropna(subset=["actual_ownership"])
+                            .drop_duplicates("name_key")
+                            .rename(columns={"actual_ownership": "actual_ownership_name"})
+                        )
+                        if not by_name.empty:
+                            review = review.merge(by_name, on="name_key", how="left")
+                        by_name_loose = (
+                            own_lookup.loc[own_lookup["name_key_loose"] != "", ["name_key_loose", "actual_ownership"]]
+                            .dropna(subset=["actual_ownership"])
+                            .drop_duplicates("name_key_loose")
+                            .rename(columns={"actual_ownership": "actual_ownership_name_loose"})
+                        )
+                        if not by_name_loose.empty:
+                            review = review.merge(by_name_loose, on="name_key_loose", how="left")
+                        review["actual_ownership"] = pd.to_numeric(
+                            review.get("actual_ownership"), errors="coerce"
+                        ).where(
+                            pd.to_numeric(review.get("actual_ownership"), errors="coerce").notna(),
+                            pd.to_numeric(review.get("actual_ownership_name"), errors="coerce"),
+                        )
+                        review["actual_ownership"] = pd.to_numeric(
+                            review.get("actual_ownership"), errors="coerce"
+                        ).where(
+                            pd.to_numeric(review.get("actual_ownership"), errors="coerce").notna(),
+                            pd.to_numeric(review.get("actual_ownership_name_loose"), errors="coerce"),
+                        )
+                    review = review.drop(
+                        columns=[
+                            "actual_ownership_own_id",
+                            "actual_ownership_name",
+                            "actual_ownership_name_loose",
+                            "name_key",
+                            "name_key_loose",
+                        ],
+                        errors="ignore",
+                    )
                 else:
                     review["actual_ownership"] = pd.NA
 

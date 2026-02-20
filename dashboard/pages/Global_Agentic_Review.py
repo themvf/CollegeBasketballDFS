@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import re
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -30,6 +31,8 @@ from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_ncaa import prior_day
 from college_basketball_dfs.cbb_tournament_review import build_projection_actual_comparison
 
+NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
+
 
 def _secret(name: str) -> str | None:
     try:
@@ -52,6 +55,32 @@ def _resolve_credential_json_b64() -> str | None:
 def _to_ownership_float(value: object) -> float | None:
     if value is None:
         return None
+
+
+def _norm_name_key(value: object) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _norm_name_key_loose(value: object) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [tok for tok in text.split() if tok and tok not in NAME_SUFFIX_TOKENS]
+    return "".join(tokens)
+
+
+def _normalize_player_id(value: object) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return ""
+    text = text.replace(",", "")
+    if re.fullmatch(r"-?\d+(?:\.0+)?", text):
+        try:
+            return str(int(float(text)))
+        except (TypeError, ValueError):
+            return text
+    return re.sub(r"\s+", "", text)
     text = str(value).strip().replace("%", "")
     if not text:
         return None
@@ -63,31 +92,53 @@ def _to_ownership_float(value: object) -> float | None:
 
 def _normalize_ownership_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     if df is None or df.empty:
-        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership"])
+        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
     out = df.copy()
-    rename_map = {
+    normalized_columns = {re.sub(r"[^a-z0-9]", "", str(c).strip().lower()): c for c in out.columns}
+    rename_aliases = {
         "id": "ID",
-        "player_id": "ID",
+        "playerid": "ID",
+        "dkid": "ID",
+        "draftkingsid": "ID",
+        "nameid": "ID",
         "name": "Name",
-        "player_name": "Name",
+        "playername": "Name",
+        "player": "Name",
+        "athlete": "Name",
         "team": "TeamAbbrev",
-        "team_abbrev": "TeamAbbrev",
         "teamabbrev": "TeamAbbrev",
+        "teamabbr": "TeamAbbrev",
+        "teamabbreviation": "TeamAbbrev",
         "ownership": "actual_ownership",
-        "own%": "actual_ownership",
-        "own_pct": "actual_ownership",
-        "actual_own": "actual_ownership",
+        "own": "actual_ownership",
+        "ownpct": "actual_ownership",
+        "actualown": "actual_ownership",
+        "actualownership": "actual_ownership",
+        "drafted": "actual_ownership",
+        "pctdrafted": "actual_ownership",
+        "fieldownership": "actual_ownership",
     }
-    out = out.rename(columns={k: v for k, v in rename_map.items() if k in out.columns})
+    resolved_rename: dict[str, str] = {}
+    for alias, dest in rename_aliases.items():
+        source = normalized_columns.get(alias)
+        if source:
+            resolved_rename[source] = dest
+    if resolved_rename:
+        out = out.rename(columns=resolved_rename)
     for col in ["ID", "Name", "TeamAbbrev", "actual_ownership"]:
         if col not in out.columns:
             out[col] = ""
-    out["ID"] = out["ID"].astype(str).str.strip()
+    out["ID"] = out["ID"].map(_normalize_player_id)
     out["Name"] = out["Name"].astype(str).str.strip()
     out["TeamAbbrev"] = out["TeamAbbrev"].astype(str).str.strip().str.upper()
     out["actual_ownership"] = out["actual_ownership"].map(_to_ownership_float)
+    out["name_key"] = out["Name"].map(_norm_name_key)
+    out["name_key_loose"] = out["Name"].map(_norm_name_key_loose)
     out = out.loc[(out["ID"] != "") | (out["Name"] != "")]
-    return out[["ID", "Name", "TeamAbbrev", "actual_ownership"]].reset_index(drop=True)
+    out = out.sort_values(["ID", "Name"], ascending=[True, True]).drop_duplicates(
+        subset=["ID", "name_key", "TeamAbbrev"], keep="last"
+    )
+    return out[["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"]].reset_index(drop=True)
 
 
 def _safe_float(value: object, default: float = 0.0) -> float:
@@ -155,7 +206,7 @@ def load_ownership_frame_for_date(
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
     csv_text = store.read_ownership_csv(selected_date)
     if not csv_text or not csv_text.strip():
-        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership"])
+        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
     raw_df = pd.read_csv(io.StringIO(csv_text))
     return _normalize_ownership_frame(raw_df)
 
@@ -280,23 +331,67 @@ def _build_exposure_frame(projection_df: pd.DataFrame, ownership_df: pd.DataFram
         return pd.DataFrame()
     proj = projection_df.copy()
     if "ID" in proj.columns:
-        proj["ID"] = proj["ID"].astype(str).str.strip()
+        proj["ID"] = proj["ID"].map(_normalize_player_id)
     if "Name" in proj.columns:
         proj["Name"] = proj["Name"].astype(str).str.strip()
+        proj["name_key"] = proj["Name"].map(_norm_name_key)
+        proj["name_key_loose"] = proj["Name"].map(_norm_name_key_loose)
 
     own = ownership_df.copy() if isinstance(ownership_df, pd.DataFrame) else pd.DataFrame()
     if "ID" in own.columns:
-        own["ID"] = own["ID"].astype(str).str.strip()
+        own["ID"] = own["ID"].map(_normalize_player_id)
     if "Name" in own.columns:
         own["Name"] = own["Name"].astype(str).str.strip()
+        own["name_key"] = own["Name"].map(_norm_name_key)
+        own["name_key_loose"] = own["Name"].map(_norm_name_key_loose)
 
-    if not own.empty and "ID" in proj.columns and "ID" in own.columns:
-        expo = proj.merge(own[["ID", "actual_ownership"]], on="ID", how="left")
-    elif not own.empty and "Name" in proj.columns and "Name" in own.columns:
-        expo = proj.merge(own[["Name", "actual_ownership"]], on="Name", how="left")
-    else:
-        expo = proj.copy()
-        expo["actual_ownership"] = pd.NA
+    expo = proj.copy()
+    expo["actual_ownership"] = pd.NA
+    if not own.empty:
+        if "ID" in expo.columns and "ID" in own.columns:
+            by_id = (
+                own.loc[own["ID"] != "", ["ID", "actual_ownership"]]
+                .dropna(subset=["actual_ownership"])
+                .drop_duplicates("ID")
+                .rename(columns={"actual_ownership": "actual_ownership_id"})
+            )
+            if not by_id.empty:
+                expo = expo.merge(by_id, on="ID", how="left")
+                expo["actual_ownership"] = pd.to_numeric(expo["actual_ownership_id"], errors="coerce")
+        if "name_key" in expo.columns and "name_key" in own.columns:
+            by_name = (
+                own.loc[own["name_key"] != "", ["name_key", "actual_ownership"]]
+                .dropna(subset=["actual_ownership"])
+                .drop_duplicates("name_key")
+                .rename(columns={"actual_ownership": "actual_ownership_name"})
+            )
+            if not by_name.empty:
+                expo = expo.merge(by_name, on="name_key", how="left")
+                expo["actual_ownership"] = pd.to_numeric(expo.get("actual_ownership"), errors="coerce").where(
+                    pd.to_numeric(expo.get("actual_ownership"), errors="coerce").notna(),
+                    pd.to_numeric(expo.get("actual_ownership_name"), errors="coerce"),
+                )
+        if "name_key_loose" in expo.columns and "name_key_loose" in own.columns:
+            by_name_loose = (
+                own.loc[own["name_key_loose"] != "", ["name_key_loose", "actual_ownership"]]
+                .dropna(subset=["actual_ownership"])
+                .drop_duplicates("name_key_loose")
+                .rename(columns={"actual_ownership": "actual_ownership_name_loose"})
+            )
+            if not by_name_loose.empty:
+                expo = expo.merge(by_name_loose, on="name_key_loose", how="left")
+                expo["actual_ownership"] = pd.to_numeric(expo.get("actual_ownership"), errors="coerce").where(
+                    pd.to_numeric(expo.get("actual_ownership"), errors="coerce").notna(),
+                    pd.to_numeric(expo.get("actual_ownership_name_loose"), errors="coerce"),
+                )
+        expo = expo.drop(
+            columns=[
+                "actual_ownership_id",
+                "actual_ownership_name",
+                "actual_ownership_name_loose",
+            ],
+            errors="ignore",
+        )
 
     expo["projected_ownership"] = pd.to_numeric(expo.get("projected_ownership"), errors="coerce")
     expo["actual_ownership_from_file"] = pd.to_numeric(expo.get("actual_ownership"), errors="coerce")

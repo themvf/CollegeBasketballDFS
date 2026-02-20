@@ -761,6 +761,37 @@ def apply_contest_objective(
     return out
 
 
+def apply_projection_calibration(
+    pool_df: pd.DataFrame,
+    projection_scale: float = 1.0,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    scale = _safe_num(projection_scale, 1.0)
+    if not math.isfinite(scale) or scale <= 0.0:
+        scale = 1.0
+
+    for col in ["projected_dk_points", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") * float(scale)
+
+    if "Salary" in out.columns and "projected_dk_points" in out.columns:
+        salary = pd.to_numeric(out["Salary"], errors="coerce")
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce")
+        out["projection_per_dollar"] = proj / salary.replace(0, pd.NA)
+        out["value_per_1k"] = out["projection_per_dollar"] * 1000.0
+
+    if "projected_dk_points" in out.columns and "projected_ownership" in out.columns:
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
+        own = pd.to_numeric(out["projected_ownership"], errors="coerce").fillna(0.0)
+        out["leverage_score"] = (proj - (0.15 * own)).round(3)
+
+    out["projection_calibration_scale"] = float(scale)
+    return out
+
+
 def _is_feasible_partial(
     selected: list[dict[str, Any]],
     cap: int,
@@ -1003,6 +1034,9 @@ def generate_lineups(
     spike_max_pair_overlap: int = 4,
     cluster_target_count: int = 15,
     cluster_variants_per_cluster: int = 10,
+    projection_scale: float = 1.0,
+    salary_left_target: int | None = 50,
+    salary_left_penalty_divisor: float = 75.0,
     random_seed: int = 7,
     max_attempts_per_lineup: int = 1200,
     progress_callback: Callable[[int, int, str], None] | None = None,
@@ -1015,9 +1049,12 @@ def generate_lineups(
     if progress_callback is not None:
         progress_callback(0, num_lineups, "Starting lineup generation...")
 
-    scored = apply_contest_objective(pool_df, contest_type, include_tail_signals=include_tail_signals)
+    calibrated = apply_projection_calibration(pool_df, projection_scale=projection_scale)
+    scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = scored.loc[scored["Salary"] > 0].copy()
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
+    salary_target = None if salary_left_target is None else max(0, min(SALARY_CAP, int(salary_left_target)))
+    salary_penalty_divisor = max(1.0, float(salary_left_penalty_divisor))
 
     locked_set = {str(x) for x in (locked_ids or []) if str(x).strip()}
     excluded_set = {str(x) for x in (excluded_ids or []) if str(x).strip()}
@@ -1087,6 +1124,7 @@ def generate_lineups(
         "game_volatility_score",
         "game_tail_to_ownership",
         "game_tail_score",
+        "projection_calibration_scale",
     ]
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
@@ -1115,6 +1153,8 @@ def generate_lineups(
             progress_callback=progress_callback,
             cluster_target_count=cluster_target_count,
             cluster_variants_per_cluster=cluster_variants_per_cluster,
+            salary_left_target=salary_target,
+            salary_left_penalty_divisor=salary_penalty_divisor,
         )
 
     for lineup_idx in range(num_lineups):
@@ -1204,6 +1244,9 @@ def generate_lineups(
 
             selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
             game_counts = _lineup_game_counts(selected)
+            salary_left = SALARY_CAP - final_salary
+            if salary_target is not None:
+                selected_score -= abs(float(salary_left - salary_target)) / salary_penalty_divisor
             if spike_mode:
                 def _safe_num(value: Any) -> float:
                     num = _safe_float(value)
@@ -1257,6 +1300,7 @@ def generate_lineups(
                 "players": best_lineup,
                 "player_ids": [str(p["ID"]) for p in best_lineup],
                 "salary": lineup_salary,
+                "salary_left": SALARY_CAP - lineup_salary,
                 "projected_points": round(lineup_proj, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
                 "lineup_strategy": "spike" if spike_mode else "standard",
@@ -1286,6 +1330,8 @@ def _generate_lineups_cluster_mode(
     progress_callback: Callable[[int, int, str], None] | None = None,
     cluster_target_count: int = 15,
     cluster_variants_per_cluster: int = 10,
+    salary_left_target: int | None = 50,
+    salary_left_penalty_divisor: float = 75.0,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not players:
         return [], ["No players available for cluster generation."]
@@ -1293,6 +1339,8 @@ def _generate_lineups_cluster_mode(
     warnings: list[str] = []
     lineups: list[dict[str, Any]] = []
     rng = random.Random(random_seed)
+    salary_target = None if salary_left_target is None else max(0, min(SALARY_CAP, int(salary_left_target)))
+    salary_penalty_divisor = max(1.0, float(salary_left_penalty_divisor))
 
     total_baseline = pd.to_numeric(
         pd.Series([_safe_float(p.get("game_total_line")) for p in players]),
@@ -1455,6 +1503,9 @@ def _generate_lineups_cluster_mode(
                 lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in selected))
                 selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
                 selected_score += 1.10 * _stack_bonus_from_counts(game_counts)
+                salary_left = SALARY_CAP - final_salary
+                if salary_target is not None:
+                    selected_score -= abs(float(salary_left - salary_target)) / salary_penalty_divisor
                 if anchor_game_key:
                     selected_score += 1.8 * float(anchor_count)
 
@@ -1528,6 +1579,7 @@ def _generate_lineups_cluster_mode(
                 "players": best_lineup,
                 "player_ids": [str(p["ID"]) for p in best_lineup],
                 "salary": lineup_salary,
+                "salary_left": SALARY_CAP - lineup_salary,
                 "projected_points": round(lineup_proj, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
                 "lineup_strategy": "cluster",
