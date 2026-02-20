@@ -17,6 +17,7 @@ MIN_G = 3
 MIN_F = 3
 
 INJURY_STATUSES_REMOVE_DEFAULT = ("out", "doubtful")
+PROJECTION_SALARY_BUCKETS = ("lt4500", "4500_6999", "7000_9999", "gte10000")
 
 
 def _normalize_text(value: Any) -> str:
@@ -70,6 +71,19 @@ def _game_key(value: Any) -> str:
     if not text:
         return ""
     return text.split(" ")[0].upper()
+
+
+def projection_salary_bucket_key(salary: Any) -> str:
+    sal = _safe_float(salary)
+    if sal is None or math.isnan(sal):
+        return "4500_6999"
+    if sal < 4500:
+        return "lt4500"
+    if sal < 7000:
+        return "4500_6999"
+    if sal < 10000:
+        return "7000_9999"
+    return "gte10000"
 
 
 def _normalize_col_name(value: Any) -> str:
@@ -764,6 +778,7 @@ def apply_contest_objective(
 def apply_projection_calibration(
     pool_df: pd.DataFrame,
     projection_scale: float = 1.0,
+    projection_salary_bucket_scales: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     out = pool_df.copy()
     if out.empty:
@@ -773,9 +788,25 @@ def apply_projection_calibration(
     if not math.isfinite(scale) or scale <= 0.0:
         scale = 1.0
 
+    bucket_scales: dict[str, float] = {}
+    for bucket in PROJECTION_SALARY_BUCKETS:
+        raw_scale = None if projection_salary_bucket_scales is None else projection_salary_bucket_scales.get(bucket)
+        bucket_scale = _safe_num(raw_scale, 1.0)
+        if not math.isfinite(bucket_scale) or bucket_scale <= 0.0:
+            bucket_scale = 1.0
+        bucket_scales[bucket] = float(bucket_scale)
+
+    row_bucket_scales = pd.Series(1.0, index=out.index, dtype="float64")
+    if "Salary" in out.columns:
+        salary_num = pd.to_numeric(out["Salary"], errors="coerce")
+        salary_bucket = salary_num.map(projection_salary_bucket_key)
+        row_bucket_scales = salary_bucket.map(lambda key: float(bucket_scales.get(str(key), 1.0))).fillna(1.0)
+        out["projection_salary_bucket"] = salary_bucket
+
+    total_row_scale = row_bucket_scales * float(scale)
     for col in ["projected_dk_points", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
         if col in out.columns:
-            out[col] = pd.to_numeric(out[col], errors="coerce") * float(scale)
+            out[col] = pd.to_numeric(out[col], errors="coerce") * total_row_scale
 
     if "Salary" in out.columns and "projected_dk_points" in out.columns:
         salary = pd.to_numeric(out["Salary"], errors="coerce")
@@ -789,6 +820,8 @@ def apply_projection_calibration(
         out["leverage_score"] = (proj - (0.15 * own)).round(3)
 
     out["projection_calibration_scale"] = float(scale)
+    out["projection_bucket_scale"] = row_bucket_scales
+    out["projection_total_scale"] = total_row_scale
     return out
 
 
@@ -1035,6 +1068,7 @@ def generate_lineups(
     cluster_target_count: int = 15,
     cluster_variants_per_cluster: int = 10,
     projection_scale: float = 1.0,
+    projection_salary_bucket_scales: dict[str, float] | None = None,
     salary_left_target: int | None = 50,
     salary_left_penalty_divisor: float = 75.0,
     random_seed: int = 7,
@@ -1049,7 +1083,11 @@ def generate_lineups(
     if progress_callback is not None:
         progress_callback(0, num_lineups, "Starting lineup generation...")
 
-    calibrated = apply_projection_calibration(pool_df, projection_scale=projection_scale)
+    calibrated = apply_projection_calibration(
+        pool_df,
+        projection_scale=projection_scale,
+        projection_salary_bucket_scales=projection_salary_bucket_scales,
+    )
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = scored.loc[scored["Salary"] > 0].copy()
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
@@ -1125,6 +1163,9 @@ def generate_lineups(
         "game_tail_to_ownership",
         "game_tail_score",
         "projection_calibration_scale",
+        "projection_bucket_scale",
+        "projection_total_scale",
+        "projection_salary_bucket",
     ]
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}

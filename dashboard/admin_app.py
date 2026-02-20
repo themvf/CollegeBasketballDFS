@@ -35,6 +35,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     lineups_slots_frame,
     lineups_summary_frame,
     normalize_injuries_frame,
+    projection_salary_bucket_key,
     remove_injured_players,
 )
 from college_basketball_dfs.cbb_tail_model import fit_total_tail_model, score_odds_games_for_tail
@@ -100,6 +101,13 @@ COMMON_ODDS_BOOKMAKER_KEYS = [
     "bovada",
 ]
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
+PROJECTION_SALARY_BUCKET_ORDER = ("lt4500", "4500_6999", "7000_9999", "gte10000")
+PROJECTION_SALARY_BUCKET_LABELS = {
+    "lt4500": "< 4500",
+    "4500_6999": "4500-6999",
+    "7000_9999": "7000-9999",
+    "gte10000": "10000+",
+}
 
 
 def _csv_values(text: str | None) -> list[str]:
@@ -636,6 +644,154 @@ def compute_projection_calibration_from_phantom(
         "weighted_avg_actual": avg_actual,
         "weighted_avg_projected": avg_projected,
         "weighted_avg_delta": avg_delta,
+    }
+
+
+def _default_salary_bucket_calibration(
+    lookback_days: int,
+    min_samples_per_bucket: int,
+) -> dict[str, Any]:
+    bucket_rows = [
+        {
+            "salary_bucket": key,
+            "salary_bucket_label": PROJECTION_SALARY_BUCKET_LABELS.get(key, key),
+            "samples": 0,
+            "avg_actual": 0.0,
+            "avg_projection": 0.0,
+            "avg_error": 0.0,
+            "mae": 0.0,
+            "raw_scale": 1.0,
+            "scale": 1.0,
+            "used_for_adjustment": False,
+        }
+        for key in PROJECTION_SALARY_BUCKET_ORDER
+    ]
+    return {
+        "lookback_days": int(max(0, lookback_days)),
+        "min_samples_per_bucket": int(max(1, min_samples_per_bucket)),
+        "used_dates": 0,
+        "player_rows": 0,
+        "scales": {key: 1.0 for key in PROJECTION_SALARY_BUCKET_ORDER},
+        "bucket_rows": bucket_rows,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_projection_salary_bucket_calibration(
+    bucket_name: str,
+    selected_date: date,
+    lookback_days: int,
+    min_samples_per_bucket: int,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> dict[str, Any]:
+    lookback = int(max(0, lookback_days))
+    min_samples = int(max(1, min_samples_per_bucket))
+    default_result = _default_salary_bucket_calibration(lookback, min_samples)
+
+    end_date = selected_date - timedelta(days=1)
+    if lookback <= 0 or end_date < date(2000, 1, 1):
+        return default_result
+
+    start_date = end_date - timedelta(days=max(1, lookback) - 1)
+    all_rows: list[pd.DataFrame] = []
+    used_dates = 0
+    cursor = end_date
+    while cursor >= start_date:
+        slate_df = load_dk_slate_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=cursor,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if slate_df.empty:
+            cursor -= timedelta(days=1)
+            continue
+        actual_df = load_actual_results_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=cursor,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if actual_df.empty:
+            cursor -= timedelta(days=1)
+            continue
+
+        comp_df = build_projection_actual_comparison(
+            projection_df=slate_df,
+            actual_results_df=actual_df,
+        )
+        if comp_df.empty:
+            cursor -= timedelta(days=1)
+            continue
+
+        comp = comp_df.copy()
+        comp["Salary"] = pd.to_numeric(comp.get("Salary"), errors="coerce")
+        comp["blended_projection"] = pd.to_numeric(comp.get("blended_projection"), errors="coerce")
+        comp["actual_dk_points"] = pd.to_numeric(comp.get("actual_dk_points"), errors="coerce")
+        comp["blend_error"] = pd.to_numeric(comp.get("blend_error"), errors="coerce")
+        comp = comp.loc[
+            comp["Salary"].notna()
+            & comp["blended_projection"].notna()
+            & comp["actual_dk_points"].notna()
+            & (comp["blended_projection"] > 0.0)
+        ].copy()
+        if comp.empty:
+            cursor -= timedelta(days=1)
+            continue
+
+        comp["salary_bucket"] = comp["Salary"].map(projection_salary_bucket_key)
+        all_rows.append(comp[["salary_bucket", "actual_dk_points", "blended_projection", "blend_error"]])
+        used_dates += 1
+        cursor -= timedelta(days=1)
+
+    if not all_rows:
+        return default_result
+
+    full = pd.concat(all_rows, ignore_index=True)
+    if full.empty:
+        return default_result
+
+    output_rows: list[dict[str, Any]] = []
+    scales: dict[str, float] = {}
+    for key in PROJECTION_SALARY_BUCKET_ORDER:
+        seg = full.loc[full["salary_bucket"] == key].copy()
+        samples = int(len(seg))
+        avg_actual = float(pd.to_numeric(seg.get("actual_dk_points"), errors="coerce").mean()) if samples else 0.0
+        avg_projection = float(pd.to_numeric(seg.get("blended_projection"), errors="coerce").mean()) if samples else 0.0
+        avg_error = float(pd.to_numeric(seg.get("blend_error"), errors="coerce").mean()) if samples else 0.0
+        mae = float(pd.to_numeric(seg.get("blend_error"), errors="coerce").abs().mean()) if samples else 0.0
+        raw_scale = 1.0
+        if avg_projection > 0.0 and samples > 0:
+            raw_scale = float(avg_actual / avg_projection)
+        clipped_scale = float(min(1.15, max(0.70, raw_scale)))
+        use_scale = clipped_scale if samples >= min_samples else 1.0
+        scales[key] = float(use_scale)
+        output_rows.append(
+            {
+                "salary_bucket": key,
+                "salary_bucket_label": PROJECTION_SALARY_BUCKET_LABELS.get(key, key),
+                "samples": samples,
+                "avg_actual": avg_actual,
+                "avg_projection": avg_projection,
+                "avg_error": avg_error,
+                "mae": mae,
+                "raw_scale": raw_scale,
+                "scale": float(use_scale),
+                "used_for_adjustment": bool(samples >= min_samples),
+            }
+        )
+
+    return {
+        "lookback_days": lookback,
+        "min_samples_per_bucket": min_samples,
+        "used_dates": int(used_dates),
+        "player_rows": int(len(full)),
+        "scales": scales,
+        "bucket_rows": output_rows,
     }
 
 
@@ -2352,6 +2508,36 @@ with tab_lineups:
                 help="Uses prior phantom review summaries to estimate projection scale.",
             )
         )
+    b1, b2 = st.columns(2)
+    auto_salary_bucket_calibration = bool(
+        b1.checkbox(
+            "Salary-Bucket Residual Calibration",
+            value=True,
+            help="Apply per-salary projection scales from recent projection-vs-actual errors.",
+        )
+    )
+    bucket_calibration_min_samples = int(
+        b2.slider(
+            "Min Samples Per Salary Bucket",
+            min_value=5,
+            max_value=80,
+            value=20,
+            step=1,
+            help="Buckets below this count stay at scale 1.0.",
+        )
+    )
+    bucket_calibration_lookback_days = int(max(7, calibration_lookback_days))
+    if auto_salary_bucket_calibration:
+        bucket_calibration_lookback_days = int(
+            st.slider(
+                "Salary-Bucket Calibration Lookback Days",
+                min_value=7,
+                max_value=90,
+                value=int(max(7, calibration_lookback_days)),
+                step=1,
+                help="Uses prior slates with both DK slate projections and final box-score results.",
+            )
+        )
     effective_max_salary_left = min(max_salary_left, 50) if strict_salary_utilization else max_salary_left
     spike_max_pair_overlap = 4
     if run_mode_key == "all" or lineup_strategy == "spike":
@@ -2431,6 +2617,8 @@ with tab_lineups:
                     progress_bar = st.progress(0, text="Starting lineup generation...")
                     projection_scale = 1.0
                     calibration_meta: dict[str, Any] = {}
+                    projection_salary_bucket_scales: dict[str, float] = {}
+                    salary_bucket_calibration_meta: dict[str, Any] = {}
                     if auto_projection_calibration:
                         calibration_meta = compute_projection_calibration_from_phantom(
                             bucket_name=bucket_name,
@@ -2448,6 +2636,44 @@ with tab_lineups:
                             f"lineups={int(calibration_meta.get('lineups') or 0)}, "
                             f"avg_delta={float(calibration_meta.get('weighted_avg_delta') or 0.0):.2f})"
                         )
+                    if auto_salary_bucket_calibration:
+                        salary_bucket_calibration_meta = compute_projection_salary_bucket_calibration(
+                            bucket_name=bucket_name,
+                            selected_date=lineup_slate_date,
+                            lookback_days=bucket_calibration_lookback_days,
+                            min_samples_per_bucket=bucket_calibration_min_samples,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        projection_salary_bucket_scales = {
+                            str(k): float(v)
+                            for k, v in (salary_bucket_calibration_meta.get("scales") or {}).items()
+                            if str(k).strip()
+                        }
+                        bucket_rows = salary_bucket_calibration_meta.get("bucket_rows") or []
+                        applied = [
+                            r
+                            for r in bucket_rows
+                            if bool(r.get("used_for_adjustment")) and abs(float(r.get("scale", 1.0)) - 1.0) >= 1e-6
+                        ]
+                        if applied:
+                            summary = ", ".join(
+                                f"{PROJECTION_SALARY_BUCKET_LABELS.get(str(r.get('salary_bucket')), str(r.get('salary_bucket')))}: {float(r.get('scale')):.3f}"
+                                for r in applied
+                            )
+                            st.caption(
+                                "Salary-bucket calibration applied: "
+                                f"{summary} "
+                                f"(dates={int(salary_bucket_calibration_meta.get('used_dates') or 0)}, "
+                                f"rows={int(salary_bucket_calibration_meta.get('player_rows') or 0)})."
+                            )
+                        else:
+                            st.caption(
+                                "Salary-bucket calibration found no strong adjustments "
+                                f"(dates={int(salary_bucket_calibration_meta.get('used_dates') or 0)}, "
+                                f"rows={int(salary_bucket_calibration_meta.get('player_rows') or 0)})."
+                            )
                     if strict_salary_utilization and effective_max_salary_left < max_salary_left:
                         st.caption(
                             f"Strict salary utilization enabled: max salary left tightened from "
@@ -2568,6 +2794,7 @@ with tab_lineups:
                             cluster_target_count=int(version_cfg.get("cluster_target_count", 15)),
                             cluster_variants_per_cluster=int(version_cfg.get("cluster_variants_per_cluster", 10)),
                             projection_scale=projection_scale,
+                            projection_salary_bucket_scales=projection_salary_bucket_scales,
                             salary_left_target=salary_left_target,
                             random_seed=lineup_seed + version_idx,
                             progress_callback=_lineup_progress,
@@ -2605,9 +2832,14 @@ with tab_lineups:
                             "cluster_target_count": 15,
                             "cluster_variants_per_cluster": 10,
                             "projection_scale": projection_scale,
+                            "projection_salary_bucket_scales": projection_salary_bucket_scales,
                             "auto_projection_calibration": auto_projection_calibration,
                             "calibration_lookback_days": calibration_lookback_days,
                             "calibration_meta": calibration_meta,
+                            "auto_salary_bucket_calibration": auto_salary_bucket_calibration,
+                            "bucket_calibration_lookback_days": bucket_calibration_lookback_days,
+                            "bucket_calibration_min_samples": bucket_calibration_min_samples,
+                            "salary_bucket_calibration_meta": salary_bucket_calibration_meta,
                             "bookmaker": lineup_bookmaker.strip(),
                             "locked_ids": locked_ids,
                             "excluded_ids": excluded_ids,

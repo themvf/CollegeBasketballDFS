@@ -9,6 +9,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     build_player_pool,
     generate_lineups,
     normalize_injuries_frame,
+    projection_salary_bucket_key,
     remove_injured_players,
 )
 
@@ -399,3 +400,42 @@ def test_apply_projection_calibration_scales_projection_columns() -> None:
         s = pd.to_numeric(scaled[col], errors="coerce")
         diff = (s - (b * 0.9)).abs().fillna(0.0)
         assert float(diff.max()) < 1e-6
+
+
+def test_projection_salary_bucket_key_segments_expected_ranges() -> None:
+    assert projection_salary_bucket_key(4300) == "lt4500"
+    assert projection_salary_bucket_key(4500) == "4500_6999"
+    assert projection_salary_bucket_key(6999) == "4500_6999"
+    assert projection_salary_bucket_key(7000) == "7000_9999"
+    assert projection_salary_bucket_key(10500) == "gte10000"
+
+
+def test_apply_projection_calibration_applies_salary_bucket_scales() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy()
+    pool = pool.reset_index(drop=True)
+    pool.loc[0, "Salary"] = 4300
+    pool.loc[1, "Salary"] = 7600
+
+    base = pool.loc[:, ["Salary", "projected_dk_points", "blended_projection", "our_dk_projection"]].copy()
+    scaled = apply_projection_calibration(
+        pool,
+        projection_scale=1.0,
+        projection_salary_bucket_scales={"lt4500": 0.8, "7000_9999": 1.1},
+    )
+
+    assert "projection_bucket_scale" in scaled.columns
+    assert "projection_total_scale" in scaled.columns
+    assert "projection_salary_bucket" in scaled.columns
+
+    lt_row = scaled.iloc[0]
+    mid_row = scaled.iloc[1]
+    assert lt_row["projection_salary_bucket"] == "lt4500"
+    assert float(lt_row["projection_bucket_scale"]) == 0.8
+    assert mid_row["projection_salary_bucket"] == "7000_9999"
+    assert float(mid_row["projection_bucket_scale"]) == 1.1
+
+    for idx, expected_scale in [(0, 0.8), (1, 1.1)]:
+        for col in ["projected_dk_points", "blended_projection", "our_dk_projection"]:
+            before = pd.to_numeric(base.loc[idx, col], errors="coerce")
+            after = pd.to_numeric(scaled.loc[idx, col], errors="coerce")
+            assert abs(float(after) - (float(before) * expected_scale)) < 1e-6
