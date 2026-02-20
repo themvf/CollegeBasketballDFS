@@ -3,6 +3,7 @@ from collections import Counter
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
+    apply_projection_uncertainty_adjustment,
     apply_projection_calibration,
     apply_contest_objective,
     build_dk_upload_csv,
@@ -439,3 +440,46 @@ def test_apply_projection_calibration_applies_salary_bucket_scales() -> None:
             before = pd.to_numeric(base.loc[idx, col], errors="coerce")
             after = pd.to_numeric(scaled.loc[idx, col], errors="coerce")
             assert abs(float(after) - (float(before) * expected_scale)) < 1e-6
+
+
+def test_apply_projection_uncertainty_adjustment_shrinks_high_risk_rows() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy()
+    pool = pool.reset_index(drop=True)
+    pool["projection_uncertainty_score"] = 0.0
+    pool["dnp_risk_score"] = 0.0
+    pool.loc[0, "projection_uncertainty_score"] = 1.0
+    pool.loc[0, "dnp_risk_score"] = 0.9
+
+    before = pd.to_numeric(pool["projected_dk_points"], errors="coerce").copy()
+    adjusted = apply_projection_uncertainty_adjustment(
+        pool,
+        uncertainty_weight=0.18,
+        high_risk_extra_shrink=0.10,
+        dnp_risk_threshold=0.30,
+        min_multiplier=0.68,
+    )
+    after = pd.to_numeric(adjusted["projected_dk_points"], errors="coerce")
+    mult = pd.to_numeric(adjusted["projection_uncertainty_multiplier"], errors="coerce")
+
+    assert "projection_uncertainty_multiplier" in adjusted.columns
+    assert float(mult.iloc[0]) < 1.0
+    assert abs(float(after.iloc[0]) - (float(before.iloc[0]) * float(mult.iloc[0]))) < 1e-3
+    # Low-risk rows should remain effectively unchanged.
+    assert abs(float(mult.iloc[1]) - 1.0) < 1e-6
+
+
+def test_build_player_pool_ownership_surge_columns_present() -> None:
+    slate = _sample_slate().copy()
+    slate["attention_index"] = [1200, 980, 120, 80, 45, 30, 410, 390, 60, 55, 20, 10]
+    slate["field_ownership_pct"] = [42, 39, 16, 13, 8, 6, 28, 24, 10, 9, 5, 3]
+    pool = build_player_pool(slate, _sample_props(), bookmaker_filter="fanduel")
+
+    assert "ownership_chalk_surge_score" in pool.columns
+    assert "ownership_confidence" in pool.columns
+    assert "ownership_leverage_shrink" in pool.columns
+    surge = pd.to_numeric(pool["ownership_chalk_surge_score"], errors="coerce")
+    conf = pd.to_numeric(pool["ownership_confidence"], errors="coerce")
+    shrink = pd.to_numeric(pool["ownership_leverage_shrink"], errors="coerce")
+    assert surge.notna().all()
+    assert conf.between(0, 1).all()
+    assert shrink.between(0, 0.45).all()

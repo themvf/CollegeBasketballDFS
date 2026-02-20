@@ -2456,7 +2456,7 @@ with tab_lineups:
             "Max Salary Left Per Lineup",
             min_value=0,
             max_value=10000,
-            value=50,
+            value=500,
             step=50,
             help="Lineups must use at least 50000 - this value in salary.",
         )
@@ -2475,7 +2475,7 @@ with tab_lineups:
     strict_salary_utilization = bool(
         s1.checkbox(
             "Strict Salary Utilization",
-            value=True,
+            value=False,
             help="When enabled, lineups are constrained to use at least 49,950 salary.",
         )
     )
@@ -2484,7 +2484,7 @@ with tab_lineups:
             "Salary Left Target",
             min_value=0,
             max_value=500,
-            value=50,
+            value=250,
             step=10,
             help="Scoring penalty targets this salary-left value.",
         )
@@ -2538,6 +2538,44 @@ with tab_lineups:
                 help="Uses prior slates with both DK slate projections and final box-score results.",
             )
         )
+    u1, u2, u3, u4 = st.columns(4)
+    apply_uncertainty_shrink = bool(
+        u1.checkbox(
+            "Minutes/DNP Uncertainty Shrink",
+            value=True,
+            help="Shrinks projections for players with high minutes volatility and DNP risk.",
+        )
+    )
+    uncertainty_shrink_pct = float(
+        u2.slider(
+            "Uncertainty Shrink %",
+            min_value=0,
+            max_value=35,
+            value=18,
+            step=1,
+            help="Base shrink applied proportionally to projection uncertainty score.",
+        )
+    )
+    dnp_risk_threshold_pct = float(
+        u3.slider(
+            "DNP Risk Threshold %",
+            min_value=10,
+            max_value=60,
+            value=30,
+            step=1,
+            help="Extra shrink applies above this DNP-risk level.",
+        )
+    )
+    high_risk_extra_shrink_pct = float(
+        u4.slider(
+            "High-Risk Extra Shrink %",
+            min_value=0,
+            max_value=30,
+            value=10,
+            step=1,
+            help="Additional shrink for players above the DNP-risk threshold.",
+        )
+    )
     effective_max_salary_left = min(max_salary_left, 50) if strict_salary_utilization else max_salary_left
     spike_max_pair_overlap = 4
     if run_mode_key == "all" or lineup_strategy == "spike":
@@ -2619,6 +2657,9 @@ with tab_lineups:
                     calibration_meta: dict[str, Any] = {}
                     projection_salary_bucket_scales: dict[str, float] = {}
                     salary_bucket_calibration_meta: dict[str, Any] = {}
+                    uncertainty_weight = uncertainty_shrink_pct / 100.0
+                    dnp_risk_threshold = dnp_risk_threshold_pct / 100.0
+                    high_risk_extra_shrink = high_risk_extra_shrink_pct / 100.0
                     if auto_projection_calibration:
                         calibration_meta = compute_projection_calibration_from_phantom(
                             bucket_name=bucket_name,
@@ -2678,6 +2719,13 @@ with tab_lineups:
                         st.caption(
                             f"Strict salary utilization enabled: max salary left tightened from "
                             f"`{max_salary_left}` to `{effective_max_salary_left}`."
+                        )
+                    if apply_uncertainty_shrink and uncertainty_weight > 0.0:
+                        st.caption(
+                            "Minutes/DNP uncertainty shrink applied: "
+                            f"base={uncertainty_weight:.2f}, "
+                            f"dnp_threshold={dnp_risk_threshold:.2f}, "
+                            f"high_risk_extra={high_risk_extra_shrink:.2f}."
                         )
 
                     if run_mode_key == "all":
@@ -2795,6 +2843,10 @@ with tab_lineups:
                             cluster_variants_per_cluster=int(version_cfg.get("cluster_variants_per_cluster", 10)),
                             projection_scale=projection_scale,
                             projection_salary_bucket_scales=projection_salary_bucket_scales,
+                            apply_uncertainty_shrink=apply_uncertainty_shrink,
+                            uncertainty_weight=uncertainty_weight,
+                            high_risk_extra_shrink=high_risk_extra_shrink,
+                            dnp_risk_threshold=dnp_risk_threshold,
                             salary_left_target=salary_left_target,
                             random_seed=lineup_seed + version_idx,
                             progress_callback=_lineup_progress,
@@ -2833,6 +2885,10 @@ with tab_lineups:
                             "cluster_variants_per_cluster": 10,
                             "projection_scale": projection_scale,
                             "projection_salary_bucket_scales": projection_salary_bucket_scales,
+                            "apply_uncertainty_shrink": apply_uncertainty_shrink,
+                            "uncertainty_weight": uncertainty_weight,
+                            "high_risk_extra_shrink": high_risk_extra_shrink,
+                            "dnp_risk_threshold": dnp_risk_threshold,
                             "auto_projection_calibration": auto_projection_calibration,
                             "calibration_lookback_days": calibration_lookback_days,
                             "calibration_meta": calibration_meta,

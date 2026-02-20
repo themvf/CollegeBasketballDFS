@@ -312,6 +312,11 @@ def _softmax(values: pd.Series, temperature: float) -> pd.Series:
     return exp_vals / denom
 
 
+def _sigmoid_series(values: pd.Series) -> pd.Series:
+    vals = pd.to_numeric(values, errors="coerce").fillna(0.0).astype(float)
+    return vals.map(lambda x: 1.0 / (1.0 + math.exp(-float(x))))
+
+
 def _allocate_ownership_with_cap(
     probs: pd.Series,
     target_total: float,
@@ -653,6 +658,76 @@ def build_player_pool(
     mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"))
     mins_pct = _rank_pct_series(mins_signal)
     vegas_pts_pct = _rank_pct_series(pd.to_numeric(out.get("vegas_dk_projection"), errors="coerce"))
+    game_p12_raw = pd.to_numeric(
+        out.get("game_p_plus_12", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
+    game_vol_raw = pd.to_numeric(
+        out.get("game_volatility_score", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
+    game_p12_pct = _rank_pct_series(game_p12_raw)
+    game_vol_pct = _rank_pct_series(game_vol_raw)
+
+    # Lightweight minutes/DNP uncertainty model from trend + usage + slate volatility.
+    mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
+    mins_last7 = pd.to_numeric(out.get("our_minutes_last7"), errors="coerce")
+    mins_ref = mins_avg.where(mins_avg.notna(), mins_last7)
+    mins_ref = mins_ref.where(mins_ref.notna(), pd.Series([28.0] * len(out), index=out.index, dtype="float64"))
+    mins_recent = mins_last7.where(mins_last7.notna(), mins_avg)
+    mins_recent = mins_recent.where(mins_recent.notna(), mins_ref)
+    minutes_drop_ratio = ((mins_ref - mins_recent).clip(lower=0.0) / mins_ref.replace(0.0, pd.NA)).fillna(0.0)
+    minutes_drop_ratio = minutes_drop_ratio.clip(lower=0.0, upper=1.0)
+    low_minutes_risk = ((24.0 - mins_recent).clip(lower=0.0) / 24.0).fillna(0.0).clip(lower=0.0, upper=1.0)
+    usage_proxy = pd.to_numeric(out.get("our_usage_proxy"), errors="coerce")
+    usage_risk = (1.0 - _rank_pct_series(usage_proxy)).clip(lower=0.0, upper=1.0)
+    uncertainty_score = (
+        (0.42 * minutes_drop_ratio)
+        + (0.23 * low_minutes_risk)
+        + (0.15 * usage_risk)
+        + (0.20 * game_vol_pct)
+    ).clip(lower=0.0, upper=1.0)
+    dnp_logit = (
+        -2.2
+        + (2.6 * minutes_drop_ratio)
+        + (1.35 * low_minutes_risk)
+        + (0.85 * usage_risk)
+        + (0.65 * game_vol_pct)
+    )
+    dnp_risk_score = _sigmoid_series(dnp_logit).clip(lower=0.0, upper=1.0)
+    out["minutes_drop_ratio"] = minutes_drop_ratio.round(4)
+    out["minutes_low_floor_risk"] = low_minutes_risk.round(4)
+    out["projection_uncertainty_score"] = uncertainty_score.round(4)
+    out["dnp_risk_score"] = dnp_risk_score.round(4)
+    out["high_uncertainty_flag"] = (
+        ((uncertainty_score >= 0.58) | (dnp_risk_score >= 0.30))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
+
+    # Ownership surge features from attention + field priors + game tail context.
+    attention_signal = pd.to_numeric(
+        out.get("attention_index", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
+    if attention_signal.notna().any():
+        attention_pct = _rank_pct_series(attention_signal.fillna(0.0).clip(lower=0.0).map(lambda x: math.log1p(float(x))))
+    else:
+        attention_pct = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    field_own_signal = pd.to_numeric(
+        out.get("field_ownership_pct", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
+    field_own_pct = _rank_pct_series(field_own_signal)
+    surge_score = ((0.55 * attention_pct) + (0.25 * field_own_pct) + (0.20 * game_p12_pct)).clip(lower=0.0, upper=1.0)
+    if "game_key" in out.columns:
+        game_surge = surge_score.groupby(out["game_key"]).transform("mean").fillna(surge_score)
+    else:
+        game_surge = surge_score
+    surge_uncertainty = (
+        (0.55 * game_vol_pct) + (0.45 * (surge_score - game_surge).abs().clip(lower=0.0, upper=1.0))
+    ).clip(lower=0.0, upper=1.0)
+    surge_flag = ((surge_score >= 0.78) | (game_surge >= 0.72)).astype(float)
 
     # Keep legacy ownership estimate for diagnostics.
     out["projected_ownership_v1"] = (2.0 + 38.0 * ((0.5 * proj_pct) + (0.3 * sal_pct) + (0.2 * val_pct))).round(2)
@@ -664,6 +739,10 @@ def build_player_pool(
         + (0.12 * val_pct)
         + (0.15 * mins_pct)
         + (0.10 * vegas_pts_pct)
+        + (0.12 * attention_pct)
+        + (0.09 * field_own_pct)
+        + (0.08 * game_surge)
+        + (0.06 * surge_flag)
     )
     unique_game_keys = {
         str(x or "").strip().upper()
@@ -679,11 +758,33 @@ def build_player_pool(
         target_total=ownership_target_total,
         cap_per_player=100.0,
     )
+
+    # Cap leverage when surge context is unstable by shrinking toward slate-average ownership.
+    if len(out) > 0:
+        baseline_own = ownership_target_total / float(len(out))
+        leverage_shrink = ((0.30 * surge_uncertainty) + (0.20 * surge_flag)).clip(lower=0.0, upper=0.45)
+        ownership_alloc = (ownership_alloc * (1.0 - leverage_shrink)) + (baseline_own * leverage_shrink)
+        ownership_alloc = ownership_alloc.clip(lower=0.0, upper=100.0)
+        total_after = float(ownership_alloc.sum())
+        if total_after > 0.0:
+            ownership_alloc = ownership_alloc * (ownership_target_total / total_after)
+        ownership_probs = ownership_alloc / max(1e-9, float(ownership_alloc.sum()))
+        ownership_alloc = _allocate_ownership_with_cap(
+            ownership_probs,
+            target_total=ownership_target_total,
+            cap_per_player=100.0,
+        )
+    else:
+        leverage_shrink = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
     out["ownership_model"] = "v2_softmax"
     out["ownership_temperature"] = ownership_temperature
     out["ownership_target_total"] = ownership_target_total
     out["ownership_total_projected"] = float(ownership_alloc.sum())
     out["projected_ownership"] = ownership_alloc.round(2)
+    out["ownership_chalk_surge_score"] = (100.0 * surge_score).round(3)
+    out["ownership_chalk_surge_flag"] = surge_flag.astype(bool)
+    out["ownership_confidence"] = (1.0 - surge_uncertainty).clip(lower=0.0, upper=1.0).round(4)
+    out["ownership_leverage_shrink"] = pd.to_numeric(leverage_shrink, errors="coerce").fillna(0.0).round(4)
 
     for col in ["game_p_plus_8", "game_p_plus_12", "game_volatility_score", "game_tail_residual_mu", "game_tail_sigma", "game_tail_match_score"]:
         if col not in out.columns:
@@ -822,6 +923,50 @@ def apply_projection_calibration(
     out["projection_calibration_scale"] = float(scale)
     out["projection_bucket_scale"] = row_bucket_scales
     out["projection_total_scale"] = total_row_scale
+    return out
+
+
+def apply_projection_uncertainty_adjustment(
+    pool_df: pd.DataFrame,
+    uncertainty_weight: float = 0.18,
+    high_risk_extra_shrink: float = 0.10,
+    dnp_risk_threshold: float = 0.30,
+    min_multiplier: float = 0.68,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    weight = max(0.0, min(0.60, _safe_num(uncertainty_weight, 0.18)))
+    extra = max(0.0, min(0.40, _safe_num(high_risk_extra_shrink, 0.10)))
+    risk_threshold = max(0.0, min(0.95, _safe_num(dnp_risk_threshold, 0.30)))
+    floor_mult = max(0.50, min(1.0, _safe_num(min_multiplier, 0.68)))
+
+    uncertainty = pd.to_numeric(out.get("projection_uncertainty_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    dnp_risk = pd.to_numeric(out.get("dnp_risk_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    if risk_threshold >= 1.0:
+        high_risk_component = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    else:
+        high_risk_component = ((dnp_risk - risk_threshold).clip(lower=0.0) / (1.0 - risk_threshold)).clip(0.0, 1.0)
+
+    multiplier = 1.0 - (weight * uncertainty) - (extra * high_risk_component)
+    multiplier = multiplier.clip(lower=floor_mult, upper=1.0)
+    out["projection_uncertainty_multiplier"] = multiplier.round(4)
+
+    for col in ["projected_dk_points", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") * multiplier
+
+    if "Salary" in out.columns and "projected_dk_points" in out.columns:
+        salary = pd.to_numeric(out["Salary"], errors="coerce")
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce")
+        out["projection_per_dollar"] = proj / salary.replace(0, pd.NA)
+        out["value_per_1k"] = out["projection_per_dollar"] * 1000.0
+
+    if "projected_dk_points" in out.columns and "projected_ownership" in out.columns:
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
+        own = pd.to_numeric(out["projected_ownership"], errors="coerce").fillna(0.0)
+        out["leverage_score"] = (proj - (0.15 * own)).round(3)
     return out
 
 
@@ -1069,6 +1214,11 @@ def generate_lineups(
     cluster_variants_per_cluster: int = 10,
     projection_scale: float = 1.0,
     projection_salary_bucket_scales: dict[str, float] | None = None,
+    apply_uncertainty_shrink: bool = False,
+    uncertainty_weight: float = 0.18,
+    high_risk_extra_shrink: float = 0.10,
+    dnp_risk_threshold: float = 0.30,
+    uncertainty_min_multiplier: float = 0.68,
     salary_left_target: int | None = 50,
     salary_left_penalty_divisor: float = 75.0,
     random_seed: int = 7,
@@ -1088,6 +1238,14 @@ def generate_lineups(
         projection_scale=projection_scale,
         projection_salary_bucket_scales=projection_salary_bucket_scales,
     )
+    if apply_uncertainty_shrink:
+        calibrated = apply_projection_uncertainty_adjustment(
+            calibrated,
+            uncertainty_weight=uncertainty_weight,
+            high_risk_extra_shrink=high_risk_extra_shrink,
+            dnp_risk_threshold=dnp_risk_threshold,
+            min_multiplier=uncertainty_min_multiplier,
+        )
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = scored.loc[scored["Salary"] > 0].copy()
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
@@ -1166,6 +1324,12 @@ def generate_lineups(
         "projection_bucket_scale",
         "projection_total_scale",
         "projection_salary_bucket",
+        "projection_uncertainty_score",
+        "dnp_risk_score",
+        "projection_uncertainty_multiplier",
+        "ownership_chalk_surge_score",
+        "ownership_chalk_surge_flag",
+        "ownership_confidence",
     ]
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
