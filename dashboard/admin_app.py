@@ -38,7 +38,11 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     projection_salary_bucket_key,
     remove_injured_players,
 )
-from college_basketball_dfs.cbb_tail_model import fit_total_tail_model, score_odds_games_for_tail
+from college_basketball_dfs.cbb_tail_model import (
+    fit_total_tail_model,
+    map_slate_games_to_tail_features,
+    score_odds_games_for_tail,
+)
 from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
@@ -160,6 +164,280 @@ def _normalize_player_id(value: object) -> str:
         except (TypeError, ValueError):
             return text
     return re.sub(r"\s+", "", text)
+
+
+def _normalize_game_key_token(value: object) -> str:
+    text = str(value or "").strip().upper()
+    if not text:
+        return ""
+    return text.split(" ")[0]
+
+
+def _ranked_bonus(
+    rank_index: int,
+    *,
+    start: float,
+    step: float,
+    floor: float,
+) -> float:
+    return float(max(floor, start - (step * float(max(0, rank_index)))))
+
+
+def _build_game_agent_lineup_objective_adjustments(
+    *,
+    packet: dict[str, Any] | None,
+    pool_df: pd.DataFrame,
+    contest_type: str,
+    strength_multiplier: float = 1.0,
+    focus_games: int = 3,
+) -> tuple[dict[str, float], dict[str, Any]]:
+    if not isinstance(packet, dict) or not packet:
+        return {}, {"reason": "missing_packet"}
+    if pool_df.empty:
+        return {}, {"reason": "empty_pool"}
+
+    focus_tables = packet.get("focus_tables") if isinstance(packet.get("focus_tables"), dict) else {}
+    game_targets = focus_tables.get("gpp_game_stack_targets") if isinstance(focus_tables, dict) else []
+    team_targets = focus_tables.get("gpp_team_stack_targets") if isinstance(focus_tables, dict) else []
+    player_targets = focus_tables.get("gpp_player_core_targets") if isinstance(focus_tables, dict) else []
+    game_targets = game_targets if isinstance(game_targets, list) else []
+    team_targets = team_targets if isinstance(team_targets, list) else []
+    player_targets = player_targets if isinstance(player_targets, list) else []
+    if not game_targets and not team_targets and not player_targets:
+        return {}, {"reason": "no_targets"}
+
+    contest_norm = str(contest_type or "").strip().lower()
+    if contest_norm == "cash":
+        contest_weight = 0.45
+    elif contest_norm == "small gpp":
+        contest_weight = 0.85
+    else:
+        contest_weight = 1.0
+    strength = max(0.0, float(strength_multiplier)) * contest_weight
+    if strength <= 0.0:
+        return {}, {"reason": "zero_strength"}
+
+    working = pool_df.copy()
+    if "ID" not in working.columns:
+        return {}, {"reason": "missing_id_col"}
+    working["_id_norm"] = working["ID"].map(_normalize_player_id)
+    if "TeamAbbrev" in working.columns:
+        working["_team_norm"] = working["TeamAbbrev"].astype(str).str.strip().str.upper()
+    else:
+        working["_team_norm"] = ""
+    if "game_key" in working.columns:
+        working["_game_norm"] = working["game_key"].map(_normalize_game_key_token)
+    else:
+        working["_game_norm"] = ""
+    if "Name" in working.columns:
+        working["_name_norm"] = working["Name"].map(_norm_name_key_loose)
+    else:
+        working["_name_norm"] = ""
+    working = working.loc[working["_id_norm"] != ""].copy()
+    if working.empty:
+        return {}, {"reason": "no_pool_ids"}
+
+    adjustments: dict[str, float] = {pid: 0.0 for pid in working["_id_norm"].astype(str).tolist()}
+    applied_games = 0
+    applied_teams = 0
+    applied_players = 0
+    player_cap = max(2.5, 8.0 * strength)
+    game_limit = max(1, min(int(focus_games), 10))
+    team_limit = max(2, min(int(focus_games * 2), 20))
+    player_limit = max(3, min(int(focus_games * 3), 36))
+
+    for idx, row in enumerate(game_targets[:game_limit]):
+        if not isinstance(row, dict):
+            continue
+        game_key = _normalize_game_key_token(row.get("game_key"))
+        if not game_key:
+            continue
+        bonus = _ranked_bonus(
+            idx,
+            start=2.25 * strength,
+            step=0.35 * strength,
+            floor=0.20 * strength,
+        )
+        game_ids = (
+            working.loc[working["_game_norm"] == game_key, "_id_norm"]
+            .astype(str)
+            .dropna()
+            .tolist()
+        )
+        if not game_ids:
+            continue
+        for pid in game_ids:
+            adjustments[pid] = min(player_cap, adjustments.get(pid, 0.0) + bonus)
+        applied_games += 1
+
+    for idx, row in enumerate(team_targets[:team_limit]):
+        if not isinstance(row, dict):
+            continue
+        team = str(row.get("team_abbrev") or "").strip().upper()
+        if not team:
+            continue
+        bonus = _ranked_bonus(
+            idx,
+            start=1.90 * strength,
+            step=0.25 * strength,
+            floor=0.15 * strength,
+        )
+        team_ids = (
+            working.loc[working["_team_norm"] == team, "_id_norm"]
+            .astype(str)
+            .dropna()
+            .tolist()
+        )
+        if not team_ids:
+            continue
+        for pid in team_ids:
+            adjustments[pid] = min(player_cap, adjustments.get(pid, 0.0) + bonus)
+        applied_teams += 1
+
+    for idx, row in enumerate(player_targets[:player_limit]):
+        if not isinstance(row, dict):
+            continue
+        player_name_key = _norm_name_key_loose(row.get("player_name"))
+        if not player_name_key:
+            continue
+        team = str(row.get("team_abbrev") or "").strip().upper()
+        game_key = _normalize_game_key_token(row.get("game_key"))
+        mask = working["_name_norm"] == player_name_key
+        if team:
+            mask = mask & (working["_team_norm"] == team)
+        if game_key:
+            mask = mask & (working["_game_norm"] == game_key)
+        if not bool(mask.any()):
+            # Fallback: name + team when game_key labels mismatch.
+            mask = working["_name_norm"] == player_name_key
+            if team:
+                mask = mask & (working["_team_norm"] == team)
+        player_ids = working.loc[mask, "_id_norm"].astype(str).dropna().tolist()
+        if not player_ids:
+            continue
+        bonus = _ranked_bonus(
+            idx,
+            start=2.75 * strength,
+            step=0.30 * strength,
+            floor=0.25 * strength,
+        )
+        for pid in player_ids:
+            adjustments[pid] = min(player_cap, adjustments.get(pid, 0.0) + bonus)
+        applied_players += 1
+
+    final_adjustments = {
+        str(pid): round(float(val), 4)
+        for pid, val in adjustments.items()
+        if abs(float(val)) >= 1e-6
+    }
+    if not final_adjustments:
+        return {}, {
+            "reason": "no_pool_match",
+            "applied_games": applied_games,
+            "applied_teams": applied_teams,
+            "applied_players": applied_players,
+        }
+
+    adjusted_preview_df = working.copy()
+    adjusted_preview_df["_adj"] = adjusted_preview_df["_id_norm"].map(final_adjustments).fillna(0.0)
+    adjusted_preview_df = adjusted_preview_df.loc[adjusted_preview_df["_adj"] > 0].copy()
+    adjusted_preview_df = adjusted_preview_df.sort_values("_adj", ascending=False)
+    preview_rows = (
+        adjusted_preview_df.loc[:, ["Name", "TeamAbbrev", "_id_norm", "_adj"]]
+        .rename(columns={"_id_norm": "player_id", "_adj": "objective_bonus"})
+        .head(8)
+        .to_dict(orient="records")
+        if not adjusted_preview_df.empty
+        else []
+    )
+    return final_adjustments, {
+        "applied_games": int(applied_games),
+        "applied_teams": int(applied_teams),
+        "applied_players": int(applied_players),
+        "adjusted_players": int(len(final_adjustments)),
+        "preview_rows": preview_rows,
+    }
+
+
+def _extract_slate_game_keys(
+    *,
+    pool_df: pd.DataFrame | None,
+    raw_slate_df: pd.DataFrame | None,
+) -> list[str]:
+    keys: set[str] = set()
+    if isinstance(pool_df, pd.DataFrame) and not pool_df.empty and "game_key" in pool_df.columns:
+        for raw_key in pool_df["game_key"].tolist():
+            key = _normalize_game_key_token(raw_key)
+            if "@" in key:
+                keys.add(key)
+    if keys:
+        return sorted(keys)
+
+    if isinstance(raw_slate_df, pd.DataFrame) and not raw_slate_df.empty:
+        for game_col in ["Game Info", "GameInfo", "game_info"]:
+            if game_col not in raw_slate_df.columns:
+                continue
+            for raw_key in raw_slate_df[game_col].tolist():
+                key = _normalize_game_key_token(raw_key)
+                if "@" in key:
+                    keys.add(key)
+            if keys:
+                break
+    return sorted(keys)
+
+
+def _filter_odds_to_slate_context(
+    *,
+    odds_df: pd.DataFrame,
+    pool_df: pd.DataFrame | None,
+    raw_slate_df: pd.DataFrame | None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    if odds_df.empty:
+        return odds_df.copy(), {
+            "reason": "empty_odds",
+            "odds_rows_before": 0,
+            "odds_rows_after": 0,
+            "requested_slate_games": 0,
+            "mapped_slate_games": 0,
+        }
+
+    slate_game_keys = _extract_slate_game_keys(pool_df=pool_df, raw_slate_df=raw_slate_df)
+    meta: dict[str, Any] = {
+        "reason": "",
+        "odds_rows_before": int(len(odds_df)),
+        "odds_rows_after": int(len(odds_df)),
+        "requested_slate_games": int(len(slate_game_keys)),
+        "mapped_slate_games": 0,
+    }
+    if not slate_game_keys:
+        meta["reason"] = "no_slate_game_keys"
+        return odds_df.copy(), meta
+
+    mapped = map_slate_games_to_tail_features(slate_game_keys=slate_game_keys, odds_tail_df=odds_df)
+    mapped_rows = mapped.copy() if isinstance(mapped, pd.DataFrame) else pd.DataFrame()
+    meta["mapped_slate_games"] = int(len(mapped_rows))
+    if mapped_rows.empty or "game_tail_event_id" not in mapped_rows.columns or "event_id" not in odds_df.columns:
+        meta["reason"] = "fallback_unfiltered"
+        return odds_df.copy(), meta
+
+    event_ids = {
+        str(x).strip()
+        for x in mapped_rows["game_tail_event_id"].tolist()
+        if str(x or "").strip()
+    }
+    if not event_ids:
+        meta["reason"] = "fallback_unfiltered"
+        return odds_df.copy(), meta
+
+    event_norm = odds_df["event_id"].astype(str).str.strip()
+    filtered = odds_df.loc[event_norm.isin(event_ids)].copy()
+    if filtered.empty:
+        meta["reason"] = "fallback_unfiltered"
+        return odds_df.copy(), meta
+
+    meta["reason"] = "filtered_by_event_id"
+    meta["odds_rows_after"] = int(len(filtered))
+    return filtered, meta
 
 
 def _merged_bookmakers(selected: list[str] | None, custom_csv: str | None = None) -> list[str]:
@@ -2475,6 +2753,49 @@ with tab_lineups:
             "(auto-adjusted for smaller lineup counts/slates)."
         )
 
+    game_packet_for_lineups = st.session_state.get("cbb_game_slate_ai_packet")
+    game_packet_ready = isinstance(game_packet_for_lineups, dict) and bool(game_packet_for_lineups)
+    ga1, ga2, ga3 = st.columns(3)
+    apply_game_agent_stack_bias = bool(
+        ga1.checkbox(
+            "Apply Game Agent Stack Bias",
+            value=False,
+            disabled=not game_packet_ready,
+            help=(
+                "Uses Game Slate packet stack targets to boost objective scores for matching games, "
+                "teams, and players before lineup construction."
+            ),
+        )
+    )
+    game_agent_bias_strength_pct = float(
+        ga2.slider(
+            "Agent Bias Strength %",
+            min_value=0,
+            max_value=200,
+            value=100,
+            step=5,
+            disabled=not apply_game_agent_stack_bias,
+            help="100% uses default boost weights; lower softens, higher amplifies.",
+        )
+    )
+    game_agent_focus_games = int(
+        ga3.slider(
+            "Agent Focus Games",
+            min_value=1,
+            max_value=10,
+            value=3,
+            step=1,
+            disabled=not apply_game_agent_stack_bias,
+            help="How many top stack games to prioritize from the packet.",
+        )
+    )
+    if game_packet_ready:
+        packet_review_date = str((game_packet_for_lineups.get("review_context") or {}).get("review_date") or "")
+        if packet_review_date:
+            st.caption(f"Game Agent packet loaded for `{packet_review_date}`.")
+    else:
+        st.caption("Game Agent stack bias is disabled until you build a packet in `Slate + Vegas`.")
+
     max_salary_left = int(
         c6.slider(
             "Max Salary Left Per Lineup",
@@ -2751,6 +3072,40 @@ with tab_lineups:
                             f"dnp_threshold={dnp_risk_threshold:.2f}, "
                             f"high_risk_extra={high_risk_extra_shrink:.2f}."
                         )
+                    objective_score_adjustments: dict[str, float] = {}
+                    game_agent_bias_meta: dict[str, Any] = {}
+                    if apply_game_agent_stack_bias:
+                        packet_review_date = str(
+                            ((game_packet_for_lineups or {}).get("review_context") or {}).get("review_date") or ""
+                        )
+                        if packet_review_date and packet_review_date != lineup_slate_date.isoformat():
+                            st.warning(
+                                "Game Agent packet date does not match lineup slate date: "
+                                f"packet=`{packet_review_date}`, lineup=`{lineup_slate_date.isoformat()}`."
+                            )
+                        objective_score_adjustments, game_agent_bias_meta = _build_game_agent_lineup_objective_adjustments(
+                            packet=game_packet_for_lineups if isinstance(game_packet_for_lineups, dict) else {},
+                            pool_df=pool_sorted,
+                            contest_type=contest_type,
+                            strength_multiplier=(game_agent_bias_strength_pct / 100.0),
+                            focus_games=game_agent_focus_games,
+                        )
+                        if objective_score_adjustments:
+                            st.caption(
+                                "Game Agent stack bias applied: "
+                                f"adjusted_players={int(game_agent_bias_meta.get('adjusted_players') or 0)}, "
+                                f"games={int(game_agent_bias_meta.get('applied_games') or 0)}, "
+                                f"teams={int(game_agent_bias_meta.get('applied_teams') or 0)}, "
+                                f"players={int(game_agent_bias_meta.get('applied_players') or 0)}."
+                            )
+                            preview_rows = game_agent_bias_meta.get("preview_rows") or []
+                            if preview_rows:
+                                st.dataframe(pd.DataFrame(preview_rows), hide_index=True, use_container_width=True)
+                        else:
+                            st.caption(
+                                "Game Agent stack bias enabled but no objective adjustments were applied "
+                                f"(reason={str(game_agent_bias_meta.get('reason') or 'n/a')})."
+                            )
 
                     if run_mode_key == "all":
                         version_plan = [
@@ -2871,6 +3226,7 @@ with tab_lineups:
                             uncertainty_weight=uncertainty_weight,
                             high_risk_extra_shrink=high_risk_extra_shrink,
                             dnp_risk_threshold=dnp_risk_threshold,
+                            objective_score_adjustments=objective_score_adjustments,
                             salary_left_target=salary_left_target,
                             random_seed=lineup_seed + version_idx,
                             progress_callback=_lineup_progress,
@@ -2920,6 +3276,10 @@ with tab_lineups:
                             "bucket_calibration_lookback_days": bucket_calibration_lookback_days,
                             "bucket_calibration_min_samples": bucket_calibration_min_samples,
                             "salary_bucket_calibration_meta": salary_bucket_calibration_meta,
+                            "apply_game_agent_stack_bias": apply_game_agent_stack_bias,
+                            "game_agent_bias_strength_pct": game_agent_bias_strength_pct,
+                            "game_agent_focus_games": game_agent_focus_games,
+                            "game_agent_bias_meta": game_agent_bias_meta,
                             "bookmaker": lineup_bookmaker.strip(),
                             "locked_ids": locked_ids,
                             "excluded_ids": excluded_ids,
@@ -4703,11 +5063,11 @@ with tab_game:
         except Exception as exc:
             st.exception(exc)
 
-with tab_game:
-    st.subheader("Game Slate Agent")
+with tab_slate_vegas:
+    st.subheader("Slate-Scoped Game Agent")
     st.caption(
-        "AI scout for game-level DFS context. Combines today's odds, prior-day box score form, "
-        "and season Vegas review calibration to rank stack and winner angles."
+        "AI scout for game-level DFS context. Anchors analysis to the DK slate/active pool first, "
+        "then uses odds, prior-day box score form, and season Vegas calibration for stack angles."
     )
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to run Game Slate Agent.")
@@ -4789,6 +5149,28 @@ with tab_game:
                         pool_df_agent = pd.DataFrame()
                         raw_slate_df_agent = pd.DataFrame()
 
+                    scoped_odds_df, slate_scope_meta = _filter_odds_to_slate_context(
+                        odds_df=odds_agent_df,
+                        pool_df=pool_df_agent,
+                        raw_slate_df=raw_slate_df_agent,
+                    )
+                    scope_reason = str(slate_scope_meta.get("reason") or "")
+                    if scope_reason == "filtered_by_event_id":
+                        st.caption(
+                            "Slate scoping applied: "
+                            f"odds_rows {int(slate_scope_meta.get('odds_rows_before') or 0)} -> "
+                            f"{int(slate_scope_meta.get('odds_rows_after') or 0)}, "
+                            f"slate_games={int(slate_scope_meta.get('requested_slate_games') or 0)}, "
+                            f"mapped={int(slate_scope_meta.get('mapped_slate_games') or 0)}."
+                        )
+                    elif scope_reason in {"fallback_unfiltered", "no_slate_game_keys"}:
+                        st.caption(
+                            "Slate scoping fallback: using full game-odds set "
+                            f"(reason={scope_reason}, "
+                            f"slate_games={int(slate_scope_meta.get('requested_slate_games') or 0)}, "
+                            f"mapped={int(slate_scope_meta.get('mapped_slate_games') or 0)})."
+                        )
+
                     prior_boxscore_date = game_selected_date - timedelta(days=1)
                     prior_boxscore_df = load_actual_results_frame_for_date(
                         bucket_name=bucket_name,
@@ -4813,7 +5195,7 @@ with tab_game:
                     )
                     game_packet_kwargs: dict[str, Any] = {
                         "review_date": game_selected_date.isoformat(),
-                        "odds_df": odds_agent_df,
+                        "odds_df": scoped_odds_df,
                         "prior_boxscore_df": prior_boxscore_df,
                         "vegas_history_df": vegas_history_df,
                         "vegas_review_df": vegas_review_df,
@@ -4831,6 +5213,11 @@ with tab_game:
                         "focus_limit": int(game_agent_focus_limit),
                         "player_pool_rows": int(len(pool_df_agent)),
                         "dk_slate_rows": int(len(raw_slate_df_agent)),
+                        "odds_rows_before_scope": int(slate_scope_meta.get("odds_rows_before") or len(odds_agent_df)),
+                        "odds_rows_after_scope": int(slate_scope_meta.get("odds_rows_after") or len(scoped_odds_df)),
+                        "slate_scope_reason": str(slate_scope_meta.get("reason") or ""),
+                        "requested_slate_games": int(slate_scope_meta.get("requested_slate_games") or 0),
+                        "mapped_slate_games": int(slate_scope_meta.get("mapped_slate_games") or 0),
                     }
                     st.session_state.pop("cbb_game_slate_ai_output", None)
                     st.success("Game Slate AI packet built.")
@@ -4846,7 +5233,7 @@ with tab_game:
                 packet_review_date = str((game_packet_state.get("review_context") or {}).get("review_date") or "")
                 if packet_review_date and packet_review_date != game_selected_date.isoformat():
                     st.warning(
-                        f"Packet is for `{packet_review_date}` while Game Data is set to `{game_selected_date.isoformat()}`. "
+                        f"Packet is for `{packet_review_date}` while selected slate date is `{game_selected_date.isoformat()}`. "
                         "Rebuild the packet to align dates."
                     )
 
@@ -4870,7 +5257,12 @@ with tab_game:
                     "Packet context: "
                     f"review_date={packet_review_date or 'n/a'}, "
                     f"prior_boxscore_date={str(game_meta.get('prior_boxscore_date') or 'n/a')}, "
-                    f"dk_slate_rows={int(_safe_int_value(game_meta.get('dk_slate_rows'), default=0))}"
+                    f"dk_slate_rows={int(_safe_int_value(game_meta.get('dk_slate_rows'), default=0))}, "
+                    f"odds_scope={str(game_meta.get('slate_scope_reason') or 'n/a')}, "
+                    f"odds_rows={int(_safe_int_value(game_meta.get('odds_rows_after_scope'), default=0))}/"
+                    f"{int(_safe_int_value(game_meta.get('odds_rows_before_scope'), default=0))}, "
+                    f"mapped_slate_games={int(_safe_int_value(game_meta.get('mapped_slate_games'), default=0))}/"
+                    f"{int(_safe_int_value(game_meta.get('requested_slate_games'), default=0))}"
                 )
                 if gpp_game_targets:
                     st.markdown("**GPP Game Stack Targets**")

@@ -294,6 +294,32 @@ def test_generate_lineups_spike_mode_decorrelates_pairs() -> None:
         assert len(a_ids & b_ids) <= 4
 
 
+def test_generate_lineups_objective_adjustments_increase_target_exposure() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    target_id = "2006"
+
+    base_lineups, base_warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=20,
+        contest_type="Small GPP",
+        random_seed=13,
+    )
+    boosted_lineups, boosted_warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=20,
+        contest_type="Small GPP",
+        objective_score_adjustments={target_id: 30.0},
+        random_seed=13,
+    )
+
+    assert base_warnings == []
+    assert boosted_warnings == []
+    base_count = sum(1 for lineup in base_lineups if target_id in set(lineup["player_ids"]))
+    boosted_count = sum(1 for lineup in boosted_lineups if target_id in set(lineup["player_ids"]))
+    assert boosted_count >= base_count
+    assert boosted_count > 0
+
+
 def test_build_player_pool_blends_our_and_vegas_stats() -> None:
     pool = build_player_pool(
         _sample_slate(),

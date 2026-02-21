@@ -1219,6 +1219,7 @@ def generate_lineups(
     high_risk_extra_shrink: float = 0.10,
     dnp_risk_threshold: float = 0.30,
     uncertainty_min_multiplier: float = 0.68,
+    objective_score_adjustments: dict[str, float] | None = None,
     salary_left_target: int | None = 50,
     salary_left_penalty_divisor: float = 75.0,
     random_seed: int = 7,
@@ -1248,6 +1249,15 @@ def generate_lineups(
         )
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = scored.loc[scored["Salary"] > 0].copy()
+    if objective_score_adjustments:
+        objective_bonus = scored["ID"].astype(str).map(
+            lambda pid: _safe_num(objective_score_adjustments.get(str(pid), 0.0), 0.0)
+        )
+        scored["objective_score"] = (
+            pd.to_numeric(scored.get("objective_score"), errors="coerce").fillna(0.0)
+            + pd.to_numeric(objective_bonus, errors="coerce").fillna(0.0)
+        ).clip(lower=0.01)
+        scored["objective_score_adjustment"] = pd.to_numeric(objective_bonus, errors="coerce").fillna(0.0)
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
     salary_target = None if salary_left_target is None else max(0, min(SALARY_CAP, int(salary_left_target)))
     salary_penalty_divisor = max(1.0, float(salary_left_penalty_divisor))
@@ -1453,7 +1463,7 @@ def generate_lineups(
             if salary_target is not None:
                 selected_score -= abs(float(salary_left - salary_target)) / salary_penalty_divisor
             if spike_mode:
-                def _safe_num(value: Any) -> float:
+                def _safe_metric_num(value: Any) -> float:
                     num = _safe_float(value)
                     if num is None or math.isnan(num):
                         return 0.0
@@ -1461,8 +1471,8 @@ def generate_lineups(
 
                 selected_score += 1.25 * _stack_bonus_from_counts(game_counts)
                 if include_tail_signals:
-                    avg_tail = sum(_safe_num(p.get("game_tail_score")) for p in selected) / max(1, len(selected))
-                    avg_vol = sum(_safe_num(p.get("game_volatility_score")) for p in selected) / max(1, len(selected))
+                    avg_tail = sum(_safe_metric_num(p.get("game_tail_score")) for p in selected) / max(1, len(selected))
+                    avg_vol = sum(_safe_metric_num(p.get("game_volatility_score")) for p in selected) / max(1, len(selected))
                     selected_score += (0.20 * avg_tail) + (0.02 * avg_vol)
 
             if lineups:
