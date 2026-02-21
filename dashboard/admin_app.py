@@ -1945,6 +1945,33 @@ default_season_start = season_start_for_date(date.today())
 default_props_markets = "player_points,player_rebounds,player_assists"
 default_props_event_sleep_seconds = float(os.getenv("CBB_ODDS_EVENT_SLEEP_SECONDS", "0.6"))
 
+active_slate_default = str(st.session_state.get("shared_slate_preset", "Main"))
+if active_slate_default not in SLATE_PRESET_OPTIONS:
+    active_slate_default = "Main"
+shared_slate_preset = st.selectbox(
+    "Active Slate Label",
+    options=SLATE_PRESET_OPTIONS,
+    index=SLATE_PRESET_OPTIONS.index(active_slate_default),
+    key="shared_slate_preset",
+    help=(
+        "Shared across DK Slate, Slate + Vegas, Lineup Generator, "
+        "Projection Review, Tournament Review, and Game Slate Agent."
+    ),
+)
+shared_slate_custom = str(st.session_state.get("shared_slate_custom_label", "Main"))
+if shared_slate_preset == "Custom":
+    shared_slate_custom = st.text_input(
+        "Custom Active Slate Label",
+        value=shared_slate_custom or "Main",
+        key="shared_slate_custom_label",
+        help="Example: Early, Turbo, Showdown.",
+    )
+shared_slate_label = _normalize_slate_label(
+    shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
+)
+shared_slate_key = _slate_key_from_label(shared_slate_label)
+st.caption(f"Active slate context: `{shared_slate_label}` (key: `{shared_slate_key}`)")
+
 with st.sidebar:
     st.header("Global Settings")
     bucket_name = st.text_input("GCS Bucket", value=default_bucket)
@@ -1960,13 +1987,6 @@ with st.sidebar:
         + ("loaded from secrets/env" if odds_api_key else "missing (`the_odds_api_key`)")
     )
     st.caption("Configure workflow-specific settings inside each tab.")
-
-shared_slate_preset = str(st.session_state.get("shared_slate_preset", "Main"))
-shared_slate_custom = str(st.session_state.get("shared_slate_custom_label", "Main"))
-shared_slate_label = _normalize_slate_label(
-    shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
-)
-shared_slate_key = _slate_key_from_label(shared_slate_label)
 
 cred_json = _resolve_credential_json()
 cred_json_b64 = _resolve_credential_json_b64()
@@ -2129,34 +2149,11 @@ with tab_backfill:
 with tab_dk:
     st.subheader("DraftKings Slate Upload")
     dk_slate_date = st.date_input("DraftKings Slate Date", value=game_selected_date, key="dk_slate_date")
-    active_slate_choice = shared_slate_preset if shared_slate_preset in SLATE_PRESET_OPTIONS else "Main"
-    dk_slate_preset = st.selectbox(
-        "Slate Label",
-        options=SLATE_PRESET_OPTIONS,
-        index=SLATE_PRESET_OPTIONS.index(active_slate_choice),
-        key="shared_slate_preset",
-        help=(
-            "This selection is shared across DK Slate, Slate + Vegas, Lineup Generator, "
-            "Tournament Review, and Game Slate Agent."
-        ),
-    )
-    dk_slate_custom = ""
-    if dk_slate_preset == "Custom":
-        dk_slate_custom = st.text_input(
-            "Custom Slate Label",
-            value=shared_slate_custom or "Main",
-            key="shared_slate_custom_label",
-            help="Example: Early, Turbo, Showdown.",
-        )
-    shared_slate_label = _normalize_slate_label(
-        dk_slate_custom if dk_slate_preset == "Custom" else dk_slate_preset
-    )
-    shared_slate_key = _slate_key_from_label(shared_slate_label)
     dk_slate_label = shared_slate_label
     dk_slate_key = shared_slate_key
     st.caption(
         "Each date + slate label stores a separate DK slate file. "
-        f"Using slate `{dk_slate_label}` (key: `{dk_slate_key}`) across all slate-aware tabs."
+        f"Using active slate `{dk_slate_label}` (key: `{dk_slate_key}`)."
     )
     uploaded_dk_slate = st.file_uploader(
         "Upload DraftKings Slate CSV",
