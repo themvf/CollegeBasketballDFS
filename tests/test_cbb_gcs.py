@@ -61,6 +61,26 @@ def test_dk_slate_read_missing_returns_none() -> None:
     assert store.read_dk_slate_csv(date(2026, 2, 15)) is None
 
 
+def test_dk_slate_slate_scoped_rw_and_main_fallback() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+
+    assert (
+        store.dk_slate_blob_name(d, slate_key="Night Slate")
+        == "cbb/dk_slates/2026-02-14/night_slate_dk_slate.csv"
+    )
+    scoped_blob = store.write_dk_slate_csv(d, "id,name\n1,Night\n", slate_key="Night Slate")
+    assert scoped_blob == "cbb/dk_slates/2026-02-14/night_slate_dk_slate.csv"
+    assert "Night" in (store.read_dk_slate_csv(d, slate_key="night_slate") or "")
+    assert store.read_dk_slate_csv(d, slate_key="afternoon") is None
+
+    legacy_blob = store.write_dk_slate_csv(d, "id,name\n2,LegacyMain\n")
+    assert legacy_blob == "cbb/dk_slates/2026-02-14_dk_slate.csv"
+    assert "LegacyMain" in (store.read_dk_slate_csv(d, slate_key="main") or "")
+    assert store.delete_dk_slate_csv(d, slate_key="main") is True
+    assert store.read_dk_slate_csv(d, slate_key="main") is None
+
+
 def test_injuries_blob_name_and_rw() -> None:
     store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
     expected_blob = "cbb/injuries/injuries_master.csv"
@@ -174,6 +194,45 @@ def test_list_lineup_run_ids() -> None:
 
     run_ids = store.list_lineup_run_ids(d)
     assert run_ids == ["run_b", "run_a"]
+
+
+def test_lineup_runs_slate_scoped_rw_and_listing() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    run_id = "run_night"
+    version_key = "standard_v1"
+
+    assert (
+        store.lineup_run_prefix(d, run_id, slate_key="Night")
+        == "cbb/lineup_runs/2026-02-14/night/run_night"
+    )
+    assert (
+        store.lineup_version_json_blob_name(d, run_id, version_key, slate_key="Night")
+        == "cbb/lineup_runs/2026-02-14/night/run_night/standard_v1/lineups.json"
+    )
+
+    manifest_payload = {"run_id": run_id, "slate_key": "night"}
+    store.write_lineup_run_manifest_json(d, run_id, manifest_payload, slate_key="Night")
+    store.write_lineup_version_json(d, run_id, version_key, {"lineups": []}, slate_key="Night")
+    store.write_lineup_version_csv(d, run_id, version_key, "Lineup,Salary\n1,50000\n", slate_key="Night")
+    store.write_lineup_version_upload_csv(
+        d,
+        run_id,
+        version_key,
+        "G,G,G,F,F,F,UTIL,UTIL\n",
+        slate_key="Night",
+    )
+
+    assert store.read_lineup_run_manifest_json(d, run_id, slate_key="night") == manifest_payload
+    assert store.read_lineup_version_json(d, run_id, version_key, slate_key="night") == {"lineups": []}
+    assert "Salary" in (store.read_lineup_version_csv(d, run_id, version_key, slate_key="night") or "")
+    assert "UTIL" in (store.read_lineup_version_upload_csv(d, run_id, version_key, slate_key="night") or "")
+    assert store.list_lineup_run_ids(d, slate_key="night") == ["run_night"]
+    assert store.list_lineup_run_dates(slate_key="night") == [d]
+
+    store.write_lineup_run_manifest_json(d, "run_legacy_main", {"run_id": "run_legacy_main"})
+    assert store.list_lineup_run_ids(d, slate_key="main") == ["run_legacy_main"]
+    assert store.read_lineup_run_manifest_json(d, "run_legacy_main", slate_key="main") == {"run_id": "run_legacy_main"}
 
 
 def test_list_lineup_run_dates() -> None:

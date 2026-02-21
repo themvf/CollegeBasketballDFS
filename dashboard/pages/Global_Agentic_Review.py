@@ -38,6 +38,7 @@ from college_basketball_dfs.cbb_tournament_review import (
 )
 
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
+SLATE_PRESET_OPTIONS = ["Main", "Afternoon", "Full Day", "Night", "Custom"]
 
 
 def _secret(name: str) -> str | None:
@@ -94,6 +95,17 @@ def _normalize_player_id(value: object) -> str:
         except (TypeError, ValueError):
             return text
     return re.sub(r"\s+", "", text)
+
+
+def _normalize_slate_label(value: object, default: str = "Main") -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return text or default
+
+
+def _slate_key_from_label(value: object, default: str = "main") -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or default
 
 
 def _contest_id_from_blob_name(blob_name: str, selected_date: date) -> str:
@@ -172,6 +184,7 @@ def _safe_int(value: object, default: int = 0) -> int:
 @st.cache_data(ttl=600, show_spinner=False)
 def load_saved_lineup_run_dates(
     bucket_name: str,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -182,7 +195,10 @@ def load_saved_lineup_run_dates(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    return store.list_lineup_run_dates()
+    try:
+        return store.list_lineup_run_dates(selected_slate_key)
+    except TypeError:
+        return store.list_lineup_run_dates()
 
 
 @st.cache_data(ttl=600, show_spinner=False)
@@ -209,6 +225,7 @@ def load_projection_snapshot_frame(
 def load_dk_slate_frame_for_date(
     bucket_name: str,
     selected_date: date,
+    slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -219,7 +236,10 @@ def load_dk_slate_frame_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = store.read_dk_slate_csv(selected_date)
+    try:
+        csv_text = store.read_dk_slate_csv(selected_date, slate_key)
+    except TypeError:
+        csv_text = store.read_dk_slate_csv(selected_date)
     if not csv_text or not csv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(csv_text))
@@ -373,6 +393,7 @@ def load_actual_results_frame_for_date(
 def load_first_phantom_summary_for_date(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -383,7 +404,10 @@ def load_first_phantom_summary_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    run_ids = store.list_lineup_run_ids(selected_date)
+    try:
+        run_ids = store.list_lineup_run_ids(selected_date, selected_slate_key)
+    except TypeError:
+        run_ids = store.list_lineup_run_ids(selected_date)
     for run_id in run_ids:
         payload = store.read_phantom_review_summary_json(selected_date, run_id)
         if not isinstance(payload, dict):
@@ -486,6 +510,25 @@ with st.sidebar:
     st.header("Global Agentic Settings")
     bucket_name = st.text_input("GCS Bucket", value=default_bucket, key="global_agentic_bucket")
     gcp_project = st.text_input("GCP Project (optional)", value=default_project, key="global_agentic_project")
+    shared_slate_preset = st.selectbox(
+        "Active Slate Label",
+        options=SLATE_PRESET_OPTIONS,
+        index=0,
+        key="shared_slate_preset",
+        help="Shared slate context used when loading DK slates and lineup runs.",
+    )
+    shared_slate_custom = ""
+    if shared_slate_preset == "Custom":
+        shared_slate_custom = st.text_input(
+            "Custom Active Slate Label",
+            value="Main",
+            key="shared_slate_custom_label",
+        )
+    shared_slate_label = _normalize_slate_label(
+        shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
+    )
+    shared_slate_key = _slate_key_from_label(shared_slate_label)
+    st.caption(f"Active slate: `{shared_slate_label}` (key: `{shared_slate_key}`)")
     end_date = st.date_input("Review End Date", value=default_end_date, key="global_agentic_end_date")
     lookback_days = int(
         st.slider("Lookback Days", min_value=7, max_value=180, value=30, step=1, key="global_agentic_lookback_days")
@@ -550,6 +593,7 @@ if build_packet_clicked:
         if use_saved_run_dates:
             candidate_dates = load_saved_lineup_run_dates(
                 bucket_name=bucket_name.strip(),
+                selected_slate_key=shared_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -606,6 +650,7 @@ if build_packet_clicked:
                 slate_df = load_dk_slate_frame_for_date(
                     bucket_name=bucket_name.strip(),
                     selected_date=review_day,
+                    slate_key=shared_slate_key,
                     gcp_project=gcp_project.strip() or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -635,6 +680,7 @@ if build_packet_clicked:
             phantom_summary_df = load_first_phantom_summary_for_date(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
+                selected_slate_key=shared_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,

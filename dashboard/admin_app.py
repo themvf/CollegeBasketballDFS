@@ -115,6 +115,7 @@ PROJECTION_SALARY_BUCKET_LABELS = {
     "7000_9999": "7000-9999",
     "gte10000": "10000+",
 }
+SLATE_PRESET_OPTIONS = ["Main", "Afternoon", "Full Day", "Night", "Custom"]
 
 
 def _csv_values(text: str | None) -> list[str]:
@@ -138,6 +139,17 @@ def _safe_float_value(value: object, default: float = 0.0) -> float:
 
 def _safe_int_value(value: object, default: int = 0) -> int:
     return int(_safe_float_value(value, float(default)))
+
+
+def _normalize_slate_label(value: object, default: str = "Main") -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return text or default
+
+
+def _slate_key_from_label(value: object, default: str = "main") -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or default
 
 
 def _norm_name_key(value: object) -> str:
@@ -467,40 +479,76 @@ def _filter_frame_by_role(
     return df
 
 
-def _dk_slate_blob_name(slate_date: date) -> str:
-    return f"cbb/dk_slates/{slate_date.isoformat()}_dk_slate.csv"
+def _dk_slate_blob_name(slate_date: date, slate_key: str | None = None) -> str:
+    if slate_key is None:
+        return f"cbb/dk_slates/{slate_date.isoformat()}_dk_slate.csv"
+    safe = _slate_key_from_label(slate_key)
+    return f"cbb/dk_slates/{slate_date.isoformat()}/{safe}_dk_slate.csv"
 
 
-def _read_dk_slate_csv(store: CbbGcsStore, slate_date: date) -> str | None:
+def _read_dk_slate_csv(store: CbbGcsStore, slate_date: date, slate_key: str | None = None) -> str | None:
     reader = getattr(store, "read_dk_slate_csv", None)
     if callable(reader):
-        return reader(slate_date)
-    blob = store.bucket.blob(_dk_slate_blob_name(slate_date))
-    if not blob.exists():
-        return None
-    return blob.download_as_text(encoding="utf-8")
+        try:
+            return reader(slate_date, slate_key)
+        except TypeError:
+            return reader(slate_date)
+    if slate_key is None:
+        candidate_names = [_dk_slate_blob_name(slate_date, "main"), _dk_slate_blob_name(slate_date)]
+    else:
+        primary_name = _dk_slate_blob_name(slate_date, slate_key=slate_key)
+        candidate_names = [primary_name]
+        if _slate_key_from_label(slate_key) == "main":
+            candidate_names.append(_dk_slate_blob_name(slate_date))
+    for blob_name in candidate_names:
+        blob = store.bucket.blob(blob_name)
+        if blob.exists():
+            return blob.download_as_text(encoding="utf-8")
+    return None
 
 
-def _write_dk_slate_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> str:
+def _write_dk_slate_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    csv_text: str,
+    slate_key: str | None = None,
+) -> str:
     writer = getattr(store, "write_dk_slate_csv", None)
     if callable(writer):
-        return writer(slate_date, csv_text)
-    blob_name = _dk_slate_blob_name(slate_date)
+        try:
+            return writer(slate_date, csv_text, slate_key)
+        except TypeError:
+            return writer(slate_date, csv_text)
+    blob_name = _dk_slate_blob_name(slate_date, slate_key=slate_key)
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
 
 
-def _delete_dk_slate_csv(store: CbbGcsStore, slate_date: date) -> tuple[bool, str]:
-    blob_name = _dk_slate_blob_name(slate_date)
+def _delete_dk_slate_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    slate_key: str | None = None,
+) -> tuple[bool, str]:
+    blob_name = _dk_slate_blob_name(slate_date, slate_key=slate_key)
     deleter = getattr(store, "delete_dk_slate_csv", None)
     if callable(deleter):
-        return bool(deleter(slate_date)), blob_name
-    blob = store.bucket.blob(blob_name)
-    if not blob.exists():
-        return False, blob_name
-    blob.delete()
-    return True, blob_name
+        try:
+            return bool(deleter(slate_date, slate_key)), blob_name
+        except TypeError:
+            return bool(deleter(slate_date)), blob_name
+    if slate_key is None:
+        candidate_names = [_dk_slate_blob_name(slate_date, "main"), _dk_slate_blob_name(slate_date)]
+    else:
+        candidate_names = [blob_name]
+        if _slate_key_from_label(slate_key) == "main":
+            candidate_names.append(_dk_slate_blob_name(slate_date))
+    for name in candidate_names:
+        blob = store.bucket.blob(name)
+        if blob.exists():
+            blob.delete()
+            return True, name
+    return False, blob_name
 
 
 def _injuries_blob_name() -> str:
@@ -717,10 +765,20 @@ def persist_lineup_run_bundle(
     store: CbbGcsStore,
     slate_date: date,
     bundle: dict[str, Any],
+    slate_key: str | None = None,
+    slate_label: str | None = None,
 ) -> dict[str, Any]:
     run_id = str(bundle.get("run_id") or _new_lineup_run_id())
     generated_at_utc = str(bundle.get("generated_at_utc") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
     settings = _json_safe(bundle.get("settings") or {})
+    resolved_slate_key = _slate_key_from_label(
+        slate_key or bundle.get("slate_key") or bundle.get("slate_label"),
+        default="main",
+    )
+    resolved_slate_label = _normalize_slate_label(
+        slate_label or bundle.get("slate_label") or resolved_slate_key.replace("_", " ").title(),
+        default="Main",
+    )
     versions = bundle.get("versions") or {}
     version_entries: list[dict[str, Any]] = []
 
@@ -737,6 +795,8 @@ def persist_lineup_run_bundle(
         payload = {
             "run_id": run_id,
             "slate_date": slate_date.isoformat(),
+            "slate_key": resolved_slate_key,
+            "slate_label": resolved_slate_label,
             "generated_at_utc": generated_at_utc,
             "run_mode": str(bundle.get("run_mode") or "single"),
             "version_key": version_name,
@@ -749,9 +809,32 @@ def persist_lineup_run_bundle(
             "lineups": _json_safe(lineups),
             "dk_upload_csv": upload_csv,
         }
-        json_blob = store.write_lineup_version_json(slate_date, run_id, version_name, payload)
-        csv_blob = store.write_lineup_version_csv(slate_date, run_id, version_name, lineups_csv)
-        upload_blob = store.write_lineup_version_upload_csv(slate_date, run_id, version_name, upload_csv)
+        try:
+            json_blob = store.write_lineup_version_json(
+                slate_date,
+                run_id,
+                version_name,
+                payload,
+                slate_key=resolved_slate_key,
+            )
+            csv_blob = store.write_lineup_version_csv(
+                slate_date,
+                run_id,
+                version_name,
+                lineups_csv,
+                slate_key=resolved_slate_key,
+            )
+            upload_blob = store.write_lineup_version_upload_csv(
+                slate_date,
+                run_id,
+                version_name,
+                upload_csv,
+                slate_key=resolved_slate_key,
+            )
+        except TypeError:
+            json_blob = store.write_lineup_version_json(slate_date, run_id, version_name, payload)
+            csv_blob = store.write_lineup_version_csv(slate_date, run_id, version_name, lineups_csv)
+            upload_blob = store.write_lineup_version_upload_csv(slate_date, run_id, version_name, upload_csv)
         version_entries.append(
             {
                 "version_key": version_name,
@@ -770,14 +853,26 @@ def persist_lineup_run_bundle(
     manifest = {
         "run_id": run_id,
         "slate_date": slate_date.isoformat(),
+        "slate_key": resolved_slate_key,
+        "slate_label": resolved_slate_label,
         "generated_at_utc": generated_at_utc,
         "run_mode": str(bundle.get("run_mode") or "single"),
         "settings": settings,
         "versions": version_entries,
     }
-    manifest_blob = store.write_lineup_run_manifest_json(slate_date, run_id, manifest)
+    try:
+        manifest_blob = store.write_lineup_run_manifest_json(
+            slate_date,
+            run_id,
+            manifest,
+            slate_key=resolved_slate_key,
+        )
+    except TypeError:
+        manifest_blob = store.write_lineup_run_manifest_json(slate_date, run_id, manifest)
     return {
         "run_id": run_id,
+        "slate_key": resolved_slate_key,
+        "slate_label": resolved_slate_label,
         "manifest_blob": manifest_blob,
         "version_count": len(version_entries),
         "manifest": manifest,
@@ -788,6 +883,7 @@ def persist_lineup_run_bundle(
 def load_saved_lineup_run_manifests(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -798,11 +894,24 @@ def load_saved_lineup_run_manifests(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    run_ids = store.list_lineup_run_ids(selected_date)
+    try:
+        run_ids = store.list_lineup_run_ids(selected_date, selected_slate_key)
+    except TypeError:
+        run_ids = store.list_lineup_run_ids(selected_date)
     manifests: list[dict[str, Any]] = []
     for run_id in run_ids:
-        payload = store.read_lineup_run_manifest_json(selected_date, run_id)
+        try:
+            payload = store.read_lineup_run_manifest_json(selected_date, run_id, selected_slate_key)
+        except TypeError:
+            payload = store.read_lineup_run_manifest_json(selected_date, run_id)
         if isinstance(payload, dict):
+            if selected_slate_key:
+                manifest_slate_key = _slate_key_from_label(
+                    payload.get("slate_key") or payload.get("slate_label"),
+                    default="main",
+                )
+                if manifest_slate_key != _slate_key_from_label(selected_slate_key):
+                    continue
             manifests.append(payload)
     manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
     return manifests
@@ -811,6 +920,7 @@ def load_saved_lineup_run_manifests(
 @st.cache_data(ttl=300, show_spinner=False)
 def load_saved_lineup_run_dates(
     bucket_name: str,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -821,13 +931,17 @@ def load_saved_lineup_run_dates(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    return store.list_lineup_run_dates()
+    try:
+        return store.list_lineup_run_dates(selected_slate_key)
+    except TypeError:
+        return store.list_lineup_run_dates()
 
 
 @st.cache_data(ttl=300, show_spinner=False)
 def compute_projection_calibration_from_phantom(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     lookback_days: int,
     gcp_project: str | None,
     service_account_json: str | None,
@@ -851,7 +965,10 @@ def compute_projection_calibration_from_phantom(
             "weighted_avg_delta": 0.0,
         }
     start_date = end_date - timedelta(days=max(1, int(lookback_days)) - 1)
-    run_dates = store.list_lineup_run_dates()
+    try:
+        run_dates = store.list_lineup_run_dates(selected_slate_key)
+    except TypeError:
+        run_dates = store.list_lineup_run_dates()
     candidate_dates = [d for d in run_dates if isinstance(d, date) and start_date <= d <= end_date]
     if not candidate_dates:
         return {
@@ -869,7 +986,10 @@ def compute_projection_calibration_from_phantom(
     total_lineups = 0.0
     used_dates = 0
     for run_date in sorted(candidate_dates, reverse=True):
-        run_ids = store.list_lineup_run_ids(run_date)
+        try:
+            run_ids = store.list_lineup_run_ids(run_date, selected_slate_key)
+        except TypeError:
+            run_ids = store.list_lineup_run_ids(run_date)
         summary_df = pd.DataFrame()
         for run_id in run_ids:
             payload = store.read_phantom_review_summary_json(run_date, run_id)
@@ -961,6 +1081,7 @@ def _default_salary_bucket_calibration(
 def compute_projection_salary_bucket_calibration(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     lookback_days: int,
     min_samples_per_bucket: int,
     gcp_project: str | None,
@@ -983,6 +1104,7 @@ def compute_projection_salary_bucket_calibration(
         slate_df = load_dk_slate_frame_for_date(
             bucket_name=bucket_name,
             selected_date=cursor,
+            slate_key=selected_slate_key,
             gcp_project=gcp_project,
             service_account_json=service_account_json,
             service_account_json_b64=service_account_json_b64,
@@ -1082,6 +1204,7 @@ def load_saved_lineup_version_payload(
     selected_date: date,
     run_id: str,
     version_key: str,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -1092,7 +1215,10 @@ def load_saved_lineup_version_payload(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    payload = store.read_lineup_version_json(selected_date, run_id, version_key)
+    try:
+        payload = store.read_lineup_version_json(selected_date, run_id, version_key, selected_slate_key)
+    except TypeError:
+        payload = store.read_lineup_version_json(selected_date, run_id, version_key)
     if not isinstance(payload, dict):
         return None
     return payload
@@ -1230,6 +1356,7 @@ def load_props_frame_for_date(
 def load_dk_slate_frame_for_date(
     bucket_name: str,
     selected_date: date,
+    slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -1240,7 +1367,7 @@ def load_dk_slate_frame_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = _read_dk_slate_csv(store, selected_date)
+    csv_text = _read_dk_slate_csv(store, selected_date, slate_key=slate_key)
     if not csv_text or not csv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(csv_text))
@@ -1655,6 +1782,7 @@ def load_contest_standings_frame(
 def build_optimizer_pool_for_date(
     bucket_name: str,
     slate_date: date,
+    slate_key: str | None,
     bookmaker: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
@@ -1663,6 +1791,7 @@ def build_optimizer_pool_for_date(
     slate_df = load_dk_slate_frame_for_date(
         bucket_name=bucket_name,
         selected_date=slate_date,
+        slate_key=slate_key,
         gcp_project=gcp_project,
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
@@ -1742,6 +1871,29 @@ with st.sidebar:
         value=default_bookmakers,
         help="Comma-separated bookmaker keys (example: fanduel). Leave blank for all.",
     )
+    shared_slate_preset = st.selectbox(
+        "Active Slate Label",
+        options=SLATE_PRESET_OPTIONS,
+        index=0,
+        key="shared_slate_preset",
+        help=(
+            "Shared across DK Slate, Slate + Vegas, Lineup Generator, "
+            "Tournament Review, and Game Slate Agent."
+        ),
+    )
+    shared_slate_custom = ""
+    if shared_slate_preset == "Custom":
+        shared_slate_custom = st.text_input(
+            "Custom Active Slate Label",
+            value="Main",
+            key="shared_slate_custom_label",
+            help="Example: Early, Turbo, Showdown.",
+        )
+    shared_slate_label = _normalize_slate_label(
+        shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
+    )
+    shared_slate_key = _slate_key_from_label(shared_slate_label)
+    st.caption(f"Active slate: `{shared_slate_label}` (key: `{shared_slate_key}`)")
     st.caption(
         "The Odds API key source: "
         + ("loaded from secrets/env" if odds_api_key else "missing (`the_odds_api_key`)")
@@ -1909,15 +2061,20 @@ with tab_backfill:
 with tab_dk:
     st.subheader("DraftKings Slate Upload")
     dk_slate_date = st.date_input("DraftKings Slate Date", value=game_selected_date, key="dk_slate_date")
-    st.caption("Each date stores one DK slate file. Uploading/replacing only affects the selected date.")
+    dk_slate_label = shared_slate_label
+    dk_slate_key = shared_slate_key
+    st.caption(
+        "Each date + slate label stores a separate DK slate file. "
+        f"Using shared slate `{dk_slate_label}` (key: `{dk_slate_key}`)."
+    )
     uploaded_dk_slate = st.file_uploader(
         "Upload DraftKings Slate CSV",
         type=["csv"],
         key="dk_slate_upload",
-        help="Upload the DraftKings player/salary slate CSV for this date.",
+        help="Upload the DraftKings player/salary slate CSV for this date+slate.",
     )
     delete_dk_slate_confirm = st.checkbox(
-        "Confirm delete for selected date",
+        "Confirm delete for selected date + slate",
         value=False,
         key="confirm_delete_dk_slate",
     )
@@ -2057,7 +2214,7 @@ with tab_dk:
         if not bucket_name:
             st.error("Set a GCS bucket before deleting DraftKings slate.")
         elif not delete_dk_slate_confirm:
-            st.error("Check `Confirm delete for selected date` before deleting.")
+            st.error("Check `Confirm delete for selected date + slate` before deleting.")
         else:
             with st.spinner("Deleting DraftKings slate from GCS..."):
                 try:
@@ -2067,13 +2224,16 @@ with tab_dk:
                         project=gcp_project or None,
                     )
                     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                    deleted, blob_name = _delete_dk_slate_csv(store, dk_slate_date)
+                    deleted, blob_name = _delete_dk_slate_csv(store, dk_slate_date, slate_key=dk_slate_key)
                     load_dk_slate_frame_for_date.clear()
                     if deleted:
                         st.session_state.pop("cbb_dk_upload_summary", None)
                         st.success(f"Deleted `{blob_name}`")
                     else:
-                        st.warning(f"No cached slate found for selected date. Expected `{blob_name}`")
+                        st.warning(
+                            "No cached slate found for selected date+slate. "
+                            f"Expected `{blob_name}`"
+                        )
                 except Exception as exc:
                     st.exception(exc)
 
@@ -2098,10 +2258,17 @@ with tab_dk:
                             project=gcp_project or None,
                         )
                         store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                        blob_name = _write_dk_slate_csv(store, dk_slate_date, csv_text)
+                        blob_name = _write_dk_slate_csv(
+                            store,
+                            dk_slate_date,
+                            csv_text,
+                            slate_key=dk_slate_key,
+                        )
                         load_dk_slate_frame_for_date.clear()
                         st.session_state["cbb_dk_upload_summary"] = {
                             "slate_date": dk_slate_date.isoformat(),
+                            "slate_label": dk_slate_label,
+                            "slate_key": dk_slate_key,
                             "bucket_name": bucket_name,
                             "dk_slate_blob": blob_name,
                             "source_file_name": uploaded_dk_slate.name,
@@ -2243,12 +2410,16 @@ with tab_dk:
             dk_df = load_dk_slate_frame_for_date(
                 bucket_name=bucket_name,
                 selected_date=dk_slate_date,
+                slate_key=dk_slate_key,
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
             )
             if dk_df.empty:
-                st.warning("No cached DraftKings slate found for selected date. Upload a CSV first.")
+                st.warning(
+                    "No cached DraftKings slate found for selected date+slate. "
+                    "Upload a CSV first."
+                )
             else:
                 st.caption(f"Rows: {len(dk_df):,} | Columns: {len(dk_df.columns):,}")
                 st.dataframe(dk_df, hide_index=True, use_container_width=True)
@@ -2523,6 +2694,7 @@ with tab_slate_vegas:
             pool_df, removed_injured_df, raw_slate_df, _, season_history_df = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
                 slate_date=slate_vegas_date,
+                slate_key=shared_slate_key,
                 bookmaker=(vegas_bookmaker.strip() or None),
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
@@ -2689,6 +2861,9 @@ with tab_lineups:
         st.session_state["auto_save_runs_to_gcs"] = True
     auto_save_runs_to_gcs = bool(st.session_state.get("auto_save_runs_to_gcs", True))
     lineup_slate_date = st.date_input("Lineup Slate Date", value=game_selected_date, key="lineup_slate_date")
+    lineup_slate_label = shared_slate_label
+    lineup_slate_key = shared_slate_key
+    st.caption(f"Using slate `{lineup_slate_label}` (key: `{lineup_slate_key}`) for lineup reads/saves.")
     lineup_bookmaker = st.text_input(
         "Lineup Bookmaker Source",
         value=(default_bookmakers_filter.strip() or "fanduel"),
@@ -2759,7 +2934,7 @@ with tab_lineups:
     apply_game_agent_stack_bias = bool(
         ga1.checkbox(
             "Apply Game Agent Stack Bias",
-            value=False,
+            value=True,
             disabled=not game_packet_ready,
             help=(
                 "Uses Game Slate packet stack targets to boost objective scores for matching games, "
@@ -2944,6 +3119,7 @@ with tab_lineups:
             pool_df, removed_injured_df, raw_slate_df, _, _ = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
                 slate_date=lineup_slate_date,
+                slate_key=lineup_slate_key,
                 bookmaker=(lineup_bookmaker.strip() or None),
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
@@ -2951,7 +3127,10 @@ with tab_lineups:
             )
 
             if raw_slate_df.empty:
-                st.warning("No DraftKings slate found for selected optimizer date. Upload in `DK Slate` tab first.")
+                st.warning(
+                    "No DraftKings slate found for selected optimizer date+slate. "
+                    "Upload in `DK Slate` tab first."
+                )
             elif pool_df.empty:
                 st.warning("No players available after injury filtering. Check `Injuries` tab or slate date.")
             else:
@@ -2994,6 +3173,12 @@ with tab_lineups:
 
                 generate_lineups_clicked = st.button("Generate DK Lineups", key="generate_dk_lineups")
                 if generate_lineups_clicked:
+                    # Prevent stale prior-date run data from being shown/exported if generation fails mid-run.
+                    st.session_state.pop("cbb_generated_run_bundle", None)
+                    st.session_state.pop("cbb_active_version_key", None)
+                    st.session_state.pop("cbb_generated_lineups", None)
+                    st.session_state.pop("cbb_generated_lineups_warnings", None)
+                    st.session_state.pop("cbb_generated_upload_csv", None)
                     locked_ids = [label_to_id[x] for x in locked_labels]
                     excluded_ids = [label_to_id[x] for x in excluded_labels]
                     progress_text = st.empty()
@@ -3009,6 +3194,7 @@ with tab_lineups:
                         calibration_meta = compute_projection_calibration_from_phantom(
                             bucket_name=bucket_name,
                             selected_date=lineup_slate_date,
+                            selected_slate_key=lineup_slate_key,
                             lookback_days=calibration_lookback_days,
                             gcp_project=gcp_project or None,
                             service_account_json=cred_json,
@@ -3026,6 +3212,7 @@ with tab_lineups:
                         salary_bucket_calibration_meta = compute_projection_salary_bucket_calibration(
                             bucket_name=bucket_name,
                             selected_date=lineup_slate_date,
+                            selected_slate_key=lineup_slate_key,
                             lookback_days=bucket_calibration_lookback_days,
                             min_samples_per_bucket=bucket_calibration_min_samples,
                             gcp_project=gcp_project or None,
@@ -3249,8 +3436,12 @@ with tab_lineups:
                         "run_id": _new_lineup_run_id(),
                         "generated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
                         "slate_date": lineup_slate_date.isoformat(),
+                        "slate_label": lineup_slate_label,
+                        "slate_key": lineup_slate_key,
                         "run_mode": run_mode_key,
                         "settings": {
+                            "slate_label": lineup_slate_label,
+                            "slate_key": lineup_slate_key,
                             "selected_model_key": selected_model_key,
                             "lineup_count": lineup_count,
                             "contest_type": contest_type,
@@ -3298,7 +3489,13 @@ with tab_lineups:
                             project=gcp_project or None,
                         )
                         store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                        saved_meta = persist_lineup_run_bundle(store, lineup_slate_date, run_bundle)
+                        saved_meta = persist_lineup_run_bundle(
+                            store,
+                            lineup_slate_date,
+                            run_bundle,
+                            slate_key=lineup_slate_key,
+                            slate_label=lineup_slate_label,
+                        )
                         st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
                         load_saved_lineup_run_manifests.clear()
                         load_saved_lineup_version_payload.clear()
@@ -3308,7 +3505,27 @@ with tab_lineups:
                         )
 
                 run_bundle = st.session_state.get("cbb_generated_run_bundle") or {}
+                run_bundle_slate_date = str(run_bundle.get("slate_date") or "").strip()
+                run_bundle_slate_key = _slate_key_from_label(
+                    run_bundle.get("slate_key") or run_bundle.get("slate_label"),
+                    default="main",
+                )
+                selected_lineup_slate_date = lineup_slate_date.isoformat()
+                selected_lineup_slate_key = _slate_key_from_label(lineup_slate_key)
                 generated_versions = run_bundle.get("versions") or {}
+                if generated_versions and run_bundle_slate_date and (
+                    run_bundle_slate_date != selected_lineup_slate_date
+                    or run_bundle_slate_key != selected_lineup_slate_key
+                ):
+                    st.info(
+                        "Lineup Generator only shows runs for the selected slate date+label. "
+                        f"Current in-session run is `{run_bundle_slate_date}` (`{run_bundle_slate_key}`); "
+                        "use `Tournament Review` for historical runs."
+                    )
+                    generated_versions = {}
+                    st.session_state.pop("cbb_generated_lineups", None)
+                    st.session_state.pop("cbb_generated_lineups_warnings", None)
+                    st.session_state.pop("cbb_generated_upload_csv", None)
                 if generated_versions:
                     version_keys = list(generated_versions.keys())
                     default_version = st.session_state.get("cbb_active_version_key")
@@ -3351,7 +3568,7 @@ with tab_lineups:
                     g4.metric("Run Versions", int(len(generated_versions)))
                     st.caption(
                         f"Run ID: `{run_bundle.get('run_id', '')}` | Mode: `{run_bundle.get('run_mode', 'single')}` | "
-                        f"Version: `{active_version_key}`"
+                        f"Slate: `{run_bundle.get('slate_label', run_bundle_slate_key)}` | Version: `{active_version_key}`"
                     )
 
                     if generated:
@@ -3363,10 +3580,12 @@ with tab_lineups:
                             st.subheader("Generated Lineups (Slot View)")
                             st.dataframe(slots_df, hide_index=True, use_container_width=True)
 
+                        export_date = run_bundle_slate_date or selected_lineup_slate_date
+                        export_slate = run_bundle_slate_key or selected_lineup_slate_key
                         st.download_button(
                             "Download DK Upload CSV",
                             data=upload_csv,
-                            file_name=f"dk_lineups_{lineup_slate_date.isoformat()}_{active_version_key}.csv",
+                            file_name=f"dk_lineups_{export_date}_{export_slate}_{active_version_key}.csv",
                             mime="text/csv",
                             key="download_dk_upload_csv",
                         )
@@ -3393,163 +3612,171 @@ with tab_lineups:
                     if not current_versions:
                         st.error("No generated run is loaded in session to save.")
                     else:
-                        save_date = lineup_slate_date
                         bundle_slate = str(current_run_bundle.get("slate_date") or "").strip()
-                        if bundle_slate:
-                            try:
-                                save_date = date.fromisoformat(bundle_slate)
-                            except ValueError:
-                                save_date = lineup_slate_date
-                        client = build_storage_client(
-                            service_account_json=cred_json,
-                            service_account_json_b64=cred_json_b64,
-                            project=gcp_project or None,
+                        bundle_slate_key = _slate_key_from_label(
+                            current_run_bundle.get("slate_key") or current_run_bundle.get("slate_label"),
+                            default="main",
                         )
-                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                        saved_meta = persist_lineup_run_bundle(store, save_date, current_run_bundle)
-                        st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
-                        load_saved_lineup_run_dates.clear()
-                        load_saved_lineup_run_manifests.clear()
-                        load_saved_lineup_version_payload.clear()
-                        st.success(
-                            f"Saved current run `{saved_meta.get('run_id')}` "
-                            f"to `{saved_meta.get('manifest_blob')}`."
-                        )
+                        current_picker_slate_key = _slate_key_from_label(lineup_slate_key)
+                        if bundle_slate and (
+                            bundle_slate != lineup_slate_date.isoformat()
+                            or bundle_slate_key != current_picker_slate_key
+                        ):
+                            st.error(
+                                "Current in-session run is for a different slate date/label "
+                                f"(`{bundle_slate}` / `{bundle_slate_key}`). "
+                                "Switch `Lineup Slate Date/Lineup Slate` to match or generate a new run."
+                            )
+                        else:
+                            save_date = lineup_slate_date
+                            if bundle_slate:
+                                try:
+                                    save_date = date.fromisoformat(bundle_slate)
+                                except ValueError:
+                                    save_date = lineup_slate_date
+                            client = build_storage_client(
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                                project=gcp_project or None,
+                            )
+                            store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                            save_slate_key = bundle_slate_key or current_picker_slate_key
+                            save_slate_label = _normalize_slate_label(
+                                current_run_bundle.get("slate_label") or lineup_slate_label
+                            )
+                            saved_meta = persist_lineup_run_bundle(
+                                store,
+                                save_date,
+                                current_run_bundle,
+                                slate_key=save_slate_key,
+                                slate_label=save_slate_label,
+                            )
+                            st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
+                            load_saved_lineup_run_dates.clear()
+                            load_saved_lineup_run_manifests.clear()
+                            load_saved_lineup_version_payload.clear()
+                            st.success(
+                                f"Saved current run `{saved_meta.get('run_id')}` "
+                                f"to `{saved_meta.get('manifest_blob')}`."
+                            )
 
-                saved_run_dates = load_saved_lineup_run_dates(
+                st.caption(
+                    f"Showing saved runs for `{lineup_slate_date.isoformat()}` + "
+                    f"`{lineup_slate_label}` only. "
+                    "Use `Tournament Review` to inspect historical dates."
+                )
+                sr1, sr2 = st.columns([1, 2])
+                load_latest_clicked = sr1.button("Load Latest Run", key="load_latest_saved_run")
+                run_id_filter = sr2.text_input("Filter Run ID (optional)", key="saved_run_id_filter")
+
+                merged_manifests: list[dict[str, Any]] = []
+                manifests_for_date = load_saved_lineup_run_manifests(
                     bucket_name=bucket_name,
+                    selected_date=lineup_slate_date,
+                    selected_slate_key=lineup_slate_key,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
                 )
-                if not saved_run_dates:
-                    st.info("No saved lineup runs found in GCS yet.")
+                for manifest in manifests_for_date:
+                    entry = dict(manifest)
+                    entry["_saved_date"] = lineup_slate_date
+                    merged_manifests.append(entry)
+                merged_manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
+
+                if run_id_filter.strip():
+                    needle = run_id_filter.strip().lower()
+                    merged_manifests = [
+                        m for m in merged_manifests if needle in str(m.get("run_id") or "").strip().lower()
+                    ]
+
+                if not merged_manifests:
+                    st.info("No saved runs match the selected date/filter.")
                 else:
-                    date_options = ["All Dates"] + [d.isoformat() for d in saved_run_dates]
-                    default_date_label = lineup_slate_date.isoformat()
-                    if default_date_label not in date_options:
-                        default_date_label = date_options[0]
-                    selected_saved_date_label = st.selectbox(
-                        "Saved Run Date",
-                        options=date_options,
-                        index=date_options.index(default_date_label),
-                        key="saved_run_date_picker",
+                    run_option_map: dict[str, dict[str, Any]] = {}
+                    run_options: list[str] = []
+                    for manifest in merged_manifests:
+                        run_id = str(manifest.get("run_id") or "")
+                        generated_at = str(manifest.get("generated_at_utc") or "")
+                        run_mode = str(manifest.get("run_mode") or "single")
+                        manifest_slate_label = _normalize_slate_label(
+                            manifest.get("slate_label") or manifest.get("slate_key")
+                        )
+                        label = f"{generated_at} | {run_id} | {run_mode} | {manifest_slate_label}"
+                        run_options.append(label)
+                        run_option_map[label] = manifest
+
+                    if load_latest_clicked and run_options:
+                        st.session_state["saved_run_picker"] = run_options[0]
+                    if str(st.session_state.get("saved_run_picker", "")) not in run_options:
+                        st.session_state.pop("saved_run_picker", None)
+
+                    selected_run_label = st.selectbox(
+                        "Saved Run",
+                        options=run_options,
+                        index=0,
+                        key="saved_run_picker",
                     )
-                    sr1, sr2 = st.columns([1, 2])
-                    load_latest_clicked = sr1.button("Load Latest Run", key="load_latest_saved_run")
-                    run_id_filter = sr2.text_input("Filter Run ID (optional)", key="saved_run_id_filter")
+                    selected_manifest = run_option_map[selected_run_label]
+                    selected_manifest_date = lineup_slate_date
+                    selected_manifest_slate_key = _slate_key_from_label(
+                        selected_manifest.get("slate_key") or selected_manifest.get("slate_label"),
+                        default=_slate_key_from_label(lineup_slate_key),
+                    )
 
-                    selected_dates: list[date]
-                    if selected_saved_date_label == "All Dates":
-                        selected_dates = saved_run_dates
-                    else:
-                        selected_dates = [date.fromisoformat(selected_saved_date_label)]
-
-                    merged_manifests: list[dict[str, Any]] = []
-                    for selected_saved_date in selected_dates:
-                        manifests_for_date = load_saved_lineup_run_manifests(
-                            bucket_name=bucket_name,
-                            selected_date=selected_saved_date,
-                            gcp_project=gcp_project or None,
-                            service_account_json=cred_json,
-                            service_account_json_b64=cred_json_b64,
-                        )
-                        for manifest in manifests_for_date:
-                            entry = dict(manifest)
-                            entry["_saved_date"] = selected_saved_date
-                            merged_manifests.append(entry)
-                    merged_manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
-
-                    if run_id_filter.strip():
-                        needle = run_id_filter.strip().lower()
-                        merged_manifests = [
-                            m for m in merged_manifests if needle in str(m.get("run_id") or "").strip().lower()
-                        ]
-
-                    if not merged_manifests:
-                        st.info("No saved runs match the selected date/filter.")
-                    else:
-                        run_option_map: dict[str, dict[str, Any]] = {}
-                        run_options: list[str] = []
-                        for manifest in merged_manifests:
-                            run_id = str(manifest.get("run_id") or "")
-                            generated_at = str(manifest.get("generated_at_utc") or "")
-                            run_mode = str(manifest.get("run_mode") or "single")
-                            saved_date_obj = manifest.get("_saved_date")
-                            saved_date_str = (
-                                saved_date_obj.isoformat() if isinstance(saved_date_obj, date) else str(saved_date_obj or "")
+                    versions_meta = selected_manifest.get("versions") or []
+                    if versions_meta:
+                        version_meta_map = {str(v.get("version_key") or ""): v for v in versions_meta}
+                        saved_version_keys = [k for k in version_meta_map.keys() if k]
+                        if saved_version_keys:
+                            current_saved_version = str(st.session_state.get("saved_run_version_picker", "")).strip()
+                            if current_saved_version not in saved_version_keys:
+                                st.session_state["saved_run_version_picker"] = saved_version_keys[0]
+                            selected_saved_version = st.selectbox(
+                                "Saved Version",
+                                options=saved_version_keys,
+                                index=0,
+                                format_func=lambda k: (
+                                    f"{version_meta_map[k].get('version_label', k)} "
+                                    f"[{k} | "
+                                    f"{(version_meta_map[k].get('model_profile') or ('tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'))}]"
+                                ),
+                                key="saved_run_version_picker",
                             )
-                            label = f"{saved_date_str} | {generated_at} | {run_id} | {run_mode}"
-                            run_options.append(label)
-                            run_option_map[label] = manifest
-
-                        if load_latest_clicked and run_options:
-                            st.session_state["saved_run_picker"] = run_options[0]
-                        if str(st.session_state.get("saved_run_picker", "")) not in run_options:
-                            st.session_state.pop("saved_run_picker", None)
-
-                        selected_run_label = st.selectbox(
-                            "Saved Run",
-                            options=run_options,
-                            index=0,
-                            key="saved_run_picker",
-                        )
-                        selected_manifest = run_option_map[selected_run_label]
-                        selected_manifest_date = selected_manifest.get("_saved_date")
-                        if not isinstance(selected_manifest_date, date):
-                            selected_manifest_date = lineup_slate_date
-
-                        versions_meta = selected_manifest.get("versions") or []
-                        if versions_meta:
-                            version_meta_map = {str(v.get("version_key") or ""): v for v in versions_meta}
-                            saved_version_keys = [k for k in version_meta_map.keys() if k]
-                            if saved_version_keys:
-                                current_saved_version = str(st.session_state.get("saved_run_version_picker", "")).strip()
-                                if current_saved_version not in saved_version_keys:
-                                    st.session_state["saved_run_version_picker"] = saved_version_keys[0]
-                                selected_saved_version = st.selectbox(
-                                    "Saved Version",
-                                    options=saved_version_keys,
-                                    index=0,
-                                    format_func=lambda k: (
-                                        f"{version_meta_map[k].get('version_label', k)} "
-                                        f"[{k} | "
-                                        f"{(version_meta_map[k].get('model_profile') or ('tail' if bool(version_meta_map[k].get('include_tail_signals', False)) else 'legacy'))}]"
-                                    ),
-                                    key="saved_run_version_picker",
-                                )
-                                saved_payload = load_saved_lineup_version_payload(
-                                    bucket_name=bucket_name,
-                                    selected_date=selected_manifest_date,
-                                    run_id=str(selected_manifest.get("run_id") or ""),
-                                    version_key=selected_saved_version,
-                                    gcp_project=gcp_project or None,
-                                    service_account_json=cred_json,
-                                    service_account_json_b64=cred_json_b64,
-                                )
-                                if isinstance(saved_payload, dict):
-                                    saved_lineups = saved_payload.get("lineups") or []
-                                    saved_warnings = [str(x) for x in (saved_payload.get("warnings") or [])]
-                                    if saved_warnings:
-                                        for msg in saved_warnings:
-                                            st.warning(f"[Saved] {msg}")
-                                    if saved_lineups:
-                                        saved_summary_df = lineups_summary_frame(saved_lineups)
-                                        st.dataframe(saved_summary_df, hide_index=True, use_container_width=True)
-                                        saved_slots_df = lineups_slots_frame(saved_lineups)
-                                        if not saved_slots_df.empty:
-                                            st.dataframe(saved_slots_df, hide_index=True, use_container_width=True)
-                                        saved_upload_csv = str(saved_payload.get("dk_upload_csv") or build_dk_upload_csv(saved_lineups))
-                                        st.download_button(
-                                            "Download Saved DK Upload CSV",
-                                            data=saved_upload_csv,
-                                            file_name=(
-                                                f"dk_lineups_{selected_manifest_date.isoformat()}_"
-                                                f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
-                                            ),
-                                            mime="text/csv",
-                                            key=f"download_saved_dk_upload_csv_{selected_saved_version}",
-                                        )
+                            saved_payload = load_saved_lineup_version_payload(
+                                bucket_name=bucket_name,
+                                selected_date=selected_manifest_date,
+                                run_id=str(selected_manifest.get("run_id") or ""),
+                                version_key=selected_saved_version,
+                                selected_slate_key=selected_manifest_slate_key,
+                                gcp_project=gcp_project or None,
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                            )
+                            if isinstance(saved_payload, dict):
+                                saved_lineups = saved_payload.get("lineups") or []
+                                saved_warnings = [str(x) for x in (saved_payload.get("warnings") or [])]
+                                if saved_warnings:
+                                    for msg in saved_warnings:
+                                        st.warning(f"[Saved] {msg}")
+                                if saved_lineups:
+                                    saved_summary_df = lineups_summary_frame(saved_lineups)
+                                    st.dataframe(saved_summary_df, hide_index=True, use_container_width=True)
+                                    saved_slots_df = lineups_slots_frame(saved_lineups)
+                                    if not saved_slots_df.empty:
+                                        st.dataframe(saved_slots_df, hide_index=True, use_container_width=True)
+                                    saved_upload_csv = str(saved_payload.get("dk_upload_csv") or build_dk_upload_csv(saved_lineups))
+                                    st.download_button(
+                                        "Download Saved DK Upload CSV",
+                                        data=saved_upload_csv,
+                                        file_name=(
+                                            f"dk_lineups_{selected_manifest_date.isoformat()}_"
+                                            f"{selected_manifest_slate_key}_"
+                                            f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
+                                        ),
+                                        mime="text/csv",
+                                        key=f"download_saved_dk_upload_csv_{selected_saved_version}",
+                                    )
         except Exception as exc:
             st.exception(exc)
 
@@ -3873,6 +4100,7 @@ with tab_tournament_review:
                 slate_df = load_dk_slate_frame_for_date(
                     bucket_name=bucket_name,
                     selected_date=tr_date,
+                    slate_key=shared_slate_key,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -3904,6 +4132,7 @@ with tab_tournament_review:
                     fallback_pool, _, _, _, _ = build_optimizer_pool_for_date(
                         bucket_name=bucket_name,
                         slate_date=tr_date,
+                        slate_key=shared_slate_key,
                         bookmaker=(default_bookmakers_filter.strip() or None),
                         gcp_project=gcp_project or None,
                         service_account_json=cred_json,
@@ -4319,6 +4548,7 @@ with tab_tournament_review:
             phantom_manifests = load_saved_lineup_run_manifests(
                 bucket_name=bucket_name,
                 selected_date=tr_date,
+                selected_slate_key=shared_slate_key,
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -4332,7 +4562,8 @@ with tab_tournament_review:
                     run_id = str(manifest.get("run_id") or "")
                     generated_at = str(manifest.get("generated_at_utc") or "")
                     run_mode = str(manifest.get("run_mode") or "single")
-                    label = f"{generated_at} | {run_id} | {run_mode}"
+                    run_slate = _normalize_slate_label(manifest.get("slate_label") or manifest.get("slate_key"))
+                    label = f"{generated_at} | {run_id} | {run_mode} | {run_slate}"
                     run_options.append(label)
                     run_option_map[label] = manifest
 
@@ -4344,6 +4575,10 @@ with tab_tournament_review:
                 )
                 selected_manifest = run_option_map[selected_run_label]
                 selected_run_id = str(selected_manifest.get("run_id") or "")
+                selected_manifest_slate_key = _slate_key_from_label(
+                    selected_manifest.get("slate_key") or selected_manifest.get("slate_label"),
+                    default="main",
+                )
                 version_meta_list = selected_manifest.get("versions") or []
                 version_meta_map = {str(v.get("version_key") or ""): v for v in version_meta_list}
                 available_version_keys = [k for k in version_meta_map.keys() if k]
@@ -4389,6 +4624,7 @@ with tab_tournament_review:
                                         selected_date=tr_date,
                                         run_id=selected_run_id,
                                         version_key=version_key,
+                                        selected_slate_key=selected_manifest_slate_key,
                                         gcp_project=gcp_project or None,
                                         service_account_json=cred_json,
                                         service_account_json_b64=cred_json_b64,
@@ -4797,6 +5033,7 @@ with tab_agentic_review:
                     if use_saved_run_dates:
                         candidate_dates = load_saved_lineup_run_dates(
                             bucket_name=bucket_name,
+                            selected_slate_key=shared_slate_key,
                             gcp_project=gcp_project or None,
                             service_account_json=cred_json,
                             service_account_json_b64=cred_json_b64,
@@ -4886,7 +5123,10 @@ with tab_agentic_review:
                         phantom_summary_day_df = pd.DataFrame()
                         if store is not None:
                             try:
-                                run_ids = store.list_lineup_run_ids(review_day)
+                                try:
+                                    run_ids = store.list_lineup_run_ids(review_day, shared_slate_key)
+                                except TypeError:
+                                    run_ids = store.list_lineup_run_ids(review_day)
                                 for run_id in run_ids:
                                     summary_payload = store.read_phantom_review_summary_json(review_day, run_id)
                                     if not isinstance(summary_payload, dict):
@@ -4992,16 +5232,36 @@ with tab_agentic_review:
                     else:
                         with st.spinner("Generating global AI recommendations..."):
                             try:
+                                global_max_tokens = int(st.session_state.get("ai_review_max_output_tokens", 1800))
                                 global_ai_text = request_openai_review(
                                     api_key=openai_key,
                                     user_prompt=global_user_prompt,
                                     system_prompt=AI_REVIEW_SYSTEM_PROMPT,
                                     model=str(st.session_state.get("ai_review_model", "gpt-5-mini")),
-                                    max_output_tokens=int(st.session_state.get("ai_review_max_output_tokens", 1800)),
+                                    max_output_tokens=global_max_tokens,
                                 )
                                 st.session_state["cbb_global_ai_review_output"] = global_ai_text
                             except Exception as exc:
-                                st.exception(exc)
+                                exc_text = str(exc or "")
+                                if "max_output_tokens" in exc_text.lower():
+                                    retry_tokens = min(8000, max(global_max_tokens + 800, int(global_max_tokens * 1.8)))
+                                    try:
+                                        st.caption(
+                                            "Global review hit max-output truncation; retrying with "
+                                            f"`max_output_tokens={retry_tokens}`."
+                                        )
+                                        global_ai_text = request_openai_review(
+                                            api_key=openai_key,
+                                            user_prompt=global_user_prompt,
+                                            system_prompt=AI_REVIEW_SYSTEM_PROMPT,
+                                            model=str(st.session_state.get("ai_review_model", "gpt-5-mini")),
+                                            max_output_tokens=retry_tokens,
+                                        )
+                                        st.session_state["cbb_global_ai_review_output"] = global_ai_text
+                                    except Exception as retry_exc:
+                                        st.exception(retry_exc)
+                                else:
+                                    st.exception(exc)
                 global_ai_output = str(st.session_state.get("cbb_global_ai_review_output") or "").strip()
                 if global_ai_output:
                     st.subheader("Global AI Recommendations")
@@ -5140,6 +5400,7 @@ with tab_slate_vegas:
                         pool_df_agent, _, raw_slate_df_agent, _, _ = build_optimizer_pool_for_date(
                             bucket_name=bucket_name,
                             slate_date=game_selected_date,
+                            slate_key=shared_slate_key,
                             bookmaker=pool_bookmaker,
                             gcp_project=gcp_project or None,
                             service_account_json=cred_json,
