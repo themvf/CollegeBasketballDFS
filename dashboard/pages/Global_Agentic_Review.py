@@ -274,9 +274,9 @@ def load_first_contest_standings_for_date(
     safe_slate = _slate_key_from_label(selected_slate_key or "main")
     legacy_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}_"
     scoped_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}/{safe_slate}_"
-    blobs = list(store.bucket.list_blobs(prefix=scoped_prefix))
-    if safe_slate == "main":
-        blobs.extend(list(store.bucket.list_blobs(prefix=legacy_prefix)))
+    # Canonical standings are date+contest scoped. Include scoped prefix as legacy fallback.
+    blobs = list(store.bucket.list_blobs(prefix=legacy_prefix))
+    blobs.extend(list(store.bucket.list_blobs(prefix=scoped_prefix)))
     if not blobs:
         return pd.DataFrame(), ""
     unique_blobs = {str(getattr(b, "name", "") or ""): b for b in blobs}

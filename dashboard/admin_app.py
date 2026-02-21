@@ -666,10 +666,8 @@ def _delete_injuries_feed_csv(store: CbbGcsStore, selected_date: date | None = N
 
 
 def _projections_blob_name(slate_date: date, slate_key: str | None = None) -> str:
-    if slate_key is None:
-        return f"cbb/projections/{slate_date.isoformat()}_projections.csv"
-    safe = _slate_key_from_label(slate_key)
-    return f"cbb/projections/{slate_date.isoformat()}/{safe}_projections.csv"
+    # Canonical date-level storage; slate_key intentionally ignored.
+    return f"cbb/projections/{slate_date.isoformat()}_projections.csv"
 
 
 def _write_projections_csv(
@@ -697,24 +695,15 @@ def _read_projections_csv(store: CbbGcsStore, slate_date: date, slate_key: str |
             return reader(slate_date, slate_key)
         except TypeError:
             return reader(slate_date)
-    if slate_key is None:
-        candidate_names = [_projections_blob_name(slate_date, "main"), _projections_blob_name(slate_date)]
-    else:
-        candidate_names = [_projections_blob_name(slate_date, slate_key=slate_key)]
-        if _slate_key_from_label(slate_key) == "main":
-            candidate_names.append(_projections_blob_name(slate_date))
-    for blob_name in candidate_names:
-        blob = store.bucket.blob(blob_name)
-        if blob.exists():
-            return blob.download_as_text(encoding="utf-8")
+    blob = store.bucket.blob(_projections_blob_name(slate_date))
+    if blob.exists():
+        return blob.download_as_text(encoding="utf-8")
     return None
 
 
 def _ownership_blob_name(slate_date: date, slate_key: str | None = None) -> str:
-    if slate_key is None:
-        return f"cbb/ownership/{slate_date.isoformat()}_ownership.csv"
-    safe = _slate_key_from_label(slate_key)
-    return f"cbb/ownership/{slate_date.isoformat()}/{safe}_ownership.csv"
+    # Canonical date-level storage; slate_key intentionally ignored.
+    return f"cbb/ownership/{slate_date.isoformat()}_ownership.csv"
 
 
 def _read_ownership_csv(store: CbbGcsStore, slate_date: date, slate_key: str | None = None) -> str | None:
@@ -724,16 +713,9 @@ def _read_ownership_csv(store: CbbGcsStore, slate_date: date, slate_key: str | N
             return reader(slate_date, slate_key)
         except TypeError:
             return reader(slate_date)
-    if slate_key is None:
-        candidate_names = [_ownership_blob_name(slate_date, "main"), _ownership_blob_name(slate_date)]
-    else:
-        candidate_names = [_ownership_blob_name(slate_date, slate_key=slate_key)]
-        if _slate_key_from_label(slate_key) == "main":
-            candidate_names.append(_ownership_blob_name(slate_date))
-    for blob_name in candidate_names:
-        blob = store.bucket.blob(blob_name)
-        if blob.exists():
-            return blob.download_as_text(encoding="utf-8")
+    blob = store.bucket.blob(_ownership_blob_name(slate_date))
+    if blob.exists():
+        return blob.download_as_text(encoding="utf-8")
     return None
 
 
@@ -762,10 +744,8 @@ def _contest_standings_blob_name(
 ) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(contest_id or "").strip())
     safe = safe or "contest"
-    if slate_key is None:
-        return f"cbb/contest_standings/{slate_date.isoformat()}_{safe}.csv"
-    slate = _slate_key_from_label(slate_key)
-    return f"cbb/contest_standings/{slate_date.isoformat()}/{slate}_{safe}.csv"
+    # Canonical date+contest storage; slate_key intentionally ignored.
+    return f"cbb/contest_standings/{slate_date.isoformat()}_{safe}.csv"
 
 
 def _read_contest_standings_csv(
@@ -780,19 +760,9 @@ def _read_contest_standings_csv(
             return reader(slate_date, contest_id, slate_key)
         except TypeError:
             return reader(slate_date, contest_id)
-    if slate_key is None:
-        candidate_names = [
-            _contest_standings_blob_name(slate_date, contest_id, "main"),
-            _contest_standings_blob_name(slate_date, contest_id),
-        ]
-    else:
-        candidate_names = [_contest_standings_blob_name(slate_date, contest_id, slate_key=slate_key)]
-        if _slate_key_from_label(slate_key) == "main":
-            candidate_names.append(_contest_standings_blob_name(slate_date, contest_id))
-    for blob_name in candidate_names:
-        blob = store.bucket.blob(blob_name)
-        if blob.exists():
-            return blob.download_as_text(encoding="utf-8")
+    blob = store.bucket.blob(_contest_standings_blob_name(slate_date, contest_id))
+    if blob.exists():
+        return blob.download_as_text(encoding="utf-8")
     return None
 
 
@@ -2935,7 +2905,7 @@ with tab_slate_vegas:
                         )
                         st.success(
                             f"Saved projections to `{blob_name}` "
-                            "(same date+slate overwrites)."
+                            "(same date overwrites; shared across slates)."
                         )
                     st.download_button(
                         "Download Active Pool CSV",
@@ -3874,6 +3844,10 @@ with tab_lineups:
 
 with tab_projection_review:
     st.subheader("Projection Review")
+    st.caption(
+        "Projection snapshots and ownership uploads are date-scoped shared files. "
+        "Slate context is used for DK-slate filtering and lineup-run lookups."
+    )
     review_date = st.date_input("Review Date", value=lineup_slate_date, key="projection_review_date")
     refresh_review_clicked = st.button("Refresh Review Data", key="refresh_projection_review")
     if refresh_review_clicked:
@@ -4122,7 +4096,8 @@ with tab_tournament_review:
     st.subheader("Tournament Review")
     st.caption(
         "Upload contest standings to analyze field construction (stacks, salary left, ownership) "
-        "and compare against our lineups and projection assumptions."
+        "and compare against our lineups and projection assumptions. "
+        "Standings files are date+contest scoped (shared across slates)."
     )
     tr_date = st.date_input("Tournament Date", value=lineup_slate_date, key="tournament_review_date")
     tr_contest_id = st.text_input("Contest ID", value="contest", key="tournament_review_contest_id")
