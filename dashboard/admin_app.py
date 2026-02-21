@@ -665,75 +665,151 @@ def _delete_injuries_feed_csv(store: CbbGcsStore, selected_date: date | None = N
     return True, blob_name
 
 
-def _projections_blob_name(slate_date: date) -> str:
-    return f"cbb/projections/{slate_date.isoformat()}_projections.csv"
+def _projections_blob_name(slate_date: date, slate_key: str | None = None) -> str:
+    if slate_key is None:
+        return f"cbb/projections/{slate_date.isoformat()}_projections.csv"
+    safe = _slate_key_from_label(slate_key)
+    return f"cbb/projections/{slate_date.isoformat()}/{safe}_projections.csv"
 
 
-def _write_projections_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> str:
+def _write_projections_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    csv_text: str,
+    slate_key: str | None = None,
+) -> str:
     writer = getattr(store, "write_projections_csv", None)
     if callable(writer):
-        return writer(slate_date, csv_text)
-    blob_name = _projections_blob_name(slate_date)
+        try:
+            return writer(slate_date, csv_text, slate_key)
+        except TypeError:
+            return writer(slate_date, csv_text)
+    blob_name = _projections_blob_name(slate_date, slate_key=slate_key)
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
 
 
-def _read_projections_csv(store: CbbGcsStore, slate_date: date) -> str | None:
+def _read_projections_csv(store: CbbGcsStore, slate_date: date, slate_key: str | None = None) -> str | None:
     reader = getattr(store, "read_projections_csv", None)
     if callable(reader):
-        return reader(slate_date)
-    blob = store.bucket.blob(_projections_blob_name(slate_date))
-    if not blob.exists():
-        return None
-    return blob.download_as_text(encoding="utf-8")
+        try:
+            return reader(slate_date, slate_key)
+        except TypeError:
+            return reader(slate_date)
+    if slate_key is None:
+        candidate_names = [_projections_blob_name(slate_date, "main"), _projections_blob_name(slate_date)]
+    else:
+        candidate_names = [_projections_blob_name(slate_date, slate_key=slate_key)]
+        if _slate_key_from_label(slate_key) == "main":
+            candidate_names.append(_projections_blob_name(slate_date))
+    for blob_name in candidate_names:
+        blob = store.bucket.blob(blob_name)
+        if blob.exists():
+            return blob.download_as_text(encoding="utf-8")
+    return None
 
 
-def _ownership_blob_name(slate_date: date) -> str:
-    return f"cbb/ownership/{slate_date.isoformat()}_ownership.csv"
+def _ownership_blob_name(slate_date: date, slate_key: str | None = None) -> str:
+    if slate_key is None:
+        return f"cbb/ownership/{slate_date.isoformat()}_ownership.csv"
+    safe = _slate_key_from_label(slate_key)
+    return f"cbb/ownership/{slate_date.isoformat()}/{safe}_ownership.csv"
 
 
-def _read_ownership_csv(store: CbbGcsStore, slate_date: date) -> str | None:
+def _read_ownership_csv(store: CbbGcsStore, slate_date: date, slate_key: str | None = None) -> str | None:
     reader = getattr(store, "read_ownership_csv", None)
     if callable(reader):
-        return reader(slate_date)
-    blob = store.bucket.blob(_ownership_blob_name(slate_date))
-    if not blob.exists():
-        return None
-    return blob.download_as_text(encoding="utf-8")
+        try:
+            return reader(slate_date, slate_key)
+        except TypeError:
+            return reader(slate_date)
+    if slate_key is None:
+        candidate_names = [_ownership_blob_name(slate_date, "main"), _ownership_blob_name(slate_date)]
+    else:
+        candidate_names = [_ownership_blob_name(slate_date, slate_key=slate_key)]
+        if _slate_key_from_label(slate_key) == "main":
+            candidate_names.append(_ownership_blob_name(slate_date))
+    for blob_name in candidate_names:
+        blob = store.bucket.blob(blob_name)
+        if blob.exists():
+            return blob.download_as_text(encoding="utf-8")
+    return None
 
 
-def _write_ownership_csv(store: CbbGcsStore, slate_date: date, csv_text: str) -> str:
+def _write_ownership_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    csv_text: str,
+    slate_key: str | None = None,
+) -> str:
     writer = getattr(store, "write_ownership_csv", None)
     if callable(writer):
-        return writer(slate_date, csv_text)
-    blob_name = _ownership_blob_name(slate_date)
+        try:
+            return writer(slate_date, csv_text, slate_key)
+        except TypeError:
+            return writer(slate_date, csv_text)
+    blob_name = _ownership_blob_name(slate_date, slate_key=slate_key)
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
 
 
-def _contest_standings_blob_name(slate_date: date, contest_id: str) -> str:
+def _contest_standings_blob_name(
+    slate_date: date,
+    contest_id: str,
+    slate_key: str | None = None,
+) -> str:
     safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(contest_id or "").strip())
     safe = safe or "contest"
-    return f"cbb/contest_standings/{slate_date.isoformat()}_{safe}.csv"
+    if slate_key is None:
+        return f"cbb/contest_standings/{slate_date.isoformat()}_{safe}.csv"
+    slate = _slate_key_from_label(slate_key)
+    return f"cbb/contest_standings/{slate_date.isoformat()}/{slate}_{safe}.csv"
 
 
-def _read_contest_standings_csv(store: CbbGcsStore, slate_date: date, contest_id: str) -> str | None:
+def _read_contest_standings_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    contest_id: str,
+    slate_key: str | None = None,
+) -> str | None:
     reader = getattr(store, "read_contest_standings_csv", None)
     if callable(reader):
-        return reader(slate_date, contest_id)
-    blob = store.bucket.blob(_contest_standings_blob_name(slate_date, contest_id))
-    if not blob.exists():
-        return None
-    return blob.download_as_text(encoding="utf-8")
+        try:
+            return reader(slate_date, contest_id, slate_key)
+        except TypeError:
+            return reader(slate_date, contest_id)
+    if slate_key is None:
+        candidate_names = [
+            _contest_standings_blob_name(slate_date, contest_id, "main"),
+            _contest_standings_blob_name(slate_date, contest_id),
+        ]
+    else:
+        candidate_names = [_contest_standings_blob_name(slate_date, contest_id, slate_key=slate_key)]
+        if _slate_key_from_label(slate_key) == "main":
+            candidate_names.append(_contest_standings_blob_name(slate_date, contest_id))
+    for blob_name in candidate_names:
+        blob = store.bucket.blob(blob_name)
+        if blob.exists():
+            return blob.download_as_text(encoding="utf-8")
+    return None
 
 
-def _write_contest_standings_csv(store: CbbGcsStore, slate_date: date, contest_id: str, csv_text: str) -> str:
+def _write_contest_standings_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    contest_id: str,
+    csv_text: str,
+    slate_key: str | None = None,
+) -> str:
     writer = getattr(store, "write_contest_standings_csv", None)
     if callable(writer):
-        return writer(slate_date, contest_id, csv_text)
-    blob_name = _contest_standings_blob_name(slate_date, contest_id)
+        try:
+            return writer(slate_date, contest_id, csv_text, slate_key)
+        except TypeError:
+            return writer(slate_date, contest_id, csv_text)
+    blob_name = _contest_standings_blob_name(slate_date, contest_id, slate_key=slate_key)
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
@@ -1628,6 +1704,7 @@ def normalize_ownership_frame(df: pd.DataFrame | None) -> pd.DataFrame:
 def load_projection_snapshot_frame(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -1638,7 +1715,7 @@ def load_projection_snapshot_frame(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = _read_projections_csv(store, selected_date)
+    csv_text = _read_projections_csv(store, selected_date, slate_key=selected_slate_key)
     if not csv_text or not csv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(csv_text))
@@ -1648,6 +1725,7 @@ def load_projection_snapshot_frame(
 def load_ownership_frame_for_date(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -1658,7 +1736,7 @@ def load_ownership_frame_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = _read_ownership_csv(store, selected_date)
+    csv_text = _read_ownership_csv(store, selected_date, slate_key=selected_slate_key)
     if not csv_text or not csv_text.strip():
         return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
     df = pd.read_csv(io.StringIO(csv_text))
@@ -1763,6 +1841,7 @@ def load_contest_standings_frame(
     bucket_name: str,
     selected_date: date,
     contest_id: str,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -1773,7 +1852,12 @@ def load_contest_standings_frame(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = _read_contest_standings_csv(store, selected_date, contest_id)
+    csv_text = _read_contest_standings_csv(
+        store,
+        selected_date,
+        contest_id,
+        slate_key=selected_slate_key,
+    )
     if not csv_text or not csv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(csv_text))
@@ -1871,34 +1955,18 @@ with st.sidebar:
         value=default_bookmakers,
         help="Comma-separated bookmaker keys (example: fanduel). Leave blank for all.",
     )
-    shared_slate_preset = st.selectbox(
-        "Active Slate Label",
-        options=SLATE_PRESET_OPTIONS,
-        index=0,
-        key="shared_slate_preset",
-        help=(
-            "Shared across DK Slate, Slate + Vegas, Lineup Generator, "
-            "Tournament Review, and Game Slate Agent."
-        ),
-    )
-    shared_slate_custom = ""
-    if shared_slate_preset == "Custom":
-        shared_slate_custom = st.text_input(
-            "Custom Active Slate Label",
-            value="Main",
-            key="shared_slate_custom_label",
-            help="Example: Early, Turbo, Showdown.",
-        )
-    shared_slate_label = _normalize_slate_label(
-        shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
-    )
-    shared_slate_key = _slate_key_from_label(shared_slate_label)
-    st.caption(f"Active slate: `{shared_slate_label}` (key: `{shared_slate_key}`)")
     st.caption(
         "The Odds API key source: "
         + ("loaded from secrets/env" if odds_api_key else "missing (`the_odds_api_key`)")
     )
     st.caption("Configure workflow-specific settings inside each tab.")
+
+shared_slate_preset = str(st.session_state.get("shared_slate_preset", "Main"))
+shared_slate_custom = str(st.session_state.get("shared_slate_custom_label", "Main"))
+shared_slate_label = _normalize_slate_label(
+    shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
+)
+shared_slate_key = _slate_key_from_label(shared_slate_label)
 
 cred_json = _resolve_credential_json()
 cred_json_b64 = _resolve_credential_json_b64()
@@ -2061,11 +2129,34 @@ with tab_backfill:
 with tab_dk:
     st.subheader("DraftKings Slate Upload")
     dk_slate_date = st.date_input("DraftKings Slate Date", value=game_selected_date, key="dk_slate_date")
+    active_slate_choice = shared_slate_preset if shared_slate_preset in SLATE_PRESET_OPTIONS else "Main"
+    dk_slate_preset = st.selectbox(
+        "Slate Label",
+        options=SLATE_PRESET_OPTIONS,
+        index=SLATE_PRESET_OPTIONS.index(active_slate_choice),
+        key="shared_slate_preset",
+        help=(
+            "This selection is shared across DK Slate, Slate + Vegas, Lineup Generator, "
+            "Tournament Review, and Game Slate Agent."
+        ),
+    )
+    dk_slate_custom = ""
+    if dk_slate_preset == "Custom":
+        dk_slate_custom = st.text_input(
+            "Custom Slate Label",
+            value=shared_slate_custom or "Main",
+            key="shared_slate_custom_label",
+            help="Example: Early, Turbo, Showdown.",
+        )
+    shared_slate_label = _normalize_slate_label(
+        dk_slate_custom if dk_slate_preset == "Custom" else dk_slate_preset
+    )
+    shared_slate_key = _slate_key_from_label(shared_slate_label)
     dk_slate_label = shared_slate_label
     dk_slate_key = shared_slate_key
     st.caption(
         "Each date + slate label stores a separate DK slate file. "
-        f"Using shared slate `{dk_slate_label}` (key: `{dk_slate_key}`)."
+        f"Using slate `{dk_slate_label}` (key: `{dk_slate_key}`) across all slate-aware tabs."
     )
     uploaded_dk_slate = st.file_uploader(
         "Upload DraftKings Slate CSV",
@@ -2843,8 +2934,12 @@ with tab_slate_vegas:
                             store,
                             slate_vegas_date,
                             display_pool.to_csv(index=False),
+                            slate_key=shared_slate_key,
                         )
-                        st.success(f"Saved projections to `{blob_name}` (same date overwrites).")
+                        st.success(
+                            f"Saved projections to `{blob_name}` "
+                            "(same date+slate overwrites)."
+                        )
                     st.download_button(
                         "Download Active Pool CSV",
                         data=display_pool.to_csv(index=False),
@@ -3817,13 +3912,19 @@ with tab_projection_review:
                             project=gcp_project or None,
                         )
                         store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                        blob_name = _write_ownership_csv(store, review_date, normalized_own.to_csv(index=False))
+                        blob_name = _write_ownership_csv(
+                            store,
+                            review_date,
+                            normalized_own.to_csv(index=False),
+                            slate_key=shared_slate_key,
+                        )
                         load_ownership_frame_for_date.clear()
                         st.success(f"Saved ownership file to `{blob_name}`")
 
             proj_df = load_projection_snapshot_frame(
                 bucket_name=bucket_name,
                 selected_date=review_date,
+                selected_slate_key=shared_slate_key,
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -3841,6 +3942,7 @@ with tab_projection_review:
                 own_df = load_ownership_frame_for_date(
                     bucket_name=bucket_name,
                     selected_date=review_date,
+                    selected_slate_key=shared_slate_key,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -4060,7 +4162,13 @@ with tab_tournament_review:
                         project=gcp_project or None,
                     )
                     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                    blob_name = _write_contest_standings_csv(store, tr_date, tr_contest_id, csv_text)
+                    blob_name = _write_contest_standings_csv(
+                        store,
+                        tr_date,
+                        tr_contest_id,
+                        csv_text,
+                        slate_key=shared_slate_key,
+                    )
                     load_contest_standings_frame.clear()
                     st.success(f"Saved contest standings to `{blob_name}`")
 
@@ -4071,6 +4179,7 @@ with tab_tournament_review:
                     bucket_name=bucket_name,
                     selected_date=tr_date,
                     contest_id=tr_contest_id,
+                    selected_slate_key=shared_slate_key,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -4109,6 +4218,7 @@ with tab_tournament_review:
                 projections_df = load_projection_snapshot_frame(
                     bucket_name=bucket_name,
                     selected_date=tr_date,
+                    selected_slate_key=shared_slate_key,
                     gcp_project=gcp_project or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -5051,6 +5161,7 @@ with tab_agentic_review:
                         proj_snap_df = load_projection_snapshot_frame(
                             bucket_name=bucket_name,
                             selected_date=review_day,
+                            selected_slate_key=shared_slate_key,
                             gcp_project=gcp_project or None,
                             service_account_json=cred_json,
                             service_account_json_b64=cred_json_b64,
@@ -5075,6 +5186,7 @@ with tab_agentic_review:
                         own_day_df = load_ownership_frame_for_date(
                             bucket_name=bucket_name,
                             selected_date=review_day,
+                            selected_slate_key=shared_slate_key,
                             gcp_project=gcp_project or None,
                             service_account_json=cred_json,
                             service_account_json_b64=cred_json_b64,

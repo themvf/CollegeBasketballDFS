@@ -108,16 +108,33 @@ class CbbGcsStore:
     def injuries_manual_blob_name(self) -> str:
         return f"{self.injuries_prefix}/injuries_manual.csv"
 
-    def projections_blob_name(self, game_date: date) -> str:
-        return f"{self.projections_prefix}/{game_date.isoformat()}_projections.csv"
+    def projections_blob_name(self, game_date: date, slate_key: str | None = None) -> str:
+        if slate_key is None:
+            # Legacy date-only path.
+            return f"{self.projections_prefix}/{game_date.isoformat()}_projections.csv"
+        safe_slate = self._safe_slate_key(slate_key, default="main")
+        return f"{self.projections_prefix}/{game_date.isoformat()}/{safe_slate}_projections.csv"
 
-    def ownership_blob_name(self, game_date: date) -> str:
-        return f"{self.ownership_prefix}/{game_date.isoformat()}_ownership.csv"
+    def ownership_blob_name(self, game_date: date, slate_key: str | None = None) -> str:
+        if slate_key is None:
+            # Legacy date-only path.
+            return f"{self.ownership_prefix}/{game_date.isoformat()}_ownership.csv"
+        safe_slate = self._safe_slate_key(slate_key, default="main")
+        return f"{self.ownership_prefix}/{game_date.isoformat()}/{safe_slate}_ownership.csv"
 
-    def contest_standings_blob_name(self, game_date: date, contest_id: str) -> str:
+    def contest_standings_blob_name(
+        self,
+        game_date: date,
+        contest_id: str,
+        slate_key: str | None = None,
+    ) -> str:
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(contest_id or "").strip())
         safe = safe or "contest"
-        return f"{self.contest_standings_prefix}/{game_date.isoformat()}_{safe}.csv"
+        if slate_key is None:
+            # Legacy date-only path.
+            return f"{self.contest_standings_prefix}/{game_date.isoformat()}_{safe}.csv"
+        safe_slate = self._safe_slate_key(slate_key, default="main")
+        return f"{self.contest_standings_prefix}/{game_date.isoformat()}/{safe_slate}_{safe}.csv"
 
     def _safe_key(self, value: str, default: str) -> str:
         safe = re.sub(r"[^a-zA-Z0-9_-]", "_", str(value or "").strip())
@@ -390,38 +407,82 @@ class CbbGcsStore:
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
 
-    def read_projections_csv(self, game_date: date) -> str | None:
-        blob = self.bucket.blob(self.projections_blob_name(game_date))
-        if not blob.exists():
-            return None
-        return blob.download_as_text(encoding="utf-8")
+    def read_projections_csv(self, game_date: date, slate_key: str | None = None) -> str | None:
+        if slate_key is None:
+            candidate_names = [
+                self.projections_blob_name(game_date, slate_key="main"),
+                self.projections_blob_name(game_date),
+            ]
+        else:
+            candidate_names = [self.projections_blob_name(game_date, slate_key=slate_key)]
+            safe_slate = self._safe_slate_key(slate_key, default="main")
+            if safe_slate == "main":
+                candidate_names.append(self.projections_blob_name(game_date))
+        for blob_name in candidate_names:
+            blob = self.bucket.blob(blob_name)
+            if blob.exists():
+                return blob.download_as_text(encoding="utf-8")
+        return None
 
-    def write_projections_csv(self, game_date: date, csv_text: str) -> str:
-        blob_name = self.projections_blob_name(game_date)
+    def write_projections_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
+        blob_name = self.projections_blob_name(game_date, slate_key=slate_key)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
 
-    def read_ownership_csv(self, game_date: date) -> str | None:
-        blob = self.bucket.blob(self.ownership_blob_name(game_date))
-        if not blob.exists():
-            return None
-        return blob.download_as_text(encoding="utf-8")
+    def read_ownership_csv(self, game_date: date, slate_key: str | None = None) -> str | None:
+        if slate_key is None:
+            candidate_names = [
+                self.ownership_blob_name(game_date, slate_key="main"),
+                self.ownership_blob_name(game_date),
+            ]
+        else:
+            candidate_names = [self.ownership_blob_name(game_date, slate_key=slate_key)]
+            safe_slate = self._safe_slate_key(slate_key, default="main")
+            if safe_slate == "main":
+                candidate_names.append(self.ownership_blob_name(game_date))
+        for blob_name in candidate_names:
+            blob = self.bucket.blob(blob_name)
+            if blob.exists():
+                return blob.download_as_text(encoding="utf-8")
+        return None
 
-    def write_ownership_csv(self, game_date: date, csv_text: str) -> str:
-        blob_name = self.ownership_blob_name(game_date)
+    def write_ownership_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
+        blob_name = self.ownership_blob_name(game_date, slate_key=slate_key)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name
 
-    def read_contest_standings_csv(self, game_date: date, contest_id: str) -> str | None:
-        blob = self.bucket.blob(self.contest_standings_blob_name(game_date, contest_id))
-        if not blob.exists():
-            return None
-        return blob.download_as_text(encoding="utf-8")
+    def read_contest_standings_csv(
+        self,
+        game_date: date,
+        contest_id: str,
+        slate_key: str | None = None,
+    ) -> str | None:
+        if slate_key is None:
+            candidate_names = [
+                self.contest_standings_blob_name(game_date, contest_id, slate_key="main"),
+                self.contest_standings_blob_name(game_date, contest_id),
+            ]
+        else:
+            candidate_names = [self.contest_standings_blob_name(game_date, contest_id, slate_key=slate_key)]
+            safe_slate = self._safe_slate_key(slate_key, default="main")
+            if safe_slate == "main":
+                candidate_names.append(self.contest_standings_blob_name(game_date, contest_id))
+        for blob_name in candidate_names:
+            blob = self.bucket.blob(blob_name)
+            if blob.exists():
+                return blob.download_as_text(encoding="utf-8")
+        return None
 
-    def write_contest_standings_csv(self, game_date: date, contest_id: str, csv_text: str) -> str:
-        blob_name = self.contest_standings_blob_name(game_date, contest_id)
+    def write_contest_standings_csv(
+        self,
+        game_date: date,
+        contest_id: str,
+        csv_text: str,
+        slate_key: str | None = None,
+    ) -> str:
+        blob_name = self.contest_standings_blob_name(game_date, contest_id, slate_key=slate_key)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name

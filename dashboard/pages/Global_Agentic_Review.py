@@ -108,11 +108,18 @@ def _slate_key_from_label(value: object, default: str = "main") -> str:
     return text or default
 
 
-def _contest_id_from_blob_name(blob_name: str, selected_date: date) -> str:
+def _contest_id_from_blob_name(blob_name: str, selected_date: date, selected_slate_key: str | None = None) -> str:
     filename = str(blob_name or "").split("/")[-1]
+    # Legacy: YYYY-MM-DD_<contest>.csv
     prefix = f"{selected_date.isoformat()}_"
     if filename.startswith(prefix) and filename.endswith(".csv"):
         cid = filename[len(prefix) : -4]
+        return cid or "contest"
+    # Slate-scoped: <slate_key>_<contest>.csv
+    safe_slate = _slate_key_from_label(selected_slate_key or "main")
+    slate_prefix = f"{safe_slate}_"
+    if filename.startswith(slate_prefix) and filename.endswith(".csv"):
+        cid = filename[len(slate_prefix) : -4]
         return cid or "contest"
     return "contest"
 
@@ -205,6 +212,7 @@ def load_saved_lineup_run_dates(
 def load_projection_snapshot_frame(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -215,7 +223,10 @@ def load_projection_snapshot_frame(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = store.read_projections_csv(selected_date)
+    try:
+        csv_text = store.read_projections_csv(selected_date, selected_slate_key)
+    except TypeError:
+        csv_text = store.read_projections_csv(selected_date)
     if not csv_text or not csv_text.strip():
         return pd.DataFrame()
     return pd.read_csv(io.StringIO(csv_text))
@@ -249,6 +260,7 @@ def load_dk_slate_frame_for_date(
 def load_first_contest_standings_for_date(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -259,11 +271,16 @@ def load_first_contest_standings_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}_"
-    blobs = list(store.bucket.list_blobs(prefix=prefix))
+    safe_slate = _slate_key_from_label(selected_slate_key or "main")
+    legacy_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}_"
+    scoped_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}/{safe_slate}_"
+    blobs = list(store.bucket.list_blobs(prefix=scoped_prefix))
+    if safe_slate == "main":
+        blobs.extend(list(store.bucket.list_blobs(prefix=legacy_prefix)))
     if not blobs:
         return pd.DataFrame(), ""
-    blobs = sorted(blobs, key=lambda b: str(getattr(b, "name", "") or ""), reverse=True)
+    unique_blobs = {str(getattr(b, "name", "") or ""): b for b in blobs}
+    blobs = sorted(unique_blobs.values(), key=lambda b: str(getattr(b, "name", "") or ""), reverse=True)
     for blob in blobs:
         try:
             csv_text = blob.download_as_text(encoding="utf-8")
@@ -284,6 +301,7 @@ def load_first_contest_standings_for_date(
 def load_ownership_frame_for_date(
     bucket_name: str,
     selected_date: date,
+    selected_slate_key: str | None,
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
@@ -294,7 +312,10 @@ def load_ownership_frame_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    csv_text = store.read_ownership_csv(selected_date)
+    try:
+        csv_text = store.read_ownership_csv(selected_date, selected_slate_key)
+    except TypeError:
+        csv_text = store.read_ownership_csv(selected_date)
     if not csv_text or not csv_text.strip():
         return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
     raw_df = pd.read_csv(io.StringIO(csv_text))
@@ -614,6 +635,7 @@ if build_packet_clicked:
             proj_df = load_projection_snapshot_frame(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
+                selected_slate_key=shared_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -641,6 +663,7 @@ if build_packet_clicked:
             standings_df, standings_blob = load_first_contest_standings_for_date(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
+                selected_slate_key=shared_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -659,7 +682,11 @@ if build_packet_clicked:
                     entries_df, expanded_df = build_field_entries_and_players(normalized, slate_df)
                     if not entries_df.empty:
                         tournament_dates_used += 1
-                        contest_id = _contest_id_from_blob_name(standings_blob, review_day)
+                        contest_id = _contest_id_from_blob_name(
+                            standings_blob,
+                            review_day,
+                            selected_slate_key=shared_slate_key,
+                        )
                         actual_own_df = extract_actual_ownership_from_standings(normalized)
                         exposure_df = build_player_exposure_comparison(
                             expanded_players_df=expanded_df,
@@ -672,6 +699,7 @@ if build_packet_clicked:
                 own_df = load_ownership_frame_for_date(
                     bucket_name=bucket_name.strip(),
                     selected_date=review_day,
+                    selected_slate_key=shared_slate_key,
                     gcp_project=gcp_project.strip() or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,

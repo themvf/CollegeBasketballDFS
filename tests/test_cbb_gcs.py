@@ -126,6 +126,18 @@ def test_projections_blob_name_and_rw() -> None:
     assert "25.5" in (store.read_projections_csv(d) or "")
 
 
+def test_projections_slate_scoped_rw_and_main_fallback() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    expected_blob = "cbb/projections/2026-02-14/night_projections.csv"
+    assert store.projections_blob_name(d, slate_key="night") == expected_blob
+    assert store.write_projections_csv(d, "id,proj\n1,30.0\n", slate_key="night") == expected_blob
+    assert "30.0" in (store.read_projections_csv(d, slate_key="night") or "")
+    assert store.read_projections_csv(d, slate_key="main") is None
+    store.write_projections_csv(d, "id,proj\n2,20.0\n")
+    assert "20.0" in (store.read_projections_csv(d, slate_key="main") or "")
+
+
 def test_ownership_blob_name_and_rw() -> None:
     store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
     d = date(2026, 2, 14)
@@ -136,6 +148,18 @@ def test_ownership_blob_name_and_rw() -> None:
     assert "12.5" in (store.read_ownership_csv(d) or "")
 
 
+def test_ownership_slate_scoped_rw_and_main_fallback() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    expected_blob = "cbb/ownership/2026-02-14/afternoon_ownership.csv"
+    assert store.ownership_blob_name(d, slate_key="afternoon") == expected_blob
+    assert store.write_ownership_csv(d, "id,actual_ownership\n1,18.0\n", slate_key="afternoon") == expected_blob
+    assert "18.0" in (store.read_ownership_csv(d, slate_key="afternoon") or "")
+    assert store.read_ownership_csv(d, slate_key="main") is None
+    store.write_ownership_csv(d, "id,actual_ownership\n2,9.0\n")
+    assert "9.0" in (store.read_ownership_csv(d, slate_key="main") or "")
+
+
 def test_contest_standings_blob_name_and_rw() -> None:
     store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
     d = date(2026, 2, 14)
@@ -144,6 +168,26 @@ def test_contest_standings_blob_name_and_rw() -> None:
     written = store.write_contest_standings_csv(d, "contest-123", "Rank,EntryId\n1,123\n")
     assert written == expected_blob
     assert "EntryId" in (store.read_contest_standings_csv(d, "contest-123") or "")
+
+
+def test_contest_standings_slate_scoped_rw_and_main_fallback() -> None:
+    store = CbbGcsStore(bucket_name="bucket", client=_FakeClient())
+    d = date(2026, 2, 14)
+    expected_blob = "cbb/contest_standings/2026-02-14/full_day_contest-123.csv"
+    assert store.contest_standings_blob_name(d, "contest-123", slate_key="full day") == expected_blob
+    assert (
+        store.write_contest_standings_csv(
+            d,
+            "contest-123",
+            "Rank,EntryId\n1,999\n",
+            slate_key="full day",
+        )
+        == expected_blob
+    )
+    assert "999" in (store.read_contest_standings_csv(d, "contest-123", slate_key="full day") or "")
+    assert store.read_contest_standings_csv(d, "contest-123", slate_key="main") is None
+    store.write_contest_standings_csv(d, "contest-123", "Rank,EntryId\n1,111\n")
+    assert "111" in (store.read_contest_standings_csv(d, "contest-123", slate_key="main") or "")
 
 
 def test_lineup_runs_blob_names_and_rw() -> None:
