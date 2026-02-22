@@ -4151,6 +4151,7 @@ with tab_tournament_review:
         st.session_state.pop("cbb_ai_review_packet", None)
         st.session_state.pop("cbb_ai_review_prompt_user", None)
         st.session_state.pop("cbb_ai_review_prompt_system", None)
+        st.session_state.pop("cbb_tournament_postmortem_output", None)
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to run tournament review.")
@@ -4951,6 +4952,402 @@ with tab_tournament_review:
                     mime="text/csv",
                     key="download_phantom_lineups_csv",
                 )
+
+            st.markdown("---")
+            st.subheader("Tournament Postmortem Agent")
+            st.caption(
+                "Combines field standings and phantom-run results to highlight what worked, what failed, "
+                "and what lineup construction changes to test next."
+            )
+
+            pm_entries_df = field_entries_df.copy() if isinstance(field_entries_df, pd.DataFrame) else pd.DataFrame()
+            pm_exposure_df = exposure_df.copy() if isinstance(exposure_df, pd.DataFrame) else pd.DataFrame()
+            pm_proj_compare_df = proj_compare_df.copy() if isinstance(proj_compare_df, pd.DataFrame) else pd.DataFrame()
+            pm_adjust_df = adjust_df.copy() if isinstance(adjust_df, pd.DataFrame) else pd.DataFrame()
+            if pm_entries_df.empty:
+                state_entries = st.session_state.get("cbb_tr_entries_df")
+                pm_entries_df = state_entries.copy() if isinstance(state_entries, pd.DataFrame) else pd.DataFrame()
+            if pm_exposure_df.empty:
+                state_exposure = st.session_state.get("cbb_tr_exposure_df")
+                pm_exposure_df = state_exposure.copy() if isinstance(state_exposure, pd.DataFrame) else pd.DataFrame()
+            if pm_proj_compare_df.empty:
+                state_proj_compare = st.session_state.get("cbb_tr_projection_compare_df")
+                pm_proj_compare_df = (
+                    state_proj_compare.copy() if isinstance(state_proj_compare, pd.DataFrame) else pd.DataFrame()
+                )
+            if pm_adjust_df.empty:
+                state_adjust = st.session_state.get("cbb_tr_adjust_df")
+                pm_adjust_df = state_adjust.copy() if isinstance(state_adjust, pd.DataFrame) else pd.DataFrame()
+            pm_phantom_df = phantom_df_state.copy() if isinstance(phantom_df_state, pd.DataFrame) else pd.DataFrame()
+            pm_phantom_summary_df = (
+                phantom_summary_state.copy() if isinstance(phantom_summary_state, pd.DataFrame) else pd.DataFrame()
+            )
+
+            if pm_entries_df.empty or pm_exposure_df.empty or pm_proj_compare_df.empty:
+                st.info(
+                    "Run Tournament Review first (standings + projection comparison), then run Phantom Review "
+                    "to include generated-lineup construction analysis."
+                )
+            else:
+                post_focus_limit = int(
+                    st.slider(
+                        "Postmortem Focus Items",
+                        min_value=5,
+                        max_value=40,
+                        value=12,
+                        step=1,
+                        key="tournament_postmortem_focus_limit",
+                    )
+                )
+                post_packet = build_daily_ai_review_packet(
+                    review_date=tr_date.isoformat(),
+                    contest_id=tr_contest_id,
+                    projection_comparison_df=pm_proj_compare_df,
+                    entries_df=pm_entries_df,
+                    exposure_df=pm_exposure_df,
+                    phantom_summary_df=pm_phantom_summary_df,
+                    phantom_lineups_df=pm_phantom_df,
+                    adjustment_factors_df=pm_adjust_df,
+                    focus_limit=post_focus_limit,
+                )
+                scorecards = post_packet.get("scorecards") or {}
+                projection_quality = scorecards.get("projection_quality") or {}
+                ownership_quality = scorecards.get("ownership_quality") or {}
+                lineup_quality = scorecards.get("lineup_quality") or {}
+                field_quality = scorecards.get("field_quality") or {}
+
+                top10_entries_df = pm_entries_df.copy()
+                if "Rank" in top10_entries_df.columns:
+                    top10_entries_df = top10_entries_df.nsmallest(10, "Rank")
+                else:
+                    top10_entries_df = top10_entries_df.head(10)
+                top10_user_df = build_user_strategy_summary(top10_entries_df)
+                if not top10_user_df.empty and "best_rank" in top10_user_df.columns:
+                    top10_user_df = top10_user_df.sort_values(["best_rank", "most_points"], ascending=[True, False])
+
+                phantom_construction_df = pd.DataFrame()
+                if not pm_phantom_df.empty:
+                    phantom_working = pm_phantom_df.copy()
+                    group_cols = [
+                        c
+                        for c in ["version_key", "version_label", "lineup_strategy", "stack_signature", "salary_texture_bucket"]
+                        if c in phantom_working.columns
+                    ]
+                    if not group_cols:
+                        group_cols = [c for c in ["version_key", "version_label"] if c in phantom_working.columns]
+                    if group_cols:
+                        for col in group_cols:
+                            phantom_working[col] = (
+                                phantom_working[col].astype(str).str.strip().replace({"": "n/a", "nan": "n/a"})
+                            )
+                        count_col = "lineup_number" if "lineup_number" in phantom_working.columns else group_cols[0]
+                        agg_kwargs: dict[str, Any] = {"lineups": (count_col, "count")}
+                        if "actual_points" in phantom_working.columns:
+                            agg_kwargs["avg_actual_points"] = ("actual_points", lambda s: float(pd.to_numeric(s, errors="coerce").mean()))
+                            agg_kwargs["best_actual_points"] = ("actual_points", lambda s: float(pd.to_numeric(s, errors="coerce").max()))
+                        if "actual_minus_projected" in phantom_working.columns:
+                            agg_kwargs["avg_actual_minus_projected"] = (
+                                "actual_minus_projected",
+                                lambda s: float(pd.to_numeric(s, errors="coerce").mean()),
+                            )
+                        if "would_beat_pct" in phantom_working.columns:
+                            agg_kwargs["avg_would_beat_pct"] = (
+                                "would_beat_pct",
+                                lambda s: float(pd.to_numeric(s, errors="coerce").mean()),
+                            )
+                        if "salary_left" in phantom_working.columns:
+                            agg_kwargs["avg_salary_left"] = ("salary_left", lambda s: float(pd.to_numeric(s, errors="coerce").mean()))
+                        phantom_construction_df = phantom_working.groupby(group_cols, as_index=False).agg(**agg_kwargs)
+                        sort_col = "avg_would_beat_pct" if "avg_would_beat_pct" in phantom_construction_df.columns else "lineups"
+                        phantom_construction_df = phantom_construction_df.sort_values(sort_col, ascending=False).reset_index(drop=True)
+
+                rw1, rw2, rw3, rw4, rw5 = st.columns(5)
+                rw1.metric("Field Entries", _safe_int_value(field_quality.get("field_entries"), default=0))
+                rw2.metric("Projection Blend MAE", f"{_safe_float_value(projection_quality.get('blend_mae'), default=0.0):.2f}")
+                rw3.metric("Ownership MAE", f"{_safe_float_value(ownership_quality.get('ownership_mae'), default=0.0):.2f}")
+                rw4.metric("Phantom Lineups", _safe_int_value(lineup_quality.get("lineups_scored"), default=0))
+                rw5.metric("Phantom Avg Beat %", f"{_safe_float_value(lineup_quality.get('avg_would_beat_pct'), default=0.0):.1f}")
+
+                blend_mae = _safe_float_value(projection_quality.get("blend_mae"), default=0.0)
+                proj_rank_corr = _safe_float_value(projection_quality.get("blended_rank_spearman"), default=0.0)
+                ownership_mae = _safe_float_value(ownership_quality.get("ownership_mae"), default=0.0)
+                ownership_rank_corr = _safe_float_value(ownership_quality.get("ownership_rank_spearman"), default=0.0)
+                lineup_scored = _safe_int_value(lineup_quality.get("lineups_scored"), default=0)
+                lineup_avg_delta = _safe_float_value(lineup_quality.get("avg_actual_minus_projected"), default=0.0)
+                lineup_avg_beat = _safe_float_value(lineup_quality.get("avg_would_beat_pct"), default=0.0)
+                field_avg_salary_left = _safe_float_value(field_quality.get("avg_salary_left"), default=0.0)
+                field_top10_salary_left = _safe_float_value(field_quality.get("top10_avg_salary_left"), default=0.0)
+
+                winner_points = 0.0
+                if "Points" in pm_entries_df.columns:
+                    winner_points = _safe_float_value(pd.to_numeric(pm_entries_df["Points"], errors="coerce").max(), default=0.0)
+                best_phantom_points = 0.0
+                if "actual_points" in pm_phantom_df.columns:
+                    best_phantom_points = _safe_float_value(
+                        pd.to_numeric(pm_phantom_df["actual_points"], errors="coerce").max(),
+                        default=0.0,
+                    )
+                elif "best_actual_points" in pm_phantom_summary_df.columns:
+                    best_phantom_points = _safe_float_value(
+                        pd.to_numeric(pm_phantom_summary_df["best_actual_points"], errors="coerce").max(),
+                        default=0.0,
+                    )
+                phantom_gap_to_winner = (winner_points - best_phantom_points) if (winner_points > 0.0 and best_phantom_points > 0.0) else None
+
+                top10_concentration = 0.0
+                if not top10_user_df.empty and "entries" in top10_user_df.columns:
+                    top10_total_entries = float(pd.to_numeric(top10_user_df["entries"], errors="coerce").fillna(0.0).sum())
+                    top10_max_entries = float(pd.to_numeric(top10_user_df["entries"], errors="coerce").fillna(0.0).max())
+                    if top10_total_entries > 0:
+                        top10_concentration = top10_max_entries / top10_total_entries
+
+                right_notes: list[str] = []
+                wrong_notes: list[str] = []
+                if proj_rank_corr >= 0.20:
+                    right_notes.append(f"Projection ordering held up with positive rank correlation (`{proj_rank_corr:.2f}`).")
+                else:
+                    wrong_notes.append(f"Projection ordering was weak (`{proj_rank_corr:.2f}` rank correlation).")
+                if blend_mae <= 7.0:
+                    right_notes.append(f"Projection absolute error was acceptable (`blend_mae={blend_mae:.2f}`).")
+                else:
+                    wrong_notes.append(f"Projection error was high (`blend_mae={blend_mae:.2f}`).")
+                if ownership_rank_corr >= 0.15:
+                    right_notes.append(f"Ownership directionality was useful (`rank_corr={ownership_rank_corr:.2f}`).")
+                else:
+                    wrong_notes.append(f"Ownership rank correlation was weak (`{ownership_rank_corr:.2f}`).")
+                if ownership_mae <= 10.0:
+                    right_notes.append(f"Ownership absolute error stayed reasonable (`ownership_mae={ownership_mae:.2f}`).")
+                else:
+                    wrong_notes.append(f"Ownership misses were large (`ownership_mae={ownership_mae:.2f}`).")
+                if lineup_scored > 0:
+                    if lineup_avg_delta >= 0.0:
+                        right_notes.append(
+                            "Phantom constructions beat their own projections on average "
+                            f"(`avg_actual_minus_projected={lineup_avg_delta:.2f}`)."
+                        )
+                    else:
+                        wrong_notes.append(
+                            "Phantom constructions underperformed projections "
+                            f"(`avg_actual_minus_projected={lineup_avg_delta:.2f}`)."
+                        )
+                    if lineup_avg_beat >= 50.0:
+                        right_notes.append(f"Phantom builds were competitive vs field (`avg_would_beat_pct={lineup_avg_beat:.1f}`).")
+                    else:
+                        wrong_notes.append(f"Phantom builds lagged field (`avg_would_beat_pct={lineup_avg_beat:.1f}`).")
+                else:
+                    wrong_notes.append("No phantom runs are scored yet for this date; construction feedback is incomplete.")
+                if field_top10_salary_left <= field_avg_salary_left:
+                    right_notes.append(
+                        "Top-10 lineups generally spent more salary than field average "
+                        f"(`top10={field_top10_salary_left:.0f}`, `field={field_avg_salary_left:.0f}`)."
+                    )
+                else:
+                    wrong_notes.append(
+                        "Top-10 lineups left more salary than the field average "
+                        f"(`top10={field_top10_salary_left:.0f}`, `field={field_avg_salary_left:.0f}`)."
+                    )
+                if phantom_gap_to_winner is not None:
+                    if phantom_gap_to_winner <= 0.0:
+                        right_notes.append("At least one phantom lineup matched or beat the field winner on actual points.")
+                    else:
+                        wrong_notes.append(
+                            "Best phantom lineup trailed the field winner by "
+                            f"`{phantom_gap_to_winner:.2f}` points."
+                        )
+
+                st.subheader("What Went Right")
+                if right_notes:
+                    st.markdown("\n".join([f"- {note}" for note in right_notes]))
+                else:
+                    st.caption("No strong positive signals yet from this sample.")
+
+                st.subheader("What Went Wrong")
+                if wrong_notes:
+                    st.markdown("\n".join([f"- {note}" for note in wrong_notes]))
+                else:
+                    st.caption("No major failure signals detected from current metrics.")
+
+                st.subheader("Top-10 User Insights")
+                if top10_user_df.empty:
+                    st.info("No top-10 user summary available from the loaded field entries.")
+                else:
+                    u1, u2, u3 = st.columns(3)
+                    u1.metric("Top-10 Handles", int(len(top10_user_df)))
+                    u2.metric("Largest Handle Share", f"{100.0 * top10_concentration:.1f}%")
+                    u3.metric("Best Handle Score", f"{_safe_float_value(top10_user_df['most_points'].max(), default=0.0):.2f}")
+                    st.dataframe(top10_user_df, hide_index=True, use_container_width=True)
+
+                st.subheader("Phantom Construction Insights")
+                if pm_phantom_df.empty:
+                    st.info("Run Phantom Review to include generated-lineup construction insights.")
+                elif phantom_construction_df.empty:
+                    st.info("Phantom rows loaded, but no construction-level grouping columns were found.")
+                else:
+                    st.dataframe(phantom_construction_df.head(30), hide_index=True, use_container_width=True)
+
+                improvement_rows: list[dict[str, Any]] = []
+                improvement_rows.append(
+                    {
+                        "priority": 1,
+                        "area": "Projection Calibration",
+                        "why": f"blend_mae={blend_mae:.2f}, rank_corr={proj_rank_corr:.2f}",
+                        "next_slate_change": "Apply role/salary-specific projection multipliers and verify by segment.",
+                        "success_metric": "Reduce blend MAE by >= 1.0 while maintaining or improving rank correlation.",
+                    }
+                )
+                improvement_rows.append(
+                    {
+                        "priority": 2,
+                        "area": "Ownership Calibration",
+                        "why": f"ownership_mae={ownership_mae:.2f}, rank_corr={ownership_rank_corr:.2f}",
+                        "next_slate_change": "Adjust ownership model by projection tier and game environment flags.",
+                        "success_metric": "Lower ownership MAE and increase ownership rank correlation on next slate.",
+                    }
+                )
+                if lineup_scored > 0:
+                    improvement_rows.append(
+                        {
+                            "priority": 3,
+                            "area": "Phantom Construction",
+                            "why": f"avg_actual_minus_projected={lineup_avg_delta:.2f}, avg_would_beat_pct={lineup_avg_beat:.1f}",
+                            "next_slate_change": "Promote constructions with best phantom beat-rate and actual-minus-projection.",
+                            "success_metric": "Increase avg_would_beat_pct and reduce negative actual-minus-projected drift.",
+                        }
+                    )
+                if phantom_gap_to_winner is not None:
+                    improvement_rows.append(
+                        {
+                            "priority": 4,
+                            "area": "Ceiling Capture",
+                            "why": f"winner_gap={phantom_gap_to_winner:.2f}",
+                            "next_slate_change": "Increase exposure to high-upside game/team stack archetypes seen in top finishers.",
+                            "success_metric": "Close winner gap and improve top-end phantom lineup outcomes.",
+                        }
+                    )
+                improvement_rows.append(
+                    {
+                        "priority": 5,
+                        "area": "Top-10 User Archetypes",
+                        "why": f"largest_top10_handle_share={100.0 * top10_concentration:.1f}%",
+                        "next_slate_change": "Mirror top-handle construction traits (salary left, team/game stack density).",
+                        "success_metric": "Increase overlap with top-10 construction profile while keeping lineup diversity.",
+                    }
+                )
+                improvement_df = pd.DataFrame(improvement_rows).sort_values("priority")
+                st.subheader("What To Improve Next Slate")
+                st.dataframe(improvement_df, hide_index=True, use_container_width=True)
+
+                postmortem_payload = {
+                    "schema_version": "tournament_postmortem_v1",
+                    "review_context": {
+                        "review_date": tr_date.isoformat(),
+                        "contest_id": str(tr_contest_id or "").strip(),
+                    },
+                    "scorecards": scorecards,
+                    "focus_tables": post_packet.get("focus_tables") or {},
+                    "top10_user_summary": top10_user_df.to_dict(orient="records") if not top10_user_df.empty else [],
+                    "phantom_construction_summary": (
+                        phantom_construction_df.head(40).to_dict(orient="records")
+                        if not phantom_construction_df.empty
+                        else []
+                    ),
+                    "phantom_summary": (
+                        pm_phantom_summary_df.head(40).to_dict(orient="records")
+                        if not pm_phantom_summary_df.empty
+                        else []
+                    ),
+                    "improvement_plan": improvement_df.to_dict(orient="records"),
+                }
+                postmortem_prompt_system = (
+                    "You are a DFS tournament postmortem analyst. Use only evidence from the JSON packet. "
+                    "Be concrete, concise, and prioritize actions by expected impact."
+                )
+                postmortem_prompt_user = (
+                    "Review this tournament postmortem packet and produce a practical debrief.\n\n"
+                    "Required sections:\n"
+                    "1) What Went Right (3-6 bullets)\n"
+                    "2) What Went Wrong (3-6 bullets)\n"
+                    "3) Top-10 User Construction Insights\n"
+                    "4) Phantom vs Field Construction Findings\n"
+                    "5) Prioritized Tweaks for Next Slate (max 5, each with rationale + success metric)\n\n"
+                    "Constraints:\n"
+                    "- Use only evidence in the JSON packet.\n"
+                    "- Cite exact metric names/values.\n"
+                    "- If evidence is insufficient, state what is missing.\n\n"
+                    "JSON packet:\n"
+                    f"{json.dumps(postmortem_payload, indent=2, ensure_ascii=True)}\n"
+                )
+
+                postmortem_packet_json = json.dumps(postmortem_payload, indent=2, ensure_ascii=True)
+                d1, d2 = st.columns(2)
+                d1.download_button(
+                    "Download Tournament Postmortem Packet JSON",
+                    data=postmortem_packet_json,
+                    file_name=f"tournament_postmortem_packet_{tr_date.isoformat()}_{tr_contest_id}.json",
+                    mime="application/json",
+                    key="download_tournament_postmortem_packet_json",
+                )
+                d2.download_button(
+                    "Download Tournament Postmortem Prompt",
+                    data=postmortem_prompt_user,
+                    file_name=f"tournament_postmortem_prompt_{tr_date.isoformat()}_{tr_contest_id}.txt",
+                    mime="text/plain",
+                    key="download_tournament_postmortem_prompt_txt",
+                )
+
+                openai_key = (os.getenv("OPENAI_API_KEY", "").strip() or (_secret("openai_api_key") or "").strip())
+                ac1, ac2 = st.columns(2)
+                postmortem_model = ac1.text_input(
+                    "Postmortem Model",
+                    value=str(st.session_state.get("ai_review_model", "gpt-5-mini")),
+                    key="tournament_postmortem_model",
+                ).strip()
+                postmortem_tokens = int(
+                    ac2.number_input(
+                        "Postmortem Max Tokens",
+                        min_value=400,
+                        max_value=8000,
+                        value=1600,
+                        step=100,
+                        key="tournament_postmortem_max_tokens",
+                    )
+                )
+                run_postmortem_agent = st.button(
+                    "Run Tournament Postmortem Agent",
+                    key="run_tournament_postmortem_agent",
+                )
+                if run_postmortem_agent:
+                    if not openai_key:
+                        st.error("Set `OPENAI_API_KEY` (or `openai_api_key` in Streamlit secrets) to run the postmortem agent.")
+                    else:
+                        try:
+                            with st.spinner("Running tournament postmortem agent..."):
+                                postmortem_text = request_openai_review(
+                                    api_key=openai_key,
+                                    user_prompt=postmortem_prompt_user,
+                                    system_prompt=postmortem_prompt_system,
+                                    model=postmortem_model or "gpt-5-mini",
+                                    max_output_tokens=postmortem_tokens,
+                                )
+                                st.session_state["cbb_tournament_postmortem_output"] = postmortem_text
+                        except Exception as exc:
+                            st.exception(exc)
+
+                postmortem_output = str(st.session_state.get("cbb_tournament_postmortem_output") or "").strip()
+                if postmortem_output:
+                    st.text_area(
+                        "Tournament Postmortem Output",
+                        value=postmortem_output,
+                        height=420,
+                        key="tournament_postmortem_output_text",
+                    )
+                    st.download_button(
+                        "Download Tournament Postmortem Output",
+                        data=postmortem_output,
+                        file_name=f"tournament_postmortem_output_{tr_date.isoformat()}_{tr_contest_id}.txt",
+                        mime="text/plain",
+                        key="download_tournament_postmortem_output_txt",
+                    )
         except Exception as exc:
             st.exception(exc)
 
