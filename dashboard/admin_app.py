@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import inspect
 import json
+import math
 import os
 import re
 import sys
@@ -35,6 +36,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     lineups_slots_frame,
     lineups_summary_frame,
     normalize_injuries_frame,
+    projection_role_bucket_key,
     projection_salary_bucket_key,
     remove_injured_players,
 )
@@ -115,6 +117,13 @@ PROJECTION_SALARY_BUCKET_LABELS = {
     "4500_6999": "4500-6999",
     "7000_9999": "7000-9999",
     "gte10000": "10000+",
+}
+PROJECTION_ROLE_BUCKET_ORDER = ("guard", "forward", "center", "other")
+PROJECTION_ROLE_BUCKET_LABELS = {
+    "guard": "Guard",
+    "forward": "Forward",
+    "center": "Center",
+    "other": "Other",
 }
 SLATE_PRESET_OPTIONS = ["Main", "Afternoon", "Full Day", "Night", "Custom"]
 
@@ -228,6 +237,52 @@ def _ranked_bonus(
     return float(max(floor, start - (step * float(max(0, rank_index)))))
 
 
+def _allocate_weighted_counts(
+    *,
+    keys: list[str],
+    total_count: int,
+    weights: dict[str, float] | None,
+    min_per_key: int = 1,
+) -> dict[str, int]:
+    clean_keys = [str(k).strip() for k in keys if str(k).strip()]
+    if not clean_keys:
+        return {}
+    total = max(0, int(total_count))
+    if total <= 0:
+        return {k: 0 for k in clean_keys}
+
+    key_count = len(clean_keys)
+    floor = max(0, int(min_per_key))
+    if total < (floor * key_count):
+        floor = 0
+    counts = {k: floor for k in clean_keys}
+    remaining = total - (floor * key_count)
+    if remaining <= 0:
+        return counts
+
+    raw_weights = {k: float((weights or {}).get(k, 1.0)) for k in clean_keys}
+    for key, value in list(raw_weights.items()):
+        if value <= 0.0:
+            raw_weights[key] = 1.0
+    weight_sum = sum(raw_weights.values())
+    if weight_sum <= 0:
+        weight_sum = float(key_count)
+        raw_weights = {k: 1.0 for k in clean_keys}
+
+    expected = {k: (remaining * raw_weights[k] / weight_sum) for k in clean_keys}
+    assigned = 0
+    for key in clean_keys:
+        whole = int(math.floor(expected[key]))
+        counts[key] += whole
+        assigned += whole
+    leftover = remaining - assigned
+    if leftover > 0:
+        rank_keys = sorted(clean_keys, key=lambda k: (expected[k] - math.floor(expected[k])), reverse=True)
+        for key in rank_keys[:leftover]:
+            counts[key] += 1
+    return counts
+
+
 def _build_game_agent_lineup_objective_adjustments(
     *,
     packet: dict[str, Any] | None,
@@ -286,6 +341,7 @@ def _build_game_agent_lineup_objective_adjustments(
     applied_games = 0
     applied_teams = 0
     applied_players = 0
+    applied_game_keys: set[str] = set()
     player_cap = max(2.5, 8.0 * strength)
     game_limit = max(1, min(int(focus_games), 10))
     team_limit = max(2, min(int(focus_games * 2), 20))
@@ -314,6 +370,7 @@ def _build_game_agent_lineup_objective_adjustments(
         for pid in game_ids:
             adjustments[pid] = min(player_cap, adjustments.get(pid, 0.0) + bonus)
         applied_games += 1
+        applied_game_keys.add(game_key)
 
     for idx, row in enumerate(team_targets[:team_limit]):
         if not isinstance(row, dict):
@@ -381,6 +438,7 @@ def _build_game_agent_lineup_objective_adjustments(
             "applied_games": applied_games,
             "applied_teams": applied_teams,
             "applied_players": applied_players,
+            "applied_game_keys": sorted(applied_game_keys),
         }
 
     adjusted_preview_df = working.copy()
@@ -400,6 +458,7 @@ def _build_game_agent_lineup_objective_adjustments(
         "applied_teams": int(applied_teams),
         "applied_players": int(applied_players),
         "adjusted_players": int(len(final_adjustments)),
+        "applied_game_keys": sorted(applied_game_keys),
         "preview_rows": preview_rows,
     }
 
@@ -1274,6 +1333,278 @@ def compute_projection_salary_bucket_calibration(
         "player_rows": int(len(full)),
         "scales": scales,
         "bucket_rows": output_rows,
+    }
+
+
+def _default_role_bucket_calibration(
+    lookback_days: int,
+    min_samples_per_bucket: int,
+) -> dict[str, Any]:
+    bucket_rows = [
+        {
+            "role_bucket": key,
+            "role_bucket_label": PROJECTION_ROLE_BUCKET_LABELS.get(key, key),
+            "samples": 0,
+            "avg_actual": 0.0,
+            "avg_projection": 0.0,
+            "avg_error": 0.0,
+            "mae": 0.0,
+            "raw_scale": 1.0,
+            "scale": 1.0,
+            "used_for_adjustment": False,
+        }
+        for key in PROJECTION_ROLE_BUCKET_ORDER
+    ]
+    return {
+        "lookback_days": int(max(0, lookback_days)),
+        "min_samples_per_bucket": int(max(1, min_samples_per_bucket)),
+        "used_dates": 0,
+        "player_rows": 0,
+        "scales": {key: 1.0 for key in PROJECTION_ROLE_BUCKET_ORDER},
+        "bucket_rows": bucket_rows,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_projection_role_bucket_calibration(
+    bucket_name: str,
+    selected_date: date,
+    selected_slate_key: str | None,
+    lookback_days: int,
+    min_samples_per_bucket: int,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> dict[str, Any]:
+    lookback = int(max(0, lookback_days))
+    min_samples = int(max(1, min_samples_per_bucket))
+    default_result = _default_role_bucket_calibration(lookback, min_samples)
+
+    end_date = selected_date - timedelta(days=1)
+    if lookback <= 0 or end_date < date(2000, 1, 1):
+        return default_result
+
+    start_date = end_date - timedelta(days=max(1, lookback) - 1)
+    all_rows: list[pd.DataFrame] = []
+    used_dates = 0
+    cursor = end_date
+    while cursor >= start_date:
+        slate_df = load_dk_slate_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=cursor,
+            slate_key=selected_slate_key,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if slate_df.empty:
+            cursor -= timedelta(days=1)
+            continue
+        actual_df = load_actual_results_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=cursor,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if actual_df.empty:
+            cursor -= timedelta(days=1)
+            continue
+
+        comp_df = build_projection_actual_comparison(
+            projection_df=slate_df,
+            actual_results_df=actual_df,
+        )
+        if comp_df.empty:
+            cursor -= timedelta(days=1)
+            continue
+
+        comp = comp_df.copy()
+        if "Position" in comp.columns:
+            comp["Position"] = comp["Position"].astype(str)
+        else:
+            comp["Position"] = ""
+        comp["blended_projection"] = pd.to_numeric(comp.get("blended_projection"), errors="coerce")
+        comp["actual_dk_points"] = pd.to_numeric(comp.get("actual_dk_points"), errors="coerce")
+        comp["blend_error"] = pd.to_numeric(comp.get("blend_error"), errors="coerce")
+        comp = comp.loc[
+            comp["blended_projection"].notna()
+            & comp["actual_dk_points"].notna()
+            & (comp["blended_projection"] > 0.0)
+        ].copy()
+        if comp.empty:
+            cursor -= timedelta(days=1)
+            continue
+
+        comp["role_bucket"] = comp["Position"].map(projection_role_bucket_key)
+        all_rows.append(comp[["role_bucket", "actual_dk_points", "blended_projection", "blend_error"]])
+        used_dates += 1
+        cursor -= timedelta(days=1)
+
+    if not all_rows:
+        return default_result
+
+    full = pd.concat(all_rows, ignore_index=True)
+    if full.empty:
+        return default_result
+
+    output_rows: list[dict[str, Any]] = []
+    scales: dict[str, float] = {}
+    for key in PROJECTION_ROLE_BUCKET_ORDER:
+        seg = full.loc[full["role_bucket"] == key].copy()
+        samples = int(len(seg))
+        avg_actual = float(pd.to_numeric(seg.get("actual_dk_points"), errors="coerce").mean()) if samples else 0.0
+        avg_projection = float(pd.to_numeric(seg.get("blended_projection"), errors="coerce").mean()) if samples else 0.0
+        avg_error = float(pd.to_numeric(seg.get("blend_error"), errors="coerce").mean()) if samples else 0.0
+        mae = float(pd.to_numeric(seg.get("blend_error"), errors="coerce").abs().mean()) if samples else 0.0
+        raw_scale = 1.0
+        if avg_projection > 0.0 and samples > 0:
+            raw_scale = float(avg_actual / avg_projection)
+        clipped_scale = float(min(1.20, max(0.80, raw_scale)))
+        use_scale = clipped_scale if samples >= min_samples else 1.0
+        scales[key] = float(use_scale)
+        output_rows.append(
+            {
+                "role_bucket": key,
+                "role_bucket_label": PROJECTION_ROLE_BUCKET_LABELS.get(key, key),
+                "samples": samples,
+                "avg_actual": avg_actual,
+                "avg_projection": avg_projection,
+                "avg_error": avg_error,
+                "mae": mae,
+                "raw_scale": raw_scale,
+                "scale": float(use_scale),
+                "used_for_adjustment": bool(samples >= min_samples),
+            }
+        )
+
+    return {
+        "lookback_days": lookback,
+        "min_samples_per_bucket": min_samples,
+        "used_dates": int(used_dates),
+        "player_rows": int(len(full)),
+        "scales": scales,
+        "bucket_rows": output_rows,
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def compute_phantom_version_performance_weights(
+    bucket_name: str,
+    selected_date: date,
+    selected_slate_key: str | None,
+    lookback_days: int,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> dict[str, Any]:
+    lookback = int(max(0, lookback_days))
+    default = {
+        "lookback_days": lookback,
+        "used_dates": 0,
+        "rows": 0,
+        "weights": {},
+        "version_stats": [],
+    }
+    if lookback <= 0:
+        return default
+
+    end_date = selected_date - timedelta(days=1)
+    if end_date < date(2000, 1, 1):
+        return default
+    start_date = end_date - timedelta(days=max(1, lookback) - 1)
+
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    try:
+        run_dates = store.list_lineup_run_dates(selected_slate_key)
+    except TypeError:
+        run_dates = store.list_lineup_run_dates()
+    candidate_dates = [d for d in run_dates if isinstance(d, date) and start_date <= d <= end_date]
+    if not candidate_dates:
+        return default
+
+    all_summary_rows: list[pd.DataFrame] = []
+    used_dates = 0
+    for run_date in sorted(candidate_dates, reverse=True):
+        try:
+            run_ids = store.list_lineup_run_ids(run_date, selected_slate_key)
+        except TypeError:
+            run_ids = store.list_lineup_run_ids(run_date)
+        day_rows: list[pd.DataFrame] = []
+        for run_id in run_ids:
+            payload = store.read_phantom_review_summary_json(run_date, run_id)
+            if not isinstance(payload, dict):
+                continue
+            rows = payload.get("summary_rows")
+            if not isinstance(rows, list) or not rows:
+                continue
+            frame = pd.DataFrame(rows)
+            if frame.empty:
+                continue
+            frame["run_date"] = run_date.isoformat()
+            day_rows.append(frame)
+        if day_rows:
+            all_summary_rows.append(pd.concat(day_rows, ignore_index=True))
+            used_dates += 1
+
+    if not all_summary_rows:
+        return default
+
+    full = pd.concat(all_summary_rows, ignore_index=True)
+    if full.empty:
+        return default
+    if "version_key" not in full.columns:
+        return default
+    full["version_key"] = full["version_key"].astype(str).str.strip()
+    full = full.loc[full["version_key"] != ""].copy()
+    if full.empty:
+        return default
+
+    full["lineups"] = pd.to_numeric(full.get("lineups"), errors="coerce").fillna(0.0)
+    full["avg_would_beat_pct"] = pd.to_numeric(full.get("avg_would_beat_pct"), errors="coerce").fillna(0.0)
+    full["avg_actual_minus_projected"] = pd.to_numeric(full.get("avg_actual_minus_projected"), errors="coerce").fillna(0.0)
+    full = full.loc[full["lineups"] > 0.0].copy()
+    if full.empty:
+        return default
+
+    stats = (
+        full.groupby("version_key", as_index=False)
+        .agg(
+            lineups=("lineups", "sum"),
+            beat_mean=("avg_would_beat_pct", lambda s: float((pd.to_numeric(s, errors="coerce")).mean())),
+            delta_mean=("avg_actual_minus_projected", lambda s: float((pd.to_numeric(s, errors="coerce")).mean())),
+        )
+        .sort_values("lineups", ascending=False)
+        .reset_index(drop=True)
+    )
+    if stats.empty:
+        return default
+
+    beat_component = (pd.to_numeric(stats["beat_mean"], errors="coerce").fillna(0.0) / 100.0).clip(lower=0.0)
+    delta_component = (
+        1.0 + (pd.to_numeric(stats["delta_mean"], errors="coerce").fillna(0.0) / 80.0)
+    ).clip(lower=0.20, upper=1.35)
+    raw_score = ((0.75 * beat_component) + (0.25 * delta_component)).clip(lower=0.05)
+    weighted_score = raw_score * pd.to_numeric(stats["lineups"], errors="coerce").fillna(0.0).clip(lower=1.0)
+
+    total_weighted = float(weighted_score.sum())
+    if total_weighted <= 0.0:
+        return default
+    version_weights = {
+        str(row["version_key"]): float(weighted_score.iloc[idx] / total_weighted)
+        for idx, row in stats.iterrows()
+    }
+    return {
+        "lookback_days": lookback,
+        "used_dates": int(used_dates),
+        "rows": int(len(full)),
+        "weights": version_weights,
+        "version_stats": stats.to_dict(orient="records"),
     }
 
 
@@ -3153,6 +3484,36 @@ with tab_lineups:
                 help="Uses prior slates with both DK slate projections and final box-score results.",
             )
         )
+    rb1, rb2 = st.columns(2)
+    auto_role_bucket_calibration = bool(
+        rb1.checkbox(
+            "Role-Bucket Residual Calibration",
+            value=True,
+            help="Apply per-role projection scales (Guard/Forward/Center/Other) from recent residuals.",
+        )
+    )
+    role_calibration_min_samples = int(
+        rb2.slider(
+            "Min Samples Per Role Bucket",
+            min_value=5,
+            max_value=120,
+            value=25,
+            step=1,
+            help="Role buckets below this count stay at scale 1.0.",
+        )
+    )
+    role_calibration_lookback_days = int(max(7, calibration_lookback_days))
+    if auto_role_bucket_calibration:
+        role_calibration_lookback_days = int(
+            st.slider(
+                "Role-Bucket Calibration Lookback Days",
+                min_value=7,
+                max_value=90,
+                value=int(max(7, calibration_lookback_days)),
+                step=1,
+                help="Uses prior slates with both projections and final results to calibrate role-level drift.",
+            )
+        )
     u1, u2, u3, u4 = st.columns(4)
     apply_uncertainty_shrink = bool(
         u1.checkbox(
@@ -3189,6 +3550,134 @@ with tab_lineups:
             value=10,
             step=1,
             help="Additional shrink for players above the DNP-risk threshold.",
+        )
+    )
+    og1, og2, og3, og4 = st.columns(4)
+    apply_ownership_guardrails = bool(
+        og1.checkbox(
+            "Ownership Surprise Guardrails",
+            value=True,
+            help="Raises ownership floor for projected-low players with strong surge/chalk signals.",
+        )
+    )
+    ownership_guardrail_proj_threshold = float(
+        og2.slider(
+            "Guardrail Projected Own <= %",
+            min_value=3,
+            max_value=20,
+            value=10,
+            step=1,
+            disabled=not apply_ownership_guardrails,
+        )
+    )
+    ownership_guardrail_surge_threshold = float(
+        og3.slider(
+            "Guardrail Surge Score >= ",
+            min_value=40,
+            max_value=95,
+            value=72,
+            step=1,
+            disabled=not apply_ownership_guardrails,
+        )
+    )
+    ownership_guardrail_floor_cap = float(
+        og4.slider(
+            "Guardrail Ownership Cap %",
+            min_value=12,
+            max_value=35,
+            value=24,
+            step=1,
+            disabled=not apply_ownership_guardrails,
+        )
+    )
+    lo1, lo2, lo3, lo4 = st.columns(4)
+    low_own_bucket_exposure_pct = float(
+        lo1.slider(
+            "Low-Own Bucket Exposure %",
+            min_value=0,
+            max_value=80,
+            value=30,
+            step=1,
+            help="Portion of lineups that must include at least one low-owned upside candidate.",
+        )
+    )
+    low_own_bucket_min_per_lineup = int(
+        lo2.slider(
+            "Low-Own Min Players",
+            min_value=0,
+            max_value=3,
+            value=1,
+            step=1,
+            disabled=low_own_bucket_exposure_pct <= 0.0,
+        )
+    )
+    low_own_bucket_max_projected_ownership = float(
+        lo3.slider(
+            "Low-Own Max Projected Own %",
+            min_value=3,
+            max_value=20,
+            value=10,
+            step=1,
+            disabled=low_own_bucket_exposure_pct <= 0.0,
+        )
+    )
+    low_own_bucket_min_projection = float(
+        lo4.slider(
+            "Low-Own Min Projection",
+            min_value=10,
+            max_value=40,
+            value=24,
+            step=1,
+            disabled=low_own_bucket_exposure_pct <= 0.0,
+        )
+    )
+    cb1, cb2, cb3, cb4 = st.columns(4)
+    ceiling_boost_lineup_pct = float(
+        cb1.slider(
+            "Ceiling Archetype Lineups %",
+            min_value=0,
+            max_value=80,
+            value=25,
+            step=1,
+            help="Allocates a subset of lineups to more aggressive top-end construction scoring.",
+        )
+    )
+    ceiling_boost_stack_bonus = float(
+        cb2.slider(
+            "Ceiling Stack Bonus",
+            min_value=0.0,
+            max_value=6.0,
+            value=2.2,
+            step=0.1,
+            disabled=ceiling_boost_lineup_pct <= 0.0,
+        )
+    )
+    ceiling_boost_salary_left_target = int(
+        cb3.slider(
+            "Ceiling Salary Left Target",
+            min_value=0,
+            max_value=500,
+            value=120,
+            step=10,
+            disabled=ceiling_boost_lineup_pct <= 0.0,
+        )
+    )
+    promote_phantom_constructions = bool(
+        cb4.checkbox(
+            "Promote Top Phantom Constructions",
+            value=True,
+            help="In All Versions mode, reallocate version lineup counts using recent phantom beat-rate.",
+        )
+    )
+    phantom_promotion_lookback_days = int(
+        st.slider(
+            "Phantom Promotion Lookback Days",
+            min_value=3,
+            max_value=60,
+            value=14,
+            step=1,
+            disabled=(not promote_phantom_constructions) or (run_mode_key != "all"),
+            help="Used only for All Versions mode when promotion is enabled.",
         )
     )
     effective_max_salary_left = min(max_salary_left, 50) if strict_salary_utilization else max_salary_left
@@ -3282,6 +3771,8 @@ with tab_lineups:
                     calibration_meta: dict[str, Any] = {}
                     projection_salary_bucket_scales: dict[str, float] = {}
                     salary_bucket_calibration_meta: dict[str, Any] = {}
+                    projection_role_bucket_scales: dict[str, float] = {}
+                    role_bucket_calibration_meta: dict[str, Any] = {}
                     uncertainty_weight = uncertainty_shrink_pct / 100.0
                     dnp_risk_threshold = dnp_risk_threshold_pct / 100.0
                     high_risk_extra_shrink = high_risk_extra_shrink_pct / 100.0
@@ -3341,6 +3832,45 @@ with tab_lineups:
                                 "Salary-bucket calibration found no strong adjustments "
                                 f"(dates={int(salary_bucket_calibration_meta.get('used_dates') or 0)}, "
                                 f"rows={int(salary_bucket_calibration_meta.get('player_rows') or 0)})."
+                            )
+                    if auto_role_bucket_calibration:
+                        role_bucket_calibration_meta = compute_projection_role_bucket_calibration(
+                            bucket_name=bucket_name,
+                            selected_date=lineup_slate_date,
+                            selected_slate_key=lineup_slate_key,
+                            lookback_days=role_calibration_lookback_days,
+                            min_samples_per_bucket=role_calibration_min_samples,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        projection_role_bucket_scales = {
+                            str(k): float(v)
+                            for k, v in (role_bucket_calibration_meta.get("scales") or {}).items()
+                            if str(k).strip()
+                        }
+                        role_rows = role_bucket_calibration_meta.get("bucket_rows") or []
+                        role_applied = [
+                            r
+                            for r in role_rows
+                            if bool(r.get("used_for_adjustment")) and abs(float(r.get("scale", 1.0)) - 1.0) >= 1e-6
+                        ]
+                        if role_applied:
+                            role_summary = ", ".join(
+                                f"{PROJECTION_ROLE_BUCKET_LABELS.get(str(r.get('role_bucket')), str(r.get('role_bucket')))}: {float(r.get('scale')):.3f}"
+                                for r in role_applied
+                            )
+                            st.caption(
+                                "Role-bucket calibration applied: "
+                                f"{role_summary} "
+                                f"(dates={int(role_bucket_calibration_meta.get('used_dates') or 0)}, "
+                                f"rows={int(role_bucket_calibration_meta.get('player_rows') or 0)})."
+                            )
+                        else:
+                            st.caption(
+                                "Role-bucket calibration found no strong adjustments "
+                                f"(dates={int(role_bucket_calibration_meta.get('used_dates') or 0)}, "
+                                f"rows={int(role_bucket_calibration_meta.get('player_rows') or 0)})."
                             )
                     if strict_salary_utilization and effective_max_salary_left < max_salary_left:
                         st.caption(
@@ -3474,14 +4004,58 @@ with tab_lineups:
                                 }
                             ]
 
-                    total_units = max(1, lineup_count * len(version_plan))
+                    for cfg in version_plan:
+                        cfg["lineup_count"] = int(lineup_count)
+
+                    phantom_promotion_meta: dict[str, Any] = {}
+                    if run_mode_key == "all" and promote_phantom_constructions and version_plan:
+                        phantom_promotion_meta = compute_phantom_version_performance_weights(
+                            bucket_name=bucket_name,
+                            selected_date=lineup_slate_date,
+                            selected_slate_key=lineup_slate_key,
+                            lookback_days=phantom_promotion_lookback_days,
+                            gcp_project=gcp_project or None,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        historical_weights = {
+                            str(k): float(v)
+                            for k, v in (phantom_promotion_meta.get("weights") or {}).items()
+                            if str(k).strip()
+                        }
+                        total_requested = int(lineup_count * len(version_plan))
+                        version_keys = [str(cfg.get("version_key") or "") for cfg in version_plan]
+                        count_map = _allocate_weighted_counts(
+                            keys=version_keys,
+                            total_count=total_requested,
+                            weights=historical_weights,
+                            min_per_key=1,
+                        )
+                        for cfg in version_plan:
+                            vkey = str(cfg.get("version_key") or "")
+                            cfg["lineup_count"] = int(max(1, count_map.get(vkey, lineup_count)))
+
+                        preview = ", ".join(
+                            f"{cfg['version_key']}={int(cfg['lineup_count'])}" for cfg in version_plan
+                        )
+                        st.caption(
+                            "Phantom promotion allocation applied: "
+                            f"{preview} "
+                            f"(lookback_days={int(phantom_promotion_meta.get('lookback_days') or 0)}, "
+                            f"used_dates={int(phantom_promotion_meta.get('used_dates') or 0)})."
+                        )
+
+                    total_units = max(1, int(sum(int(cfg.get("lineup_count") or 0) for cfg in version_plan)))
                     generated_versions: dict[str, Any] = {}
 
                     for version_idx, version_cfg in enumerate(version_plan):
-                        version_offset = version_idx * lineup_count
+                        version_lineup_count = int(max(0, version_cfg.get("lineup_count") or 0))
+                        if version_lineup_count <= 0:
+                            continue
+                        version_offset = int(sum(int(c.get("lineup_count") or 0) for c in version_plan[:version_idx]))
 
                         def _lineup_progress(done: int, total: int, status: str) -> None:
-                            done_local = max(0, min(lineup_count, int(done)))
+                            done_local = max(0, min(version_lineup_count, int(done)))
                             units_done = version_offset + done_local
                             pct = int((units_done / total_units) * 100)
                             pct = max(0, min(100, pct))
@@ -3490,7 +4064,7 @@ with tab_lineups:
 
                         lineups, warnings = generate_lineups(
                             pool_df=pool_sorted,
-                            num_lineups=lineup_count,
+                            num_lineups=version_lineup_count,
                             contest_type=contest_type,
                             locked_ids=locked_ids,
                             excluded_ids=excluded_ids,
@@ -3504,10 +4078,28 @@ with tab_lineups:
                             cluster_variants_per_cluster=int(version_cfg.get("cluster_variants_per_cluster", 10)),
                             projection_scale=projection_scale,
                             projection_salary_bucket_scales=projection_salary_bucket_scales,
+                            projection_role_bucket_scales=projection_role_bucket_scales,
+                            apply_ownership_guardrails=apply_ownership_guardrails,
+                            ownership_guardrail_projected_threshold=ownership_guardrail_proj_threshold,
+                            ownership_guardrail_surge_threshold=ownership_guardrail_surge_threshold,
+                            ownership_guardrail_projection_rank_threshold=0.60,
+                            ownership_guardrail_floor_base=ownership_guardrail_proj_threshold,
+                            ownership_guardrail_floor_cap=ownership_guardrail_floor_cap,
                             apply_uncertainty_shrink=apply_uncertainty_shrink,
                             uncertainty_weight=uncertainty_weight,
                             high_risk_extra_shrink=high_risk_extra_shrink,
                             dnp_risk_threshold=dnp_risk_threshold,
+                            low_own_bucket_exposure_pct=low_own_bucket_exposure_pct,
+                            low_own_bucket_min_per_lineup=low_own_bucket_min_per_lineup,
+                            low_own_bucket_max_projected_ownership=low_own_bucket_max_projected_ownership,
+                            low_own_bucket_min_projection=low_own_bucket_min_projection,
+                            low_own_bucket_min_tail_score=55.0,
+                            low_own_bucket_objective_bonus=1.3,
+                            preferred_game_keys=list(game_agent_bias_meta.get("applied_game_keys") or []),
+                            preferred_game_bonus=0.6,
+                            ceiling_boost_lineup_pct=ceiling_boost_lineup_pct,
+                            ceiling_boost_stack_bonus=ceiling_boost_stack_bonus,
+                            ceiling_boost_salary_left_target=ceiling_boost_salary_left_target,
                             objective_score_adjustments=objective_score_adjustments,
                             salary_left_target=salary_left_target,
                             random_seed=lineup_seed + version_idx,
@@ -3519,6 +4111,7 @@ with tab_lineups:
                             "lineup_strategy": str(version_cfg["lineup_strategy"]),
                             "include_tail_signals": bool(version_cfg.get("include_tail_signals", False)),
                             "model_profile": str(version_cfg.get("model_profile") or ""),
+                            "lineup_count_requested": int(version_lineup_count),
                             "lineups": lineups,
                             "warnings": warnings,
                             "upload_csv": build_dk_upload_csv(lineups) if lineups else "",
@@ -3551,10 +4144,22 @@ with tab_lineups:
                             "cluster_variants_per_cluster": 10,
                             "projection_scale": projection_scale,
                             "projection_salary_bucket_scales": projection_salary_bucket_scales,
+                            "projection_role_bucket_scales": projection_role_bucket_scales,
+                            "apply_ownership_guardrails": apply_ownership_guardrails,
+                            "ownership_guardrail_projected_threshold": ownership_guardrail_proj_threshold,
+                            "ownership_guardrail_surge_threshold": ownership_guardrail_surge_threshold,
+                            "ownership_guardrail_floor_cap": ownership_guardrail_floor_cap,
                             "apply_uncertainty_shrink": apply_uncertainty_shrink,
                             "uncertainty_weight": uncertainty_weight,
                             "high_risk_extra_shrink": high_risk_extra_shrink,
                             "dnp_risk_threshold": dnp_risk_threshold,
+                            "low_own_bucket_exposure_pct": low_own_bucket_exposure_pct,
+                            "low_own_bucket_min_per_lineup": low_own_bucket_min_per_lineup,
+                            "low_own_bucket_max_projected_ownership": low_own_bucket_max_projected_ownership,
+                            "low_own_bucket_min_projection": low_own_bucket_min_projection,
+                            "ceiling_boost_lineup_pct": ceiling_boost_lineup_pct,
+                            "ceiling_boost_stack_bonus": ceiling_boost_stack_bonus,
+                            "ceiling_boost_salary_left_target": ceiling_boost_salary_left_target,
                             "auto_projection_calibration": auto_projection_calibration,
                             "calibration_lookback_days": calibration_lookback_days,
                             "calibration_meta": calibration_meta,
@@ -3562,10 +4167,17 @@ with tab_lineups:
                             "bucket_calibration_lookback_days": bucket_calibration_lookback_days,
                             "bucket_calibration_min_samples": bucket_calibration_min_samples,
                             "salary_bucket_calibration_meta": salary_bucket_calibration_meta,
+                            "auto_role_bucket_calibration": auto_role_bucket_calibration,
+                            "role_calibration_lookback_days": role_calibration_lookback_days,
+                            "role_calibration_min_samples": role_calibration_min_samples,
+                            "role_bucket_calibration_meta": role_bucket_calibration_meta,
                             "apply_game_agent_stack_bias": apply_game_agent_stack_bias,
                             "game_agent_bias_strength_pct": game_agent_bias_strength_pct,
                             "game_agent_focus_games": game_agent_focus_games,
                             "game_agent_bias_meta": game_agent_bias_meta,
+                            "promote_phantom_constructions": promote_phantom_constructions,
+                            "phantom_promotion_lookback_days": phantom_promotion_lookback_days,
+                            "phantom_promotion_meta": phantom_promotion_meta,
                             "bookmaker": lineup_bookmaker.strip(),
                             "locked_ids": locked_ids,
                             "excluded_ids": excluded_ids,
@@ -5005,8 +5617,9 @@ with tab_tournament_review:
                     "to include generated-lineup construction analysis. Exposure/ownership metrics are optional but recommended."
                 )
             else:
+                pf1, pf2 = st.columns(2)
                 post_focus_limit = int(
-                    st.slider(
+                    pf1.slider(
                         "Postmortem Focus Items",
                         min_value=5,
                         max_value=40,
@@ -5015,6 +5628,20 @@ with tab_tournament_review:
                         key="tournament_postmortem_focus_limit",
                     )
                 )
+                missed_stack_underexposure_ratio = float(
+                    pf2.slider(
+                        "Missed Stack Under-Exposure %",
+                        min_value=0,
+                        max_value=100,
+                        value=60,
+                        step=5,
+                        key="tournament_postmortem_stack_underexposure_ratio_pct",
+                        help=(
+                            "Flags stacks when phantom lineup rate is below this percentage of field stack rate. "
+                            "Example: 60% means phantom rate < 0.60 * field rate is considered missed."
+                        ),
+                    )
+                ) / 100.0
                 post_packet = build_daily_ai_review_packet(
                     review_date=tr_date.isoformat(),
                     contest_id=tr_contest_id,
@@ -5292,6 +5919,16 @@ with tab_tournament_review:
                     )
                     game_entries = game_entries.loc[game_entries["stack_size"] >= 3].copy()
                     if not game_entries.empty:
+                        field_lineup_total = int(stack_work["EntryId"].astype(str).str.strip().nunique())
+                        field_lineup_total = max(1, field_lineup_total)
+                        phantom_lineup_total = 0
+                        if not pm_phantom_df.empty:
+                            if "lineup_number" in pm_phantom_df.columns:
+                                phantom_lineup_total = int(pm_phantom_df["lineup_number"].astype(str).str.strip().nunique())
+                            else:
+                                phantom_lineup_total = int(len(pm_phantom_df))
+                        phantom_lineup_total = max(0, phantom_lineup_total)
+
                         game_entries["in_top10"] = game_entries["EntryId"].isin(top10_entry_ids)
                         game_stack_summary_df = (
                             game_entries.groupby("game_key", as_index=False)
@@ -5302,6 +5939,10 @@ with tab_tournament_review:
                             )
                             .sort_values(["top10_entries_with_stack", "field_entries_with_stack", "avg_stack_size"], ascending=[False, False, False])
                             .reset_index(drop=True)
+                        )
+                        game_stack_summary_df["field_stack_rate"] = (
+                            pd.to_numeric(game_stack_summary_df["field_entries_with_stack"], errors="coerce").fillna(0.0)
+                            / float(field_lineup_total)
                         )
                         if not phantom_game_exposure_df.empty:
                             game_stack_summary_df = game_stack_summary_df.merge(
@@ -5314,12 +5955,49 @@ with tab_tournament_review:
                                 .fillna(0)
                                 .astype(int)
                             )
-                            missed_game_stack_df = game_stack_summary_df.loc[
-                                (game_stack_summary_df["top10_entries_with_stack"] > 0)
-                                & (game_stack_summary_df["phantom_lineups_with_game"] <= 0)
-                            ].head(post_focus_limit)
                         else:
-                            game_stack_summary_df["phantom_lineups_with_game"] = pd.NA
+                            game_stack_summary_df["phantom_lineups_with_game"] = 0
+
+                        if phantom_lineup_total > 0:
+                            game_stack_summary_df["phantom_stack_rate"] = (
+                                pd.to_numeric(game_stack_summary_df["phantom_lineups_with_game"], errors="coerce").fillna(0.0)
+                                / float(phantom_lineup_total)
+                            )
+                        else:
+                            game_stack_summary_df["phantom_stack_rate"] = 0.0
+                        game_stack_summary_df["phantom_to_field_stack_rate"] = (
+                            pd.to_numeric(game_stack_summary_df["phantom_stack_rate"], errors="coerce").fillna(0.0)
+                            / pd.to_numeric(game_stack_summary_df["field_stack_rate"], errors="coerce").replace(0, pd.NA)
+                        )
+                        game_stack_summary_df["phantom_to_field_stack_rate"] = pd.to_numeric(
+                            game_stack_summary_df["phantom_to_field_stack_rate"], errors="coerce"
+                        ).fillna(0.0)
+                        game_stack_summary_df["stack_underexposure_gap"] = (
+                            pd.to_numeric(game_stack_summary_df["field_stack_rate"], errors="coerce").fillna(0.0)
+                            - pd.to_numeric(game_stack_summary_df["phantom_stack_rate"], errors="coerce").fillna(0.0)
+                        )
+                        if phantom_lineup_total > 0:
+                            missed_game_stack_df = game_stack_summary_df.loc[
+                                (pd.to_numeric(game_stack_summary_df["top10_entries_with_stack"], errors="coerce").fillna(0) > 0)
+                                & (
+                                    (
+                                        pd.to_numeric(game_stack_summary_df["phantom_lineups_with_game"], errors="coerce")
+                                        .fillna(0)
+                                        <= 0
+                                    )
+                                    | (
+                                        pd.to_numeric(game_stack_summary_df["phantom_stack_rate"], errors="coerce").fillna(0.0)
+                                        < (
+                                            pd.to_numeric(game_stack_summary_df["field_stack_rate"], errors="coerce").fillna(0.0)
+                                            * float(missed_stack_underexposure_ratio)
+                                        )
+                                    )
+                                )
+                            ].copy()
+                            missed_game_stack_df = missed_game_stack_df.sort_values(
+                                ["top10_entries_with_stack", "stack_underexposure_gap", "field_entries_with_stack"],
+                                ascending=[False, False, False],
+                            ).head(post_focus_limit)
 
                 rw1, rw2, rw3, rw4, rw5 = st.columns(5)
                 rw1.metric("Field Entries", _safe_int_value(field_quality.get("field_entries"), default=0))
@@ -5451,7 +6129,7 @@ with tab_tournament_review:
                     )
                 if not missed_game_stack_df.empty:
                     wrong_notes.append(
-                        f"Detected `{len(missed_game_stack_df)}` top field game stacks with zero phantom lineup exposure."
+                        f"Detected `{len(missed_game_stack_df)}` top field game stacks that were missing or materially under-exposed in phantom lineups."
                     )
 
                 st.subheader("What Went Right")
@@ -5563,7 +6241,10 @@ with tab_tournament_review:
                     else:
                         st.dataframe(game_stack_summary_df.head(20), hide_index=True, use_container_width=True)
                 if not missed_game_stack_df.empty:
-                    st.caption("Likely missed field game stacks (top-10 field presence with zero phantom lineup exposure)")
+                    st.caption(
+                        "Likely missed field game stacks "
+                        "(top-10 field presence with missing/materially under-exposed phantom lineup rate)"
+                    )
                     st.dataframe(missed_game_stack_df, hide_index=True, use_container_width=True)
 
                 improvement_rows: list[dict[str, Any]] = []
@@ -5630,7 +6311,7 @@ with tab_tournament_review:
                             "priority": 7,
                             "area": "Missed Field Stacks",
                             "why": f"missed_field_game_stacks={int(len(missed_game_stack_df))}",
-                            "next_slate_change": "Bias stack generation toward top field game-stack signals with zero phantom lineup exposure.",
+                            "next_slate_change": "Bias stack generation toward top field game-stack signals with phantom under-exposure.",
                             "success_metric": "Reduce missed top game-stack count and improve phantom top-end outcomes.",
                         }
                     )
@@ -5661,6 +6342,7 @@ with tab_tournament_review:
                         "mapped_player_coverage_pct": round(100.0 * float(mapping_coverage), 2),
                         "projected_ownership_rows": int(projected_own_rows),
                         "actual_ownership_rows": int(actual_own_rows),
+                        "missed_stack_underexposure_ratio": float(missed_stack_underexposure_ratio),
                     },
                     "scorecards": scorecards,
                     "focus_tables": post_packet.get("focus_tables") or {},

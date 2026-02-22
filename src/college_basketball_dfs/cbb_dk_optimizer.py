@@ -18,6 +18,7 @@ MIN_F = 3
 
 INJURY_STATUSES_REMOVE_DEFAULT = ("out", "doubtful")
 PROJECTION_SALARY_BUCKETS = ("lt4500", "4500_6999", "7000_9999", "gte10000")
+PROJECTION_ROLE_BUCKETS = ("guard", "forward", "center", "other")
 
 
 def _normalize_text(value: Any) -> str:
@@ -84,6 +85,19 @@ def projection_salary_bucket_key(salary: Any) -> str:
     if sal < 10000:
         return "7000_9999"
     return "gte10000"
+
+
+def projection_role_bucket_key(position: Any) -> str:
+    pos = str(position or "").strip().upper()
+    if not pos:
+        return "other"
+    if pos.startswith("G"):
+        return "guard"
+    if pos.startswith("F"):
+        return "forward"
+    if pos.startswith("C"):
+        return "center"
+    return "other"
 
 
 def _normalize_col_name(value: Any) -> str:
@@ -880,6 +894,7 @@ def apply_projection_calibration(
     pool_df: pd.DataFrame,
     projection_scale: float = 1.0,
     projection_salary_bucket_scales: dict[str, float] | None = None,
+    projection_role_bucket_scales: dict[str, float] | None = None,
 ) -> pd.DataFrame:
     out = pool_df.copy()
     if out.empty:
@@ -897,6 +912,14 @@ def apply_projection_calibration(
             bucket_scale = 1.0
         bucket_scales[bucket] = float(bucket_scale)
 
+    role_scales: dict[str, float] = {}
+    for role_bucket in PROJECTION_ROLE_BUCKETS:
+        raw_scale = None if projection_role_bucket_scales is None else projection_role_bucket_scales.get(role_bucket)
+        role_scale = _safe_num(raw_scale, 1.0)
+        if not math.isfinite(role_scale) or role_scale <= 0.0:
+            role_scale = 1.0
+        role_scales[role_bucket] = float(role_scale)
+
     row_bucket_scales = pd.Series(1.0, index=out.index, dtype="float64")
     if "Salary" in out.columns:
         salary_num = pd.to_numeric(out["Salary"], errors="coerce")
@@ -904,7 +927,14 @@ def apply_projection_calibration(
         row_bucket_scales = salary_bucket.map(lambda key: float(bucket_scales.get(str(key), 1.0))).fillna(1.0)
         out["projection_salary_bucket"] = salary_bucket
 
-    total_row_scale = row_bucket_scales * float(scale)
+    row_role_scales = pd.Series(1.0, index=out.index, dtype="float64")
+    role_source = "PositionBase" if "PositionBase" in out.columns else ("Position" if "Position" in out.columns else "")
+    if role_source:
+        role_bucket = out[role_source].map(projection_role_bucket_key)
+        row_role_scales = role_bucket.map(lambda key: float(role_scales.get(str(key), 1.0))).fillna(1.0)
+        out["projection_role_bucket"] = role_bucket
+
+    total_row_scale = row_bucket_scales * row_role_scales * float(scale)
     for col in ["projected_dk_points", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce") * total_row_scale
@@ -922,7 +952,51 @@ def apply_projection_calibration(
 
     out["projection_calibration_scale"] = float(scale)
     out["projection_bucket_scale"] = row_bucket_scales
+    out["projection_role_scale"] = row_role_scales
     out["projection_total_scale"] = total_row_scale
+    return out
+
+
+def apply_ownership_surprise_guardrails(
+    pool_df: pd.DataFrame,
+    projected_ownership_threshold: float = 10.0,
+    surge_score_threshold: float = 72.0,
+    projection_rank_threshold: float = 0.60,
+    ownership_floor_base: float = 10.0,
+    ownership_floor_cap: float = 24.0,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    proj_own = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0)
+    surge_score = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0)
+    projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce")
+    projection_rank = projection.rank(method="average", pct=True).fillna(0.0)
+
+    own_threshold = max(0.0, float(projected_ownership_threshold))
+    surge_threshold = max(0.0, min(100.0, float(surge_score_threshold)))
+    proj_rank_threshold = max(0.0, min(1.0, float(projection_rank_threshold)))
+    floor_base = max(0.0, float(ownership_floor_base))
+    floor_cap = max(floor_base, float(ownership_floor_cap))
+
+    candidate_mask = (
+        (proj_own <= own_threshold)
+        & (surge_score >= surge_threshold)
+        & (projection_rank >= proj_rank_threshold)
+    )
+    normalized_surge = ((surge_score - surge_threshold).clip(lower=0.0) / max(1.0, (100.0 - surge_threshold))).clip(0.0, 1.0)
+    implied_floor = (floor_base + (normalized_surge * (floor_cap - floor_base))).clip(lower=floor_base, upper=floor_cap)
+    guardrail_ownership = proj_own.where(~candidate_mask, proj_own.combine(implied_floor, max))
+
+    out["ownership_guardrail_flag"] = candidate_mask.map(lambda x: bool(x))
+    out["ownership_guardrail_floor"] = implied_floor.round(3)
+    out["ownership_guardrail_delta"] = (guardrail_ownership - proj_own).round(3)
+    out["projected_ownership"] = guardrail_ownership.round(2)
+
+    if "projected_dk_points" in out.columns:
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
+        out["leverage_score"] = (proj - (0.15 * out["projected_ownership"])).round(3)
     return out
 
 
@@ -1214,11 +1288,29 @@ def generate_lineups(
     cluster_variants_per_cluster: int = 10,
     projection_scale: float = 1.0,
     projection_salary_bucket_scales: dict[str, float] | None = None,
+    projection_role_bucket_scales: dict[str, float] | None = None,
+    apply_ownership_guardrails: bool = False,
+    ownership_guardrail_projected_threshold: float = 10.0,
+    ownership_guardrail_surge_threshold: float = 72.0,
+    ownership_guardrail_projection_rank_threshold: float = 0.60,
+    ownership_guardrail_floor_base: float = 10.0,
+    ownership_guardrail_floor_cap: float = 24.0,
     apply_uncertainty_shrink: bool = False,
     uncertainty_weight: float = 0.18,
     high_risk_extra_shrink: float = 0.10,
     dnp_risk_threshold: float = 0.30,
     uncertainty_min_multiplier: float = 0.68,
+    low_own_bucket_exposure_pct: float = 0.0,
+    low_own_bucket_min_per_lineup: int = 1,
+    low_own_bucket_max_projected_ownership: float = 10.0,
+    low_own_bucket_min_projection: float = 24.0,
+    low_own_bucket_min_tail_score: float = 55.0,
+    low_own_bucket_objective_bonus: float = 0.0,
+    preferred_game_keys: list[str] | None = None,
+    preferred_game_bonus: float = 0.0,
+    ceiling_boost_lineup_pct: float = 0.0,
+    ceiling_boost_stack_bonus: float = 0.0,
+    ceiling_boost_salary_left_target: int | None = None,
     objective_score_adjustments: dict[str, float] | None = None,
     salary_left_target: int | None = 50,
     salary_left_penalty_divisor: float = 75.0,
@@ -1238,7 +1330,17 @@ def generate_lineups(
         pool_df,
         projection_scale=projection_scale,
         projection_salary_bucket_scales=projection_salary_bucket_scales,
+        projection_role_bucket_scales=projection_role_bucket_scales,
     )
+    if apply_ownership_guardrails:
+        calibrated = apply_ownership_surprise_guardrails(
+            calibrated,
+            projected_ownership_threshold=ownership_guardrail_projected_threshold,
+            surge_score_threshold=ownership_guardrail_surge_threshold,
+            projection_rank_threshold=ownership_guardrail_projection_rank_threshold,
+            ownership_floor_base=ownership_guardrail_floor_base,
+            ownership_floor_cap=ownership_guardrail_floor_cap,
+        )
     if apply_uncertainty_shrink:
         calibrated = apply_projection_uncertainty_adjustment(
             calibrated,
@@ -1258,8 +1360,59 @@ def generate_lineups(
             + pd.to_numeric(objective_bonus, errors="coerce").fillna(0.0)
         ).clip(lower=0.01)
         scored["objective_score_adjustment"] = pd.to_numeric(objective_bonus, errors="coerce").fillna(0.0)
+
+    preferred_games = {
+        str(key or "").strip().upper().split(" ")[0]
+        for key in (preferred_game_keys or [])
+        if str(key or "").strip()
+    }
+    preferred_game_bonus_value = max(0.0, float(preferred_game_bonus))
+    if preferred_games and preferred_game_bonus_value > 0.0 and "game_key" in scored.columns:
+        scored["game_key_norm"] = scored["game_key"].map(lambda x: str(x or "").strip().upper().split(" ")[0])
+        preferred_mask = scored["game_key_norm"].isin(preferred_games)
+        scored["objective_score"] = (
+            pd.to_numeric(scored.get("objective_score"), errors="coerce").fillna(0.0)
+            + preferred_mask.map(lambda x: preferred_game_bonus_value if bool(x) else 0.0)
+        ).clip(lower=0.01)
+        scored["preferred_game_flag"] = preferred_mask.map(lambda x: bool(x))
+    else:
+        scored["preferred_game_flag"] = False
+
+    low_own_candidate_ids: set[str] = set()
+    low_own_exposure = max(0.0, min(100.0, float(low_own_bucket_exposure_pct)))
+    low_own_min_required = max(0, min(ROSTER_SIZE, int(low_own_bucket_min_per_lineup)))
+    low_own_ownership_cap = max(0.0, float(low_own_bucket_max_projected_ownership))
+    low_own_projection_floor = max(0.0, float(low_own_bucket_min_projection))
+    low_own_tail_floor = max(0.0, float(low_own_bucket_min_tail_score))
+    low_own_bonus = max(0.0, float(low_own_bucket_objective_bonus))
+    if low_own_exposure > 0.0:
+        proj = pd.to_numeric(scored.get("projected_dk_points"), errors="coerce").fillna(0.0)
+        own = pd.to_numeric(scored.get("projected_ownership"), errors="coerce").fillna(100.0)
+        leverage = pd.to_numeric(scored.get("leverage_score"), errors="coerce")
+        tail = pd.to_numeric(scored.get("game_tail_score"), errors="coerce").fillna(0.0)
+        leverage_rank = leverage.rank(method="average", pct=True).fillna(0.0)
+        low_own_mask = (
+            (own <= low_own_ownership_cap)
+            & (proj >= low_own_projection_floor)
+            & ((tail >= low_own_tail_floor) | (leverage_rank >= 0.65))
+        )
+        scored["low_own_upside_flag"] = low_own_mask.map(lambda x: bool(x))
+        low_own_candidate_ids = set(scored.loc[low_own_mask, "ID"].astype(str).tolist())
+        if low_own_bonus > 0.0 and low_own_candidate_ids:
+            scored["objective_score"] = (
+                pd.to_numeric(scored.get("objective_score"), errors="coerce").fillna(0.0)
+                + scored["ID"].astype(str).map(lambda pid: low_own_bonus if pid in low_own_candidate_ids else 0.0)
+            ).clip(lower=0.01)
+    else:
+        scored["low_own_upside_flag"] = False
+
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
     salary_target = None if salary_left_target is None else max(0, min(SALARY_CAP, int(salary_left_target)))
+    ceiling_salary_target = (
+        salary_target
+        if ceiling_boost_salary_left_target is None
+        else max(0, min(SALARY_CAP, int(ceiling_boost_salary_left_target)))
+    )
     salary_penalty_divisor = max(1.0, float(salary_left_penalty_divisor))
 
     locked_set = {str(x) for x in (locked_ids or []) if str(x).strip()}
@@ -1311,6 +1464,24 @@ def generate_lineups(
     lineups: list[dict[str, Any]] = []
     warnings: list[str] = []
 
+    if low_own_exposure > 0.0 and low_own_min_required > 0 and not low_own_candidate_ids:
+        warnings.append(
+            "Low-owned upside bucket was enabled, but no candidates met the filters; generation continued without bucket constraints."
+        )
+
+    target_low_own_lineups = int(round((low_own_exposure / 100.0) * float(num_lineups)))
+    target_low_own_lineups = max(0, min(num_lineups, target_low_own_lineups))
+    low_own_required_indices: set[int] = set()
+    if target_low_own_lineups > 0 and low_own_min_required > 0 and low_own_candidate_ids:
+        low_own_required_indices = set(rng.sample(list(range(num_lineups)), k=target_low_own_lineups))
+
+    ceiling_pct = max(0.0, min(100.0, float(ceiling_boost_lineup_pct)))
+    target_ceiling_lineups = int(round((ceiling_pct / 100.0) * float(num_lineups)))
+    target_ceiling_lineups = max(0, min(num_lineups, target_ceiling_lineups))
+    ceiling_boost_indices: set[int] = set()
+    if target_ceiling_lineups > 0:
+        ceiling_boost_indices = set(rng.sample(list(range(num_lineups)), k=target_ceiling_lineups))
+
     min_salary_any = int(scored["Salary"].min())
     player_cols = [
         "ID",
@@ -1332,14 +1503,21 @@ def generate_lineups(
         "game_tail_score",
         "projection_calibration_scale",
         "projection_bucket_scale",
+        "projection_role_scale",
         "projection_total_scale",
         "projection_salary_bucket",
+        "projection_role_bucket",
         "projection_uncertainty_score",
         "dnp_risk_score",
         "projection_uncertainty_multiplier",
         "ownership_chalk_surge_score",
         "ownership_chalk_surge_flag",
         "ownership_confidence",
+        "ownership_guardrail_flag",
+        "ownership_guardrail_floor",
+        "ownership_guardrail_delta",
+        "low_own_upside_flag",
+        "preferred_game_flag",
     ]
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
@@ -1370,9 +1548,25 @@ def generate_lineups(
             cluster_variants_per_cluster=cluster_variants_per_cluster,
             salary_left_target=salary_target,
             salary_left_penalty_divisor=salary_penalty_divisor,
+            low_own_candidate_ids=low_own_candidate_ids,
+            low_own_min_per_lineup=low_own_min_required,
+            low_own_required_indices=low_own_required_indices,
+            preferred_game_keys=preferred_games,
+            preferred_game_bonus=preferred_game_bonus_value,
+            ceiling_boost_indices=ceiling_boost_indices,
+            ceiling_boost_stack_bonus=max(0.0, float(ceiling_boost_stack_bonus)),
+            ceiling_boost_salary_left_target=ceiling_salary_target,
         )
 
     for lineup_idx in range(num_lineups):
+        require_low_own = (
+            lineup_idx in low_own_required_indices
+            and low_own_min_required > 0
+            and bool(low_own_candidate_ids)
+        )
+        ceiling_boost_active = lineup_idx in ceiling_boost_indices
+        active_salary_target = ceiling_salary_target if ceiling_boost_active else salary_target
+
         anchor_ids: set[str] = set()
         anchor_games: set[str] = set()
         anchor_primary_game = ""
@@ -1404,6 +1598,7 @@ def generate_lineups(
             selected = [dict(x) for x in lock_players]
             selected_ids = {str(p["ID"]) for p in selected}
             salary = sum(int(p["Salary"]) for p in selected)
+            current_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_candidate_ids)
 
             while len(selected) < ROSTER_SIZE:
                 remaining_slots = ROSTER_SIZE - len(selected)
@@ -1428,6 +1623,12 @@ def generate_lineups(
                         next_selected_ids = selected_ids | {pid}
                         if len(next_selected_ids & anchor_ids) > pair_overlap_limit:
                             continue
+                    if require_low_own:
+                        is_low_own_pick = pid in low_own_candidate_ids
+                        projected_low_own = current_low_own_count + (1 if is_low_own_pick else 0)
+                        min_needed_after_pick = max(0, low_own_min_required - projected_low_own)
+                        if min_needed_after_pick > rem_after_pick:
+                            continue
 
                     partial = selected + [p]
                     if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
@@ -1445,6 +1646,8 @@ def generate_lineups(
                 selected.append(pick)
                 selected_ids.add(str(pick["ID"]))
                 salary += int(pick["Salary"])
+                if str(pick.get("ID")) in low_own_candidate_ids:
+                    current_low_own_count += 1
 
             if not selected:
                 continue
@@ -1456,12 +1659,22 @@ def generate_lineups(
             current_ids = {str(p["ID"]) for p in selected}
             if anchor_ids and len(current_ids & anchor_ids) > pair_overlap_limit:
                 continue
+            lineup_low_own_count = sum(1 for pid in current_ids if pid in low_own_candidate_ids)
+            if require_low_own and lineup_low_own_count < low_own_min_required:
+                continue
 
             selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
             game_counts = _lineup_game_counts(selected)
             salary_left = SALARY_CAP - final_salary
-            if salary_target is not None:
-                selected_score -= abs(float(salary_left - salary_target)) / salary_penalty_divisor
+            if active_salary_target is not None:
+                selected_score -= abs(float(salary_left - active_salary_target)) / salary_penalty_divisor
+            if preferred_games and preferred_game_bonus_value > 0.0:
+                preferred_count = float(
+                    sum(cnt for game_key, cnt in game_counts.items() if str(game_key or "").strip().upper() in preferred_games)
+                )
+                selected_score += preferred_game_bonus_value * preferred_count
+            if ceiling_boost_active and ceiling_boost_stack_bonus > 0.0:
+                selected_score += float(ceiling_boost_stack_bonus) * _stack_bonus_from_counts(game_counts)
             if spike_mode:
                 def _safe_metric_num(value: Any) -> float:
                     num = _safe_float(value)
@@ -1521,6 +1734,8 @@ def generate_lineups(
                 "lineup_strategy": "spike" if spike_mode else "standard",
                 "pair_id": pair_id,
                 "pair_role": pair_role,
+                "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_candidate_ids)),
+                "ceiling_boost_active": bool(ceiling_boost_active),
             }
         )
 
@@ -1547,6 +1762,14 @@ def _generate_lineups_cluster_mode(
     cluster_variants_per_cluster: int = 10,
     salary_left_target: int | None = 50,
     salary_left_penalty_divisor: float = 75.0,
+    low_own_candidate_ids: set[str] | None = None,
+    low_own_min_per_lineup: int = 0,
+    low_own_required_indices: set[int] | None = None,
+    preferred_game_keys: set[str] | None = None,
+    preferred_game_bonus: float = 0.0,
+    ceiling_boost_indices: set[int] | None = None,
+    ceiling_boost_stack_bonus: float = 0.0,
+    ceiling_boost_salary_left_target: int | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not players:
         return [], ["No players available for cluster generation."]
@@ -1555,7 +1778,19 @@ def _generate_lineups_cluster_mode(
     lineups: list[dict[str, Any]] = []
     rng = random.Random(random_seed)
     salary_target = None if salary_left_target is None else max(0, min(SALARY_CAP, int(salary_left_target)))
+    ceiling_salary_target = (
+        salary_target
+        if ceiling_boost_salary_left_target is None
+        else max(0, min(SALARY_CAP, int(ceiling_boost_salary_left_target)))
+    )
     salary_penalty_divisor = max(1.0, float(salary_left_penalty_divisor))
+    low_own_ids = {str(pid) for pid in (low_own_candidate_ids or set()) if str(pid).strip()}
+    low_own_required = max(0, min(ROSTER_SIZE, int(low_own_min_per_lineup)))
+    low_own_required_idx = {int(x) for x in (low_own_required_indices or set())}
+    preferred_games = {str(x or "").strip().upper() for x in (preferred_game_keys or set()) if str(x or "").strip()}
+    preferred_bonus = max(0.0, float(preferred_game_bonus))
+    ceiling_idx = {int(x) for x in (ceiling_boost_indices or set())}
+    ceiling_stack_bonus = max(0.0, float(ceiling_boost_stack_bonus))
 
     total_baseline = pd.to_numeric(
         pd.Series([_safe_float(p.get("game_total_line")) for p in players]),
@@ -1600,6 +1835,14 @@ def _generate_lineups_cluster_mode(
         seed_lineup_id: int | None = None
 
         for variant_idx in range(target_lineups):
+            lineup_global_idx = int(len(lineups))
+            require_low_own = (
+                lineup_global_idx in low_own_required_idx
+                and low_own_required > 0
+                and bool(low_own_ids)
+            )
+            ceiling_boost_active = lineup_global_idx in ceiling_idx
+            active_salary_target = ceiling_salary_target if ceiling_boost_active else salary_target
             mutation_type = _cluster_mutation_type(variant_idx)
             required_anchor_count = 0
             if anchor_game_key:
@@ -1627,6 +1870,7 @@ def _generate_lineups_cluster_mode(
                 selected = [dict(x) for x in lock_players]
                 selected_ids = {str(p["ID"]) for p in selected}
                 salary = sum(int(p["Salary"]) for p in selected)
+                current_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_ids)
 
                 while len(selected) < ROSTER_SIZE:
                     remaining_slots = ROSTER_SIZE - len(selected)
@@ -1660,6 +1904,12 @@ def _generate_lineups_cluster_mode(
                             projected_anchor = current_anchor_count + (1 if is_anchor_pick else 0)
                             needed_after_pick = max(0, required_anchor_count - projected_anchor)
                             if needed_after_pick > rem_after_pick:
+                                continue
+                        if require_low_own:
+                            is_low_own_pick = pid in low_own_ids
+                            projected_low_own = current_low_own_count + (1 if is_low_own_pick else 0)
+                            low_own_needed_after_pick = max(0, low_own_required - projected_low_own)
+                            if low_own_needed_after_pick > rem_after_pick:
                                 continue
 
                         partial = selected + [p]
@@ -1701,6 +1951,8 @@ def _generate_lineups_cluster_mode(
                     selected.append(pick)
                     selected_ids.add(str(pick["ID"]))
                     salary += int(pick["Salary"])
+                    if str(pick.get("ID")) in low_own_ids:
+                        current_low_own_count += 1
 
                 if not selected:
                     continue
@@ -1714,15 +1966,25 @@ def _generate_lineups_cluster_mode(
                 anchor_count = int(game_counts.get(anchor_game_key, 0)) if anchor_game_key else 0
                 if anchor_game_key and anchor_count < required_anchor_count:
                     continue
+                lineup_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_ids)
+                if require_low_own and lineup_low_own_count < low_own_required:
+                    continue
 
                 lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in selected))
                 selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
                 selected_score += 1.10 * _stack_bonus_from_counts(game_counts)
                 salary_left = SALARY_CAP - final_salary
-                if salary_target is not None:
-                    selected_score -= abs(float(salary_left - salary_target)) / salary_penalty_divisor
+                if active_salary_target is not None:
+                    selected_score -= abs(float(salary_left - active_salary_target)) / salary_penalty_divisor
                 if anchor_game_key:
                     selected_score += 1.8 * float(anchor_count)
+                if preferred_games and preferred_bonus > 0.0:
+                    preferred_count = float(
+                        sum(cnt for game_key, cnt in game_counts.items() if str(game_key or "").strip().upper() in preferred_games)
+                    )
+                    selected_score += preferred_bonus * preferred_count
+                if ceiling_boost_active and ceiling_stack_bonus > 0.0:
+                    selected_score += ceiling_stack_bonus * _stack_bonus_from_counts(game_counts)
 
                 current_ids = {str(p["ID"]) for p in selected}
                 if lineups:
@@ -1807,6 +2069,8 @@ def _generate_lineups_cluster_mode(
                 "mutation_type": mutation_label,
                 "stack_signature": _lineup_stack_signature(best_lineup),
                 "salary_texture_bucket": _salary_texture_bucket(SALARY_CAP - lineup_salary),
+                "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_ids)),
+                "ceiling_boost_active": bool(ceiling_boost_active),
             }
             lineups.append(lineup_payload)
             cluster_lineups.append(lineup_payload)
@@ -1853,6 +2117,10 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Stack Signature"] = str(lineup.get("stack_signature"))
         if lineup.get("salary_texture_bucket"):
             row["Salary Texture"] = str(lineup.get("salary_texture_bucket"))
+        if lineup.get("low_own_upside_count") is not None:
+            row["Low-Own Upside Count"] = int(lineup.get("low_own_upside_count") or 0)
+        if lineup.get("ceiling_boost_active") is not None:
+            row["Ceiling Boost"] = bool(lineup.get("ceiling_boost_active"))
         rows.append(row)
     return pd.DataFrame(rows)
 
@@ -1889,6 +2157,10 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Stack Signature"] = str(lineup.get("stack_signature"))
         if lineup.get("salary_texture_bucket"):
             row["Salary Texture"] = str(lineup.get("salary_texture_bucket"))
+        if lineup.get("low_own_upside_count") is not None:
+            row["Low-Own Upside Count"] = int(lineup.get("low_own_upside_count") or 0)
+        if lineup.get("ceiling_boost_active") is not None:
+            row["Ceiling Boost"] = bool(lineup.get("ceiling_boost_active"))
         rows.append(row)
     return pd.DataFrame(rows)
 

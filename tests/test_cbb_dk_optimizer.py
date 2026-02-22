@@ -5,6 +5,7 @@ import pandas as pd
 from college_basketball_dfs.cbb_dk_optimizer import (
     apply_projection_uncertainty_adjustment,
     apply_projection_calibration,
+    apply_ownership_surprise_guardrails,
     apply_contest_objective,
     build_dk_upload_csv,
     build_player_pool,
@@ -468,6 +469,32 @@ def test_apply_projection_calibration_applies_salary_bucket_scales() -> None:
             assert abs(float(after) - (float(before) * expected_scale)) < 1e-6
 
 
+def test_apply_projection_calibration_applies_role_bucket_scales() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy()
+    base = pool.loc[:, ["PositionBase", "projected_dk_points", "blended_projection", "our_dk_projection"]].copy()
+    scaled = apply_projection_calibration(
+        pool,
+        projection_scale=1.0,
+        projection_role_bucket_scales={"guard": 0.9, "forward": 1.1},
+    )
+
+    assert "projection_role_bucket" in scaled.columns
+    assert "projection_role_scale" in scaled.columns
+
+    g_idx = int(scaled.loc[scaled["PositionBase"] == "G"].index[0])
+    f_idx = int(scaled.loc[scaled["PositionBase"] == "F"].index[0])
+    assert scaled.loc[g_idx, "projection_role_bucket"] == "guard"
+    assert scaled.loc[f_idx, "projection_role_bucket"] == "forward"
+    assert abs(float(scaled.loc[g_idx, "projection_role_scale"]) - 0.9) < 1e-6
+    assert abs(float(scaled.loc[f_idx, "projection_role_scale"]) - 1.1) < 1e-6
+
+    for idx, expected_scale in [(g_idx, 0.9), (f_idx, 1.1)]:
+        for col in ["projected_dk_points", "blended_projection", "our_dk_projection"]:
+            before = pd.to_numeric(base.loc[idx, col], errors="coerce")
+            after = pd.to_numeric(scaled.loc[idx, col], errors="coerce")
+            assert abs(float(after) - (float(before) * expected_scale)) < 1e-6
+
+
 def test_apply_projection_uncertainty_adjustment_shrinks_high_risk_rows() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy()
     pool = pool.reset_index(drop=True)
@@ -509,3 +536,109 @@ def test_build_player_pool_ownership_surge_columns_present() -> None:
     assert surge.notna().all()
     assert conf.between(0, 1).all()
     assert shrink.between(0, 0.45).all()
+
+
+def test_apply_ownership_surprise_guardrails_raises_triggered_rows() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["projected_ownership"] = 18.0
+    pool["ownership_chalk_surge_score"] = 50.0
+    pool["projected_dk_points"] = pd.to_numeric(pool["projected_dk_points"], errors="coerce").fillna(20.0)
+
+    pool.loc[0, "projected_ownership"] = 6.0
+    pool.loc[0, "ownership_chalk_surge_score"] = 92.0
+    pool.loc[0, "projected_dk_points"] = float(pool["projected_dk_points"].max()) + 5.0
+
+    adjusted = apply_ownership_surprise_guardrails(
+        pool,
+        projected_ownership_threshold=10.0,
+        surge_score_threshold=72.0,
+        projection_rank_threshold=0.6,
+        ownership_floor_base=10.0,
+        ownership_floor_cap=24.0,
+    )
+    assert "ownership_guardrail_flag" in adjusted.columns
+    assert "ownership_guardrail_delta" in adjusted.columns
+    assert bool(adjusted.loc[0, "ownership_guardrail_flag"]) is True
+    assert float(adjusted.loc[0, "projected_ownership"]) > 6.0
+    assert float(adjusted.loc[0, "ownership_guardrail_delta"]) > 0.0
+
+
+def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["projected_ownership"] = 28.0
+    pool["game_tail_score"] = 40.0
+    pool["leverage_score"] = pd.to_numeric(pool["projected_dk_points"], errors="coerce").fillna(0.0)
+    low_own_ids = pool.head(4)["ID"].astype(str).tolist()
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "projected_ownership"] = 7.0
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "game_tail_score"] = 85.0
+
+    requested_lineups = 12
+    required_share = 60.0
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=requested_lineups,
+        contest_type="Large GPP",
+        low_own_bucket_exposure_pct=required_share,
+        low_own_bucket_min_per_lineup=1,
+        low_own_bucket_max_projected_ownership=10.0,
+        low_own_bucket_min_projection=10.0,
+        low_own_bucket_min_tail_score=55.0,
+        random_seed=13,
+    )
+
+    assert len(lineups) == requested_lineups
+    assert warnings == []
+    lineups_with_low_own = sum(1 for lineup in lineups if int(lineup.get("low_own_upside_count") or 0) >= 1)
+    min_expected = int(round((required_share / 100.0) * requested_lineups))
+    assert lineups_with_low_own >= min_expected
+
+
+def test_generate_lineups_preferred_game_bonus_increases_preferred_exposure() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    preferred_game = "AAA@BBB"
+
+    base_lineups, base_warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=20,
+        contest_type="Small GPP",
+        random_seed=13,
+    )
+    boosted_lineups, boosted_warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=20,
+        contest_type="Small GPP",
+        preferred_game_keys=[preferred_game],
+        preferred_game_bonus=2.0,
+        random_seed=13,
+    )
+
+    assert base_warnings == []
+    assert boosted_warnings == []
+    base_avg = float(
+        sum(sum(1 for p in lineup["players"] if str(p.get("game_key") or "").strip().upper() == preferred_game) for lineup in base_lineups)
+        / max(1, len(base_lineups))
+    )
+    boosted_avg = float(
+        sum(sum(1 for p in lineup["players"] if str(p.get("game_key") or "").strip().upper() == preferred_game) for lineup in boosted_lineups)
+        / max(1, len(boosted_lineups))
+    )
+    assert boosted_avg >= base_avg
+
+
+def test_generate_lineups_ceiling_boost_marks_expected_count() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    requested_lineups = 10
+    ceiling_pct = 50.0
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=requested_lineups,
+        contest_type="Large GPP",
+        ceiling_boost_lineup_pct=ceiling_pct,
+        ceiling_boost_stack_bonus=2.0,
+        ceiling_boost_salary_left_target=120,
+        random_seed=13,
+    )
+    assert warnings == []
+    assert len(lineups) == requested_lineups
+    boosted = sum(1 for lineup in lineups if bool(lineup.get("ceiling_boost_active")))
+    assert boosted == int(round((ceiling_pct / 100.0) * requested_lineups))
