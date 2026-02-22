@@ -499,6 +499,11 @@ def build_lineup_consistency_packet(
     run_data = run_bundle if isinstance(run_bundle, dict) else {}
     settings = run_data.get("settings") if isinstance(run_data.get("settings"), dict) else {}
     version_data = active_version if isinstance(active_version, dict) else {}
+    version_warnings = [str(x).strip() for x in (version_data.get("warnings") or []) if str(x).strip()]
+    low_own_candidates_unavailable = any(
+        ("low-owned upside bucket was enabled" in msg.lower() and "no candidates met the filters" in msg.lower())
+        for msg in version_warnings
+    )
     generated_lineups = version_data.get("lineups") or []
     generated_lineups = generated_lineups if isinstance(generated_lineups, list) else []
     total_generated = int(len(generated_lineups))
@@ -682,15 +687,35 @@ def build_lineup_consistency_packet(
         actual = int(
             sum(1 for lineup in generated_lineups if _safe_int_value(lineup.get("low_own_upside_count"), 0) >= low_own_min)
         )
-        status = "pass" if actual >= expected else ("warn" if actual >= max(1, expected - 1) else "fail")
+        if low_own_candidates_unavailable:
+            status = "warn" if actual < expected else "pass"
+            note = (
+                f"configured exposure={target_low_own_pct:.1f}%; "
+                "optimizer reported no eligible low-own candidates for current filters."
+            )
+        else:
+            status = "pass" if actual >= expected else ("warn" if actual >= max(1, expected - 1) else "fail")
+            note = f"configured exposure={target_low_own_pct:.1f}%"
         add_check(
             area="Low-Own Bucket",
             status=status,
             target=f">= {expected}/{total_generated} lineups (min {low_own_min} low-own players)",
             actual=f"{actual}/{total_generated}",
             gap=f"{actual - expected:+d}",
-            note=f"configured exposure={target_low_own_pct:.1f}%",
+            note=note,
         )
+        if low_own_candidates_unavailable:
+            add_check(
+                area="Low-Own Candidate Availability",
+                status="warn",
+                target="eligible low-own candidates available when bucket enabled",
+                actual="optimizer reported no eligible candidates",
+                gap="n/a",
+                note=(
+                    "Relax low-own filters (max projected ownership, min projection/tail), "
+                    "or reduce low-own bucket exposure."
+                ),
+            )
 
     target_ceiling_pct = _safe_float_value(settings.get("ceiling_boost_lineup_pct"), default=0.0)
     if total_generated > 0 and target_ceiling_pct > 0:
@@ -749,7 +774,7 @@ def build_lineup_consistency_packet(
                 )
             lineup_hit_pct = (100.0 * float(lineup_hits) / float(max(1, total_generated)))
             avg_pref_players = float(preferred_player_hits) / float(max(1, total_generated))
-            status = "pass" if lineup_hit_pct >= 45.0 else ("warn" if lineup_hit_pct >= 20.0 else "fail")
+            status = "pass" if lineup_hit_pct >= 20.0 else ("warn" if lineup_hit_pct >= 10.0 else "fail")
             add_check(
                 area="Game Agent Stack Bias",
                 status=status,
@@ -804,6 +829,31 @@ def build_lineup_consistency_packet(
     version_allocation_rows: list[dict[str, Any]] = []
     versions_dict = run_data.get("versions") if isinstance(run_data.get("versions"), dict) else {}
     if str(run_data.get("run_mode") or "").strip().lower() == "all" and bool(settings.get("promote_phantom_constructions")):
+        promo_meta = settings.get("phantom_promotion_meta") if isinstance(settings.get("phantom_promotion_meta"), dict) else {}
+        promo_used_dates = int(_safe_int_value(promo_meta.get("used_dates"), default=0))
+        promo_weights = {
+            str(k): float(v)
+            for k, v in (promo_meta.get("weights") or {}).items()
+            if str(k).strip()
+        }
+        if promo_used_dates > 0 and promo_weights:
+            add_check(
+                area="Phantom Promotion Inputs",
+                status="pass",
+                target="historical phantom data available for promotion",
+                actual=f"used_dates={promo_used_dates}, weighted_versions={len(promo_weights)}",
+                gap="0",
+                note="Version allocation used historical phantom review summaries.",
+            )
+        else:
+            add_check(
+                area="Phantom Promotion Inputs",
+                status="warn",
+                target="historical phantom data available for promotion",
+                actual=f"used_dates={promo_used_dates}, weighted_versions={len(promo_weights)}",
+                gap="missing history",
+                note="Promotion fell back to default/equal weighting due to limited historical phantom data.",
+            )
         version_keys = [str(k) for k in versions_dict.keys()]
         requested_counts = {
             str(k): int(
@@ -812,7 +862,6 @@ def build_lineup_consistency_packet(
             for k in version_keys
         }
         total_requested = int(sum(requested_counts.values()))
-        promo_meta = settings.get("phantom_promotion_meta") if isinstance(settings.get("phantom_promotion_meta"), dict) else {}
         weights = {
             str(k): float(v)
             for k, v in (promo_meta.get("weights") or {}).items()
@@ -966,6 +1015,7 @@ def build_lineup_consistency_packet(
             "phantom_available": bool(has_phantom_data),
             "phantom_lineups": int(len(phantom_active)),
             "generated_lineups": int(total_generated),
+            "active_version_warning_count": int(len(version_warnings)),
         },
         "status_summary": {
             "overall_status": overall_status,
@@ -990,6 +1040,7 @@ def build_lineup_consistency_packet(
         "stack_upside_candidates": stack_upside_rows,
         "preferred_game_phantom_exposure": preferred_game_phantom_rows,
         "version_allocation_check": version_allocation_rows,
+        "active_version_warnings": version_warnings,
         "active_version_phantom_summary": _json_safe(summary_active_row),
     }
 
