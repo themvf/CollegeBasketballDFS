@@ -315,6 +315,76 @@ def test_build_daily_ai_review_packet_attention_falls_back_to_name_match() -> No
     assert round(float(row["actual_ownership_from_file"]), 2) == 40.0
 
 
+def test_build_daily_ai_review_packet_splits_true_low_own_vs_ownership_surprise() -> None:
+    projection_df = pd.DataFrame(
+        [
+            {
+                "ID": "1",
+                "Name": "True Low Own",
+                "TeamAbbrev": "AAA",
+                "Position": "G",
+                "Salary": 7000,
+                "blended_projection": 24.0,
+                "actual_dk_points": 40.0,
+                "blend_error": 16.0,
+                "our_error": 14.0,
+                "vegas_error": 15.0,
+            },
+            {
+                "ID": "2",
+                "Name": "Ownership Surprise",
+                "TeamAbbrev": "BBB",
+                "Position": "F",
+                "Salary": 6800,
+                "blended_projection": 22.0,
+                "actual_dk_points": 39.0,
+                "blend_error": 17.0,
+                "our_error": 15.0,
+                "vegas_error": 16.0,
+            },
+        ]
+    )
+    exposure_df = pd.DataFrame(
+        [
+            {
+                "Name": "True Low Own",
+                "TeamAbbrev": "AAA",
+                "field_ownership_pct": 7.0,
+                "projected_ownership": 6.0,
+                "actual_ownership_from_file": 8.0,
+                "ownership_diff_vs_proj": 2.0,
+            },
+            {
+                "Name": "Ownership Surprise",
+                "TeamAbbrev": "BBB",
+                "field_ownership_pct": 16.0,
+                "projected_ownership": 6.5,
+                "actual_ownership_from_file": 17.0,
+                "ownership_diff_vs_proj": 10.5,
+            },
+        ]
+    )
+    packet = build_daily_ai_review_packet(
+        review_date="2026-02-18",
+        contest_id="abc123",
+        projection_comparison_df=projection_df,
+        entries_df=_sample_entries(),
+        exposure_df=exposure_df,
+        phantom_summary_df=pd.DataFrame(),
+        phantom_lineups_df=_sample_phantom(),
+        adjustment_factors_df=pd.DataFrame(),
+        focus_limit=10,
+    )
+    low_own = packet["focus_tables"]["low_own_smash_top"]
+    surprises = packet["focus_tables"]["ownership_surprise_smash_top"]
+    assert len(low_own) == 1
+    assert low_own[0]["Name"] == "True Low Own"
+    assert bool(low_own[0]["true_low_own_smash_flag"]) is True
+    assert len(surprises) == 1
+    assert surprises[0]["Name"] == "Ownership Surprise"
+    assert bool(surprises[0]["ownership_surprise_smash_flag"]) is True
+
+
 def test_build_ai_review_user_prompt_contains_json_packet() -> None:
     packet = build_daily_ai_review_packet(
         review_date="2026-02-18",

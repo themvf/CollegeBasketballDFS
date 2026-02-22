@@ -5079,6 +5079,7 @@ with tab_tournament_review:
 
                 missed_player_df = pd.DataFrame()
                 low_own_standout_df = pd.DataFrame()
+                own_surprise_standout_df = pd.DataFrame()
                 if not pm_proj_compare_df.empty:
                     missed_player_df = pm_proj_compare_df.copy()
                     missed_player_df["Name"] = missed_player_df.get("Name", "").astype(str).str.strip()
@@ -5180,25 +5181,74 @@ with tab_tournament_review:
                     missed_player_df["actual_ownership_from_file"] = pd.to_numeric(
                         missed_player_df["actual_ownership_from_file"], errors="coerce"
                     )
-                    missed_player_df["low_own_smash_flag"] = (
+                    missed_player_df["true_low_own_smash_flag"] = (
                         missed_player_df["actual_dk_points"].fillna(0.0) >= 35.0
                     ) & (
-                        (missed_player_df["field_ownership_pct"].fillna(999.0) <= 10.0)
-                        | (missed_player_df["projected_ownership"].fillna(999.0) <= 10.0)
+                        missed_player_df["field_ownership_pct"].fillna(999.0) <= 10.0
+                    )
+                    missed_player_df["projected_low_own_smash_flag"] = (
+                        missed_player_df["actual_dk_points"].fillna(0.0) >= 35.0
+                    ) & (
+                        missed_player_df["projected_ownership"].fillna(999.0) <= 10.0
+                    )
+                    missed_player_df["ownership_surprise_smash_flag"] = (
+                        missed_player_df["projected_low_own_smash_flag"].fillna(False)
+                        & (missed_player_df["field_ownership_pct"].fillna(0.0) > 10.0)
                     )
                     missed_player_df = missed_player_df.loc[missed_player_df["blend_error"].fillna(-999.0) > 0]
                     missed_player_df = missed_player_df.sort_values("blend_error", ascending=False).head(post_focus_limit)
                     low_own_standout_df = (
-                        missed_player_df.loc[missed_player_df["low_own_smash_flag"].fillna(False)]
+                        missed_player_df.loc[missed_player_df["true_low_own_smash_flag"].fillna(False)]
+                        .sort_values("actual_dk_points", ascending=False)
+                        .head(post_focus_limit)
+                    )
+                    own_surprise_standout_df = (
+                        missed_player_df.loc[missed_player_df["ownership_surprise_smash_flag"].fillna(False)]
                         .sort_values("actual_dk_points", ascending=False)
                         .head(post_focus_limit)
                     )
                     missed_player_df = missed_player_df.drop(columns=["name_key"], errors="ignore")
                     low_own_standout_df = low_own_standout_df.drop(columns=["name_key"], errors="ignore")
+                    own_surprise_standout_df = own_surprise_standout_df.drop(columns=["name_key"], errors="ignore")
 
                 team_stack_summary_df = pd.DataFrame()
                 game_stack_summary_df = pd.DataFrame()
                 missed_game_stack_df = pd.DataFrame()
+                phantom_game_exposure_df = pd.DataFrame()
+                if not pm_phantom_df.empty:
+                    phantom_keys_rows: list[dict[str, Any]] = []
+                    phantom_stack_work = pm_phantom_df.copy()
+                    if "lineup_number" in phantom_stack_work.columns:
+                        phantom_stack_work["_lineup_uid"] = phantom_stack_work["lineup_number"].astype(str).str.strip()
+                    else:
+                        phantom_stack_work["_lineup_uid"] = phantom_stack_work.index.map(lambda x: f"lineup_{x}")
+                    for _, prow in phantom_stack_work.iterrows():
+                        lineup_uid = str(prow.get("_lineup_uid") or "").strip()
+                        if not lineup_uid:
+                            continue
+                        keys: set[str] = set()
+                        anchor_key = str(prow.get("anchor_game_key") or "").strip().upper()
+                        if anchor_key and anchor_key.lower() not in {"nan", "none", "null"}:
+                            keys.add(anchor_key)
+                        stack_signature_text = str(prow.get("stack_signature") or "").strip().upper()
+                        if stack_signature_text and stack_signature_text.lower() not in {"nan", "none", "null"}:
+                            for match in re.finditer(r"[A-Z0-9.&']+@[A-Z0-9.&']+", stack_signature_text):
+                                game_key = str(match.group(0) or "").strip().upper()
+                                if game_key:
+                                    keys.add(game_key)
+                        for game_key in keys:
+                            phantom_keys_rows.append({"lineup_uid": lineup_uid, "game_key": game_key})
+                    if phantom_keys_rows:
+                        phantom_game_exposure_df = pd.DataFrame(phantom_keys_rows).drop_duplicates(
+                            subset=["lineup_uid", "game_key"]
+                        )
+                        phantom_game_exposure_df = (
+                            phantom_game_exposure_df.groupby("game_key", as_index=False)
+                            .agg(phantom_lineups_with_game=("lineup_uid", "nunique"))
+                            .sort_values("phantom_lineups_with_game", ascending=False)
+                            .reset_index(drop=True)
+                        )
+
                 if not pm_expanded_df.empty and "EntryId" in pm_expanded_df.columns:
                     stack_work = pm_expanded_df.copy()
                     stack_work["EntryId"] = stack_work["EntryId"].astype(str).str.strip()
@@ -5253,18 +5303,23 @@ with tab_tournament_review:
                             .sort_values(["top10_entries_with_stack", "field_entries_with_stack", "avg_stack_size"], ascending=[False, False, False])
                             .reset_index(drop=True)
                         )
-                        phantom_game_keys: set[str] = set()
-                        if not pm_phantom_df.empty and "anchor_game_key" in pm_phantom_df.columns:
-                            phantom_game_keys = {
-                                str(x).strip().upper()
-                                for x in pm_phantom_df["anchor_game_key"].tolist()
-                                if str(x).strip() and str(x).strip().lower() not in {"nan", "none", "null"}
-                            }
-                        if phantom_game_keys:
+                        if not phantom_game_exposure_df.empty:
+                            game_stack_summary_df = game_stack_summary_df.merge(
+                                phantom_game_exposure_df,
+                                on="game_key",
+                                how="left",
+                            )
+                            game_stack_summary_df["phantom_lineups_with_game"] = (
+                                pd.to_numeric(game_stack_summary_df["phantom_lineups_with_game"], errors="coerce")
+                                .fillna(0)
+                                .astype(int)
+                            )
                             missed_game_stack_df = game_stack_summary_df.loc[
                                 (game_stack_summary_df["top10_entries_with_stack"] > 0)
-                                & (~game_stack_summary_df["game_key"].isin(phantom_game_keys))
+                                & (game_stack_summary_df["phantom_lineups_with_game"] <= 0)
                             ].head(post_focus_limit)
+                        else:
+                            game_stack_summary_df["phantom_lineups_with_game"] = pd.NA
 
                 rw1, rw2, rw3, rw4, rw5 = st.columns(5)
                 rw1.metric("Field Entries", _safe_int_value(field_quality.get("field_entries"), default=0))
@@ -5387,11 +5442,16 @@ with tab_tournament_review:
                     right_notes.append(f"Slate mapping coverage is strong (`{100.0 * mapping_coverage:.1f}%`).")
                 if not low_own_standout_df.empty:
                     right_notes.append(
-                        f"Detected `{len(low_own_standout_df)}` low-ownership standout players who outperformed projections."
+                        f"Detected `{len(low_own_standout_df)}` true low-owned standouts who outperformed projections."
+                    )
+                if not own_surprise_standout_df.empty:
+                    wrong_notes.append(
+                        f"Detected `{len(own_surprise_standout_df)}` ownership-surprise standouts "
+                        "(projected low-owned but actually came in above 10%)."
                     )
                 if not missed_game_stack_df.empty:
                     wrong_notes.append(
-                        f"Detected `{len(missed_game_stack_df)}` top field game stacks not represented in phantom anchors."
+                        f"Detected `{len(missed_game_stack_df)}` top field game stacks with zero phantom lineup exposure."
                     )
 
                 st.subheader("What Went Right")
@@ -5439,14 +5499,16 @@ with tab_tournament_review:
                         "field_ownership_pct",
                         "projected_ownership",
                         "actual_ownership_from_file",
-                        "low_own_smash_flag",
+                        "true_low_own_smash_flag",
+                        "projected_low_own_smash_flag",
+                        "ownership_surprise_smash_flag",
                     ]
                     missed_use_cols = [c for c in missed_show_cols if c in missed_player_df.columns]
                     st.dataframe(missed_player_df[missed_use_cols], hide_index=True, use_container_width=True)
 
-                st.subheader("Low-Ownership Standouts")
+                st.subheader("True Low-Ownership Standouts")
                 if low_own_standout_df.empty:
-                    st.info("No low-ownership standout players were detected from current data.")
+                    st.info("No true low-owned standout players were detected from current data.")
                 else:
                     low_show_cols = [
                         "Name",
@@ -5458,9 +5520,33 @@ with tab_tournament_review:
                         "field_ownership_pct",
                         "projected_ownership",
                         "actual_ownership_from_file",
+                        "true_low_own_smash_flag",
+                        "projected_low_own_smash_flag",
                     ]
                     low_use_cols = [c for c in low_show_cols if c in low_own_standout_df.columns]
                     st.dataframe(low_own_standout_df[low_use_cols], hide_index=True, use_container_width=True)
+
+                st.subheader("Ownership-Surprise Standouts")
+                if own_surprise_standout_df.empty:
+                    st.info(
+                        "No ownership-surprise standouts were detected "
+                        "(players projected <=10% that actually came in >10% and smashed)."
+                    )
+                else:
+                    surprise_show_cols = [
+                        "Name",
+                        "TeamAbbrev",
+                        "Position",
+                        "actual_dk_points",
+                        "blended_projection",
+                        "blend_error",
+                        "field_ownership_pct",
+                        "projected_ownership",
+                        "actual_ownership_from_file",
+                        "ownership_surprise_smash_flag",
+                    ]
+                    surprise_use_cols = [c for c in surprise_show_cols if c in own_surprise_standout_df.columns]
+                    st.dataframe(own_surprise_standout_df[surprise_use_cols], hide_index=True, use_container_width=True)
 
                 st.subheader("Field Stack Signals")
                 ss1, ss2 = st.columns(2)
@@ -5477,7 +5563,7 @@ with tab_tournament_review:
                     else:
                         st.dataframe(game_stack_summary_df.head(20), hide_index=True, use_container_width=True)
                 if not missed_game_stack_df.empty:
-                    st.caption("Likely missed field game stacks (top-10 field presence, not in phantom anchors)")
+                    st.caption("Likely missed field game stacks (top-10 field presence with zero phantom lineup exposure)")
                     st.dataframe(missed_game_stack_df, hide_index=True, use_container_width=True)
 
                 improvement_rows: list[dict[str, Any]] = []
@@ -5544,8 +5630,21 @@ with tab_tournament_review:
                             "priority": 7,
                             "area": "Missed Field Stacks",
                             "why": f"missed_field_game_stacks={int(len(missed_game_stack_df))}",
-                            "next_slate_change": "Bias stack generation toward top field game-stack signals not present in phantom anchors.",
+                            "next_slate_change": "Bias stack generation toward top field game-stack signals with zero phantom lineup exposure.",
                             "success_metric": "Reduce missed top game-stack count and improve phantom top-end outcomes.",
+                        }
+                    )
+                if not own_surprise_standout_df.empty:
+                    improvement_rows.append(
+                        {
+                            "priority": 8,
+                            "area": "Ownership Surprise Guardrails",
+                            "why": f"ownership_surprise_standouts={int(len(own_surprise_standout_df))}",
+                            "next_slate_change": (
+                                "Add guardrails for players projected <=10% that are trending toward field ownership >10% "
+                                "to avoid underweighting emerging chalk ceilings."
+                            ),
+                            "success_metric": "Lower ownership surprise miss count and improve ownership MAE on those players.",
                         }
                     )
                 improvement_df = pd.DataFrame(improvement_rows).sort_values("priority")
@@ -5568,6 +5667,11 @@ with tab_tournament_review:
                     "top10_user_summary": top10_user_df.to_dict(orient="records") if not top10_user_df.empty else [],
                     "missed_player_standouts": missed_player_df.to_dict(orient="records") if not missed_player_df.empty else [],
                     "low_own_standouts": low_own_standout_df.to_dict(orient="records") if not low_own_standout_df.empty else [],
+                    "ownership_surprise_standouts": (
+                        own_surprise_standout_df.to_dict(orient="records")
+                        if not own_surprise_standout_df.empty
+                        else []
+                    ),
                     "field_team_stack_summary": (
                         team_stack_summary_df.head(40).to_dict(orient="records")
                         if not team_stack_summary_df.empty
@@ -5576,6 +5680,11 @@ with tab_tournament_review:
                     "field_game_stack_summary": (
                         game_stack_summary_df.head(40).to_dict(orient="records")
                         if not game_stack_summary_df.empty
+                        else []
+                    ),
+                    "phantom_game_exposure_summary": (
+                        phantom_game_exposure_df.head(40).to_dict(orient="records")
+                        if not phantom_game_exposure_df.empty
                         else []
                     ),
                     "likely_missed_game_stacks": (
@@ -5602,8 +5711,8 @@ with tab_tournament_review:
                     "Required sections:\n"
                     "1) What Went Right (3-6 bullets)\n"
                     "2) What Went Wrong (3-6 bullets)\n"
-                    "3) Missed Players and Low-Ownership Standouts\n"
-                    "4) Field vs Phantom Stack Findings (include likely missed stacks)\n"
+                    "3) Missed Players, True Low-Ownership Standouts, and Ownership Surprises\n"
+                    "4) Field vs Phantom Stack Findings (use lineup-level phantom exposure and include likely missed stacks)\n"
                     "5) Prioritized Tweaks for Next Slate (max 5, each with rationale + success metric)\n\n"
                     "Constraints:\n"
                     "- Use only evidence in the JSON packet.\n"

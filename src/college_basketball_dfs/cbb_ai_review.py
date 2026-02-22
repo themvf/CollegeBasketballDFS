@@ -456,47 +456,56 @@ def build_daily_ai_review_packet(
         exposure_by_name_loose = exposure_join.sort_values("field_ownership_pct", ascending=False).drop_duplicates(
             ["name_key_loose"]
         )
+        strict_merge_cols = [
+            c
+            for c in [
+                "Name",
+                "TeamAbbrev",
+                "field_ownership_pct",
+                "projected_ownership",
+                "actual_ownership_from_file",
+                "ownership_diff_vs_proj",
+                "final_dk_points",
+            ]
+            if c in exposure_strict.columns
+        ]
+        name_merge_cols = [
+            c
+            for c in [
+                "name_key",
+                "field_ownership_pct",
+                "projected_ownership",
+                "actual_ownership_from_file",
+                "ownership_diff_vs_proj",
+                "final_dk_points",
+            ]
+            if c in exposure_by_name.columns
+        ]
+        loose_merge_cols = [
+            c
+            for c in [
+                "name_key_loose",
+                "field_ownership_pct",
+                "projected_ownership",
+                "actual_ownership_from_file",
+                "ownership_diff_vs_proj",
+                "final_dk_points",
+            ]
+            if c in exposure_by_name_loose.columns
+        ]
         projection_with_own = projection_with_own.merge(
-            exposure_strict[
-                [
-                    "Name",
-                    "TeamAbbrev",
-                    "field_ownership_pct",
-                    "projected_ownership",
-                    "actual_ownership_from_file",
-                    "ownership_diff_vs_proj",
-                    "final_dk_points",
-                ]
-            ],
+            exposure_strict[strict_merge_cols],
             on=["Name", "TeamAbbrev"],
             how="left",
         )
         projection_with_own = projection_with_own.merge(
-            exposure_by_name[
-                [
-                    "name_key",
-                    "field_ownership_pct",
-                    "projected_ownership",
-                    "actual_ownership_from_file",
-                    "ownership_diff_vs_proj",
-                    "final_dk_points",
-                ]
-            ],
+            exposure_by_name[name_merge_cols],
             on="name_key",
             how="left",
             suffixes=("", "_by_name"),
         )
         projection_with_own = projection_with_own.merge(
-            exposure_by_name_loose[
-                [
-                    "name_key_loose",
-                    "field_ownership_pct",
-                    "projected_ownership",
-                    "actual_ownership_from_file",
-                    "ownership_diff_vs_proj",
-                    "final_dk_points",
-                ]
-            ],
+            exposure_by_name_loose[loose_merge_cols],
             on="name_key_loose",
             how="left",
             suffixes=("", "_by_name_loose"),
@@ -510,6 +519,8 @@ def build_daily_ai_review_packet(
         ]:
             by_name_col = f"{col}_by_name"
             by_name_loose_col = f"{col}_by_name_loose"
+            if col not in projection_with_own.columns:
+                projection_with_own[col] = pd.NA
             projection_with_own[col] = pd.to_numeric(projection_with_own[col], errors="coerce")
             if by_name_col in projection_with_own.columns:
                 projection_with_own[col] = projection_with_own[col].where(
@@ -530,13 +541,21 @@ def build_daily_ai_review_packet(
     ]:
         if col not in projection_with_own.columns:
             projection_with_own[col] = pd.NA
-    projection_with_own["low_own_smash_flag"] = (
+    projection_with_own["true_low_own_smash_flag"] = (
         pd.to_numeric(projection_with_own["actual_dk_points"], errors="coerce").fillna(0.0) >= 35.0
     ) & (
-        (
-            pd.to_numeric(projection_with_own["field_ownership_pct"], errors="coerce").fillna(999.0) <= 10.0
+        pd.to_numeric(projection_with_own["field_ownership_pct"], errors="coerce").fillna(999.0) <= 10.0
+    )
+    projection_with_own["projected_low_own_smash_flag"] = (
+        pd.to_numeric(projection_with_own["actual_dk_points"], errors="coerce").fillna(0.0) >= 35.0
+    ) & (
+        pd.to_numeric(projection_with_own["projected_ownership"], errors="coerce").fillna(999.0) <= 10.0
+    )
+    projection_with_own["ownership_surprise_smash_flag"] = (
+        projection_with_own["projected_low_own_smash_flag"].fillna(False)
+        & (
+            pd.to_numeric(projection_with_own["field_ownership_pct"], errors="coerce").fillna(0.0) > 10.0
         )
-        | (pd.to_numeric(projection_with_own["projected_ownership"], errors="coerce").fillna(999.0) <= 10.0)
     )
     underprojected_ceiling_top = _top_records(
         projection_with_own.loc[pd.to_numeric(projection_with_own["blend_error"], errors="coerce") > 0].copy(),
@@ -559,7 +578,7 @@ def build_daily_ai_review_packet(
     )
     low_own_smash_top = _top_records(
         projection_with_own.loc[
-            projection_with_own["low_own_smash_flag"].fillna(False)
+            projection_with_own["true_low_own_smash_flag"].fillna(False)
         ].copy(),
         keep_cols=[
             "ID",
@@ -573,7 +592,33 @@ def build_daily_ai_review_packet(
             "field_ownership_pct",
             "projected_ownership",
             "actual_ownership_from_file",
-            "low_own_smash_flag",
+            "true_low_own_smash_flag",
+            "projected_low_own_smash_flag",
+            "ownership_surprise_smash_flag",
+        ],
+        sort_col="actual_dk_points",
+        ascending=False,
+        limit=focus_limit,
+    )
+    ownership_surprise_smash_top = _top_records(
+        projection_with_own.loc[
+            projection_with_own["ownership_surprise_smash_flag"].fillna(False)
+        ].copy(),
+        keep_cols=[
+            "ID",
+            "Name",
+            "TeamAbbrev",
+            "Position",
+            "Salary",
+            "actual_dk_points",
+            "blended_projection",
+            "blend_error",
+            "field_ownership_pct",
+            "projected_ownership",
+            "actual_ownership_from_file",
+            "true_low_own_smash_flag",
+            "projected_low_own_smash_flag",
+            "ownership_surprise_smash_flag",
         ],
         sort_col="actual_dk_points",
         ascending=False,
@@ -599,6 +644,7 @@ def build_daily_ai_review_packet(
             "ownership_miss_top": top_ownership_misses,
             "underprojected_ceiling_top": underprojected_ceiling_top,
             "low_own_smash_top": low_own_smash_top,
+            "ownership_surprise_smash_top": ownership_surprise_smash_top,
         },
         "adjustment_factors": adjustment_factors_df.to_dict(orient="records") if not adjustment_factors_df.empty else [],
         "phantom_summary": phantom_summary_df.to_dict(orient="records") if not phantom_summary_df.empty else [],
