@@ -20,10 +20,13 @@ if str(SRC) not in sys.path:
 from college_basketball_dfs.cbb_ai_review import (
     AI_REVIEW_SYSTEM_PROMPT,
     DEFAULT_OPENAI_REVIEW_MODEL,
+    MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT,
     OPENAI_REVIEW_MODEL_FALLBACKS,
     build_daily_ai_review_packet,
     build_global_ai_review_packet,
     build_global_ai_review_user_prompt,
+    build_market_correlation_ai_review_packet,
+    build_market_correlation_ai_review_user_prompt,
     request_openai_review,
 )
 from college_basketball_dfs.cbb_backfill import iter_dates
@@ -115,6 +118,12 @@ def _contest_id_from_blob_name(blob_name: str, selected_date: date, selected_sla
     if filename.startswith(prefix) and filename.endswith(".csv"):
         cid = filename[len(prefix) : -4]
         return cid or "contest"
+    if selected_slate_key is None and filename.endswith(".csv"):
+        stem = filename[:-4]
+        if "_" in stem:
+            _, rest = stem.split("_", 1)
+            if rest:
+                return rest
     # Slate-scoped: <slate_key>_<contest>.csv
     safe_slate = _slate_key_from_label(selected_slate_key or "main")
     slate_prefix = f"{safe_slate}_"
@@ -271,12 +280,15 @@ def load_first_contest_standings_for_date(
         project=gcp_project,
     )
     store = CbbGcsStore(bucket_name=bucket_name, client=client)
-    safe_slate = _slate_key_from_label(selected_slate_key or "main")
     legacy_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}_"
-    scoped_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}/{safe_slate}_"
-    # Canonical standings are date+contest scoped. Include scoped prefix as legacy fallback.
     blobs = list(store.bucket.list_blobs(prefix=legacy_prefix))
-    blobs.extend(list(store.bucket.list_blobs(prefix=scoped_prefix)))
+    if selected_slate_key is None:
+        scoped_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}/"
+        blobs.extend(list(store.bucket.list_blobs(prefix=scoped_prefix)))
+    else:
+        safe_slate = _slate_key_from_label(selected_slate_key or "main")
+        scoped_prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}/{safe_slate}_"
+        blobs.extend(list(store.bucket.list_blobs(prefix=scoped_prefix)))
     if not blobs:
         return pd.DataFrame(), ""
     unique_blobs = {str(getattr(b, "name", "") or ""): b for b in blobs}
@@ -515,6 +527,105 @@ def _build_exposure_frame(projection_df: pd.DataFrame, ownership_df: pd.DataFram
     return expo
 
 
+def _build_market_review_rows(
+    projection_df: pd.DataFrame,
+    projection_compare_df: pd.DataFrame,
+    exposure_df: pd.DataFrame,
+    review_day: date,
+) -> pd.DataFrame:
+    if projection_df is None or projection_df.empty:
+        return pd.DataFrame()
+    out = projection_df.copy()
+    if "ID" in out.columns:
+        out["ID"] = out["ID"].map(_normalize_player_id)
+    if "Name" in out.columns:
+        out["Name"] = out["Name"].astype(str).str.strip()
+    if "TeamAbbrev" in out.columns:
+        out["TeamAbbrev"] = out["TeamAbbrev"].astype(str).str.strip().str.upper()
+
+    cmp_df = projection_compare_df.copy() if isinstance(projection_compare_df, pd.DataFrame) else pd.DataFrame()
+    cmp_cols = [c for c in ["actual_dk_points", "blend_error", "our_error", "vegas_error", "actual_minutes"] if c in cmp_df.columns]
+    if not cmp_df.empty and cmp_cols:
+        if "ID" in cmp_df.columns:
+            cmp_df["ID"] = cmp_df["ID"].map(_normalize_player_id)
+        if "Name" in cmp_df.columns:
+            cmp_df["Name"] = cmp_df["Name"].astype(str).str.strip()
+        if "ID" in out.columns and "ID" in cmp_df.columns:
+            cmp_by_id = cmp_df.loc[cmp_df["ID"] != "", ["ID"] + cmp_cols].drop_duplicates("ID")
+            out = out.merge(cmp_by_id, on="ID", how="left")
+        elif "Name" in out.columns and "Name" in cmp_df.columns:
+            cmp_by_name = cmp_df.loc[cmp_df["Name"] != "", ["Name"] + cmp_cols].drop_duplicates("Name")
+            out = out.merge(cmp_by_name, on="Name", how="left")
+
+    expo_df = exposure_df.copy() if isinstance(exposure_df, pd.DataFrame) else pd.DataFrame()
+    if not expo_df.empty:
+        own_cols = [c for c in ["projected_ownership", "actual_ownership_from_file", "ownership_diff_vs_proj"] if c in expo_df.columns]
+        if own_cols:
+            if "ID" in expo_df.columns:
+                expo_df["ID"] = expo_df["ID"].map(_normalize_player_id)
+            if "Name" in expo_df.columns:
+                expo_df["Name"] = expo_df["Name"].astype(str).str.strip()
+            if "ID" in out.columns and "ID" in expo_df.columns:
+                own_by_id = expo_df.loc[expo_df["ID"] != "", ["ID"] + own_cols].drop_duplicates("ID")
+                out = out.merge(own_by_id, on="ID", how="left", suffixes=("", "_own"))
+            elif "Name" in out.columns and "Name" in expo_df.columns:
+                own_by_name = expo_df.loc[expo_df["Name"] != "", ["Name"] + own_cols].drop_duplicates("Name")
+                out = out.merge(own_by_name, on="Name", how="left", suffixes=("", "_own"))
+
+    for col in [
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "actual_dk_points",
+        "blend_error",
+        "game_total_line",
+        "game_spread_line",
+        "game_tail_score",
+        "vegas_blend_weight",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "ownership_diff_vs_proj",
+    ]:
+        if col not in out.columns:
+            out[col] = pd.NA
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    missing_blend = pd.to_numeric(out["blend_error"], errors="coerce").isna()
+    out.loc[missing_blend, "blend_error"] = (
+        pd.to_numeric(out.loc[missing_blend, "actual_dk_points"], errors="coerce")
+        - pd.to_numeric(out.loc[missing_blend, "blended_projection"], errors="coerce")
+    )
+    out["ownership_error"] = pd.to_numeric(out["ownership_diff_vs_proj"], errors="coerce")
+    missing_own = out["ownership_error"].isna()
+    out.loc[missing_own, "ownership_error"] = (
+        pd.to_numeric(out.loc[missing_own, "actual_ownership_from_file"], errors="coerce")
+        - pd.to_numeric(out.loc[missing_own, "projected_ownership"], errors="coerce")
+    )
+
+    out["review_date"] = review_day.isoformat()
+    keep_cols = [
+        "review_date",
+        "ID",
+        "Name",
+        "TeamAbbrev",
+        "Position",
+        "Salary",
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "actual_dk_points",
+        "blend_error",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "ownership_error",
+        "game_total_line",
+        "game_spread_line",
+        "game_tail_score",
+        "vegas_blend_weight",
+    ]
+    return out[[c for c in keep_cols if c in out.columns]].copy()
+
+
 st.set_page_config(page_title="Global Agentic Review", layout="wide")
 st.title("Global Agentic Review")
 st.caption(
@@ -531,15 +642,24 @@ with st.sidebar:
     st.header("Global Agentic Settings")
     bucket_name = st.text_input("GCS Bucket", value=default_bucket, key="global_agentic_bucket")
     gcp_project = st.text_input("GCP Project (optional)", value=default_project, key="global_agentic_project")
+    include_all_slates = bool(
+        st.checkbox(
+            "Include All Slates",
+            value=False,
+            key="global_agentic_include_all_slates",
+            help="When enabled, scans all slate labels instead of only the active slate label.",
+        )
+    )
     shared_slate_preset = st.selectbox(
         "Active Slate Label",
         options=SLATE_PRESET_OPTIONS,
         index=0,
         key="shared_slate_preset",
         help="Shared slate context used when loading DK slates and lineup runs.",
+        disabled=include_all_slates,
     )
     shared_slate_custom = ""
-    if shared_slate_preset == "Custom":
+    if (not include_all_slates) and shared_slate_preset == "Custom":
         shared_slate_custom = st.text_input(
             "Custom Active Slate Label",
             value="Main",
@@ -549,7 +669,11 @@ with st.sidebar:
         shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
     )
     shared_slate_key = _slate_key_from_label(shared_slate_label)
-    st.caption(f"Active slate: `{shared_slate_label}` (key: `{shared_slate_key}`)")
+    effective_slate_key = None if include_all_slates else shared_slate_key
+    if include_all_slates:
+        st.caption("Active slate: `All slates`")
+    else:
+        st.caption(f"Active slate: `{shared_slate_label}` (key: `{shared_slate_key}`)")
     end_date = st.date_input("Review End Date", value=default_end_date, key="global_agentic_end_date")
     lookback_days = int(
         st.slider("Lookback Days", min_value=7, max_value=180, value=30, step=1, key="global_agentic_lookback_days")
@@ -562,6 +686,26 @@ with st.sidebar:
             value=25,
             step=1,
             key="global_agentic_focus_limit",
+        )
+    )
+    market_focus_limit = int(
+        st.slider(
+            "Market Focus Rows",
+            min_value=5,
+            max_value=80,
+            value=25,
+            step=1,
+            key="global_agentic_market_focus_limit",
+        )
+    )
+    market_min_bucket_samples = int(
+        st.slider(
+            "Market Min Bucket Samples",
+            min_value=5,
+            max_value=120,
+            value=20,
+            step=1,
+            key="global_agentic_market_min_bucket_samples",
         )
     )
     use_saved_run_dates = bool(
@@ -614,7 +758,7 @@ if build_packet_clicked:
         if use_saved_run_dates:
             candidate_dates = load_saved_lineup_run_dates(
                 bucket_name=bucket_name.strip(),
-                selected_slate_key=shared_slate_key,
+                selected_slate_key=effective_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -630,12 +774,13 @@ if build_packet_clicked:
         scanned_dates = 0
         used_dates = 0
         tournament_dates_used = 0
+        market_frames: list[pd.DataFrame] = []
         for review_day in candidate_dates:
             scanned_dates += 1
             proj_df = load_projection_snapshot_frame(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
-                selected_slate_key=shared_slate_key,
+                selected_slate_key=effective_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -663,7 +808,7 @@ if build_packet_clicked:
             standings_df, standings_blob = load_first_contest_standings_for_date(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
-                selected_slate_key=shared_slate_key,
+                selected_slate_key=effective_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -673,7 +818,7 @@ if build_packet_clicked:
                 slate_df = load_dk_slate_frame_for_date(
                     bucket_name=bucket_name.strip(),
                     selected_date=review_day,
-                    slate_key=shared_slate_key,
+                    slate_key=effective_slate_key,
                     gcp_project=gcp_project.strip() or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
@@ -685,7 +830,7 @@ if build_packet_clicked:
                         contest_id = _contest_id_from_blob_name(
                             standings_blob,
                             review_day,
-                            selected_slate_key=shared_slate_key,
+                            selected_slate_key=effective_slate_key,
                         )
                         actual_own_df = extract_actual_ownership_from_standings(normalized)
                         exposure_df = build_player_exposure_comparison(
@@ -699,16 +844,24 @@ if build_packet_clicked:
                 own_df = load_ownership_frame_for_date(
                     bucket_name=bucket_name.strip(),
                     selected_date=review_day,
-                    selected_slate_key=shared_slate_key,
+                    selected_slate_key=effective_slate_key,
                     gcp_project=gcp_project.strip() or None,
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
                 )
                 exposure_df = _build_exposure_frame(proj_df, own_df)
+            market_day_df = _build_market_review_rows(
+                projection_df=proj_df,
+                projection_compare_df=proj_compare_df,
+                exposure_df=exposure_df,
+                review_day=review_day,
+            )
+            if not market_day_df.empty:
+                market_frames.append(market_day_df)
             phantom_summary_df = load_first_phantom_summary_for_date(
                 bucket_name=bucket_name.strip(),
                 selected_date=review_day,
-                selected_slate_key=shared_slate_key,
+                selected_slate_key=effective_slate_key,
                 gcp_project=gcp_project.strip() or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
@@ -732,8 +885,19 @@ if build_packet_clicked:
             focus_limit=focus_limit,
         )
         global_user_prompt = build_global_ai_review_user_prompt(global_packet)
+        market_rows_df = pd.concat(market_frames, ignore_index=True) if market_frames else pd.DataFrame()
+        market_packet = build_market_correlation_ai_review_packet(
+            review_rows_df=market_rows_df,
+            focus_limit=market_focus_limit,
+            min_bucket_samples=market_min_bucket_samples,
+        )
+        market_user_prompt = build_market_correlation_ai_review_user_prompt(market_packet)
         st.session_state["global_agentic_packet"] = global_packet
         st.session_state["global_agentic_prompt"] = global_user_prompt
+        st.session_state["global_agentic_market_packet"] = market_packet
+        st.session_state["global_agentic_market_prompt"] = market_user_prompt
+        st.session_state.pop("global_agentic_output", None)
+        st.session_state.pop("global_agentic_market_output", None)
         st.session_state["global_agentic_meta"] = {
             "scanned_dates": scanned_dates,
             "used_dates": used_dates,
@@ -741,13 +905,17 @@ if build_packet_clicked:
             "window_end": end_date.isoformat(),
             "lookback_days": lookback_days,
             "use_saved_run_dates": use_saved_run_dates,
+            "include_all_slates": include_all_slates,
             "tournament_dates_used": tournament_dates_used,
+            "market_rows": int(len(market_rows_df)),
         }
         st.success(f"Built global packet using {used_dates} of {scanned_dates} scanned dates.")
 
 global_packet_state = st.session_state.get("global_agentic_packet")
 global_user_prompt = str(st.session_state.get("global_agentic_prompt") or "").strip()
 global_meta = st.session_state.get("global_agentic_meta") or {}
+market_packet_state = st.session_state.get("global_agentic_market_packet")
+market_user_prompt = str(st.session_state.get("global_agentic_market_prompt") or "").strip()
 
 if isinstance(global_packet_state, dict) and global_packet_state:
     summary = global_packet_state.get("window_summary") or {}
@@ -767,6 +935,8 @@ if isinstance(global_packet_state, dict) and global_packet_state:
         f"scanned_dates={_safe_int(global_meta.get('scanned_dates'), default=0)}, "
         f"used_dates={_safe_int(global_meta.get('used_dates'), default=0)}, "
         f"tournament_dates_used={_safe_int(global_meta.get('tournament_dates_used'), default=0)}, "
+        f"market_rows={_safe_int(global_meta.get('market_rows'), default=0)}, "
+        f"include_all_slates={bool(global_meta.get('include_all_slates', False))}, "
         f"window={global_meta.get('window_start', '')} to {global_meta.get('window_end', '')}"
     )
 
@@ -797,6 +967,79 @@ if isinstance(global_packet_state, dict) and global_packet_state:
         )
 else:
     st.info("Click `Build Global Packet` in the sidebar to start.")
+
+st.markdown("---")
+st.subheader("Market Correlation Agent (Multi-Date)")
+st.caption(
+    "Correlates odds/market features with ownership and actual points across the selected date window, "
+    "then proposes bucket-level calibration adjustments."
+)
+if isinstance(market_packet_state, dict) and market_packet_state:
+    market_window = market_packet_state.get("window_summary") or {}
+    market_quality = market_packet_state.get("global_quality") or {}
+
+    mm1, mm2, mm3, mm4 = st.columns(4)
+    mm1.metric("Dates Used", _safe_int(market_window.get("dates_used"), default=0))
+    mm2.metric("Rows", _safe_int(market_window.get("rows"), default=0))
+    mm3.metric("Blend MAE", f"{_safe_float(market_quality.get('blend_mae')):.2f}")
+    mm4.metric(
+        "Total->Points Spearman",
+        f"{_safe_float(market_quality.get('total_line_vs_actual_points_spearman')):.3f}",
+    )
+
+    corr_df = pd.DataFrame(market_packet_state.get("correlation_table") or [])
+    if not corr_df.empty:
+        st.caption("Correlation Table")
+        st.dataframe(corr_df, hide_index=True, use_container_width=True)
+
+    bucket_tables = market_packet_state.get("bucket_calibration") or {}
+    total_bucket_df = pd.DataFrame(bucket_tables.get("total_line_buckets") or [])
+    spread_bucket_df = pd.DataFrame(bucket_tables.get("abs_spread_buckets") or [])
+    b1, b2 = st.columns(2)
+    with b1:
+        st.caption("Total-Line Buckets")
+        if total_bucket_df.empty:
+            st.info("No total-line bucket summary available.")
+        else:
+            st.dataframe(total_bucket_df, hide_index=True, use_container_width=True)
+    with b2:
+        st.caption("Abs-Spread Buckets")
+        if spread_bucket_df.empty:
+            st.info("No spread bucket summary available.")
+        else:
+            st.dataframe(spread_bucket_df, hide_index=True, use_container_width=True)
+
+    rec_df = pd.DataFrame(market_packet_state.get("calibration_recommendations") or [])
+    if not rec_df.empty:
+        st.caption("Calibration Recommendations")
+        st.dataframe(rec_df, hide_index=True, use_container_width=True)
+
+    market_packet_json = json.dumps(market_packet_state, indent=2, ensure_ascii=True)
+    st.download_button(
+        "Download Market Packet JSON",
+        data=market_packet_json,
+        file_name=f"market_correlation_packet_{end_date.isoformat()}.json",
+        mime="application/json",
+        key="download_global_agentic_market_packet_json",
+    )
+    st.download_button(
+        "Download Market User Prompt TXT",
+        data=market_user_prompt,
+        file_name=f"market_correlation_prompt_{end_date.isoformat()}.txt",
+        mime="text/plain",
+        key="download_global_agentic_market_prompt_txt",
+    )
+    with st.expander("Market Packet Preview"):
+        st.json(market_packet_state)
+    with st.expander("Market Prompt Preview"):
+        st.text_area(
+            "Market Prompt",
+            value=market_user_prompt,
+            height=260,
+            key="global_agentic_market_prompt_preview",
+        )
+else:
+    st.info("Build the global packet to generate market-correlation analysis.")
 
 if run_openai_clicked:
     if not openai_key:
@@ -832,4 +1075,41 @@ if global_output:
         file_name=f"global_agentic_recommendations_{end_date.isoformat()}.txt",
         mime="text/plain",
         key="download_global_agentic_recommendations_txt",
+    )
+
+run_market_openai_clicked = st.button("Run Market OpenAI Review", key="global_agentic_run_market_openai")
+if run_market_openai_clicked:
+    if not openai_key:
+        st.error("Set `OPENAI_API_KEY` or Streamlit secret `openai_api_key` first.")
+    elif not market_user_prompt:
+        st.error("Build a global packet first to generate the market-correlation prompt.")
+    else:
+        with st.spinner("Generating market-correlation recommendations..."):
+            try:
+                market_output = request_openai_review(
+                    api_key=openai_key,
+                    user_prompt=market_user_prompt,
+                    system_prompt=MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT,
+                    model=selected_model,
+                    max_output_tokens=max_output_tokens,
+                )
+                st.session_state["global_agentic_market_output"] = market_output
+            except Exception as exc:
+                st.exception(exc)
+
+market_output_text = str(st.session_state.get("global_agentic_market_output") or "").strip()
+if market_output_text:
+    st.subheader("Market Correlation Recommendations")
+    st.text_area(
+        "Market Model Output",
+        value=market_output_text,
+        height=360,
+        key="global_agentic_market_output_preview",
+    )
+    st.download_button(
+        "Download Market Recommendations TXT",
+        data=market_output_text,
+        file_name=f"market_correlation_recommendations_{end_date.isoformat()}.txt",
+        mime="text/plain",
+        key="download_global_agentic_market_recommendations_txt",
     )
