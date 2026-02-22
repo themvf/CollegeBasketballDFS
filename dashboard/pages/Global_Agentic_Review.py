@@ -638,103 +638,113 @@ default_project = os.getenv("GCP_PROJECT", "").strip() or (_secret("gcp_project"
 default_end_date = prior_day()
 model_options = list(dict.fromkeys([DEFAULT_OPENAI_REVIEW_MODEL, *OPENAI_REVIEW_MODEL_FALLBACKS]))
 
-with st.sidebar:
-    st.header("Global Agentic Settings")
-    bucket_name = st.text_input("GCS Bucket", value=default_bucket, key="global_agentic_bucket")
-    gcp_project = st.text_input("GCP Project (optional)", value=default_project, key="global_agentic_project")
-    include_all_slates = bool(
-        st.checkbox(
-            "Include All Slates",
-            value=False,
-            key="global_agentic_include_all_slates",
-            help="When enabled, scans all slate labels instead of only the active slate label.",
-        )
+st.subheader("Global Agentic Settings")
+g1, g2 = st.columns(2)
+bucket_name = g1.text_input("GCS Bucket", value=default_bucket, key="global_agentic_bucket")
+gcp_project = g2.text_input("GCP Project (optional)", value=default_project, key="global_agentic_project")
+
+g3, g4 = st.columns(2)
+include_all_slates = bool(
+    g3.checkbox(
+        "Include All Slates",
+        value=False,
+        key="global_agentic_include_all_slates",
+        help="When enabled, scans all slate labels instead of only the active slate label.",
     )
-    shared_slate_preset = st.selectbox(
-        "Active Slate Label",
-        options=SLATE_PRESET_OPTIONS,
-        index=0,
-        key="shared_slate_preset",
-        help="Shared slate context used when loading DK slates and lineup runs.",
-        disabled=include_all_slates,
+)
+shared_slate_preset = g4.selectbox(
+    "Active Slate Label",
+    options=SLATE_PRESET_OPTIONS,
+    index=0,
+    key="shared_slate_preset",
+    help="Shared slate context used when loading DK slates and lineup runs.",
+    disabled=include_all_slates,
+)
+shared_slate_custom = ""
+if (not include_all_slates) and shared_slate_preset == "Custom":
+    shared_slate_custom = st.text_input(
+        "Custom Active Slate Label",
+        value="Main",
+        key="shared_slate_custom_label",
     )
-    shared_slate_custom = ""
-    if (not include_all_slates) and shared_slate_preset == "Custom":
-        shared_slate_custom = st.text_input(
-            "Custom Active Slate Label",
-            value="Main",
-            key="shared_slate_custom_label",
-        )
-    shared_slate_label = _normalize_slate_label(
-        shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
+shared_slate_label = _normalize_slate_label(
+    shared_slate_custom if shared_slate_preset == "Custom" else shared_slate_preset
+)
+shared_slate_key = _slate_key_from_label(shared_slate_label)
+effective_slate_key = None if include_all_slates else shared_slate_key
+if include_all_slates:
+    st.caption("Active slate: `All slates`")
+else:
+    st.caption(f"Active slate: `{shared_slate_label}` (key: `{shared_slate_key}`)")
+
+g5, g6, g7 = st.columns(3)
+end_date = g5.date_input("Review End Date", value=default_end_date, key="global_agentic_end_date")
+lookback_days = int(
+    g6.slider("Lookback Days", min_value=7, max_value=180, value=30, step=1, key="global_agentic_lookback_days")
+)
+focus_limit = int(
+    g7.slider(
+        "Global Focus Players",
+        min_value=5,
+        max_value=60,
+        value=25,
+        step=1,
+        key="global_agentic_focus_limit",
     )
-    shared_slate_key = _slate_key_from_label(shared_slate_label)
-    effective_slate_key = None if include_all_slates else shared_slate_key
-    if include_all_slates:
-        st.caption("Active slate: `All slates`")
-    else:
-        st.caption(f"Active slate: `{shared_slate_label}` (key: `{shared_slate_key}`)")
-    end_date = st.date_input("Review End Date", value=default_end_date, key="global_agentic_end_date")
-    lookback_days = int(
-        st.slider("Lookback Days", min_value=7, max_value=180, value=30, step=1, key="global_agentic_lookback_days")
+)
+
+g8, g9, g10 = st.columns(3)
+market_focus_limit = int(
+    g8.slider(
+        "Market Focus Rows",
+        min_value=5,
+        max_value=80,
+        value=25,
+        step=1,
+        key="global_agentic_market_focus_limit",
     )
-    focus_limit = int(
-        st.slider(
-            "Global Focus Players",
-            min_value=5,
-            max_value=60,
-            value=25,
-            step=1,
-            key="global_agentic_focus_limit",
-        )
+)
+market_min_bucket_samples = int(
+    g9.slider(
+        "Market Min Bucket Samples",
+        min_value=5,
+        max_value=120,
+        value=20,
+        step=1,
+        key="global_agentic_market_min_bucket_samples",
     )
-    market_focus_limit = int(
-        st.slider(
-            "Market Focus Rows",
-            min_value=5,
-            max_value=80,
-            value=25,
-            step=1,
-            key="global_agentic_market_focus_limit",
-        )
+)
+use_saved_run_dates = bool(
+    g10.checkbox(
+        "Use Saved Run Dates Only",
+        value=True,
+        key="global_agentic_use_saved_dates",
+        help="If enabled, only dates with saved lineup runs are scanned.",
     )
-    market_min_bucket_samples = int(
-        st.slider(
-            "Market Min Bucket Samples",
-            min_value=5,
-            max_value=120,
-            value=20,
-            step=1,
-            key="global_agentic_market_min_bucket_samples",
-        )
+)
+
+g11, g12 = st.columns(2)
+selected_model = g11.selectbox(
+    "OpenAI Model",
+    options=model_options,
+    index=0,
+    key="global_agentic_model",
+    help="Choose model for final recommendation generation.",
+)
+max_output_tokens = int(
+    g12.number_input(
+        "Max Output Tokens",
+        min_value=200,
+        max_value=8000,
+        value=1800,
+        step=100,
+        key="global_agentic_max_output_tokens",
     )
-    use_saved_run_dates = bool(
-        st.checkbox(
-            "Use Saved Run Dates Only",
-            value=True,
-            key="global_agentic_use_saved_dates",
-            help="If enabled, only dates with saved lineup runs are scanned.",
-        )
-    )
-    selected_model = st.selectbox(
-        "OpenAI Model",
-        options=model_options,
-        index=0,
-        key="global_agentic_model",
-        help="Choose model for final recommendation generation.",
-    )
-    max_output_tokens = int(
-        st.number_input(
-            "Max Output Tokens",
-            min_value=200,
-            max_value=8000,
-            value=1800,
-            step=100,
-            key="global_agentic_max_output_tokens",
-        )
-    )
-    build_packet_clicked = st.button("Build Global Packet", key="global_agentic_build_packet")
-    run_openai_clicked = st.button("Run OpenAI Review", key="global_agentic_run_openai")
+)
+
+g13, g14 = st.columns(2)
+build_packet_clicked = g13.button("Build Global Packet", key="global_agentic_build_packet")
+run_openai_clicked = g14.button("Run OpenAI Review", key="global_agentic_run_openai")
 
 if not bucket_name.strip():
     st.info("Set a GCS bucket to build a global review.")
@@ -966,7 +976,7 @@ if isinstance(global_packet_state, dict) and global_packet_state:
             key="global_agentic_prompt_preview",
         )
 else:
-    st.info("Click `Build Global Packet` in the sidebar to start.")
+    st.info("Click `Build Global Packet` above to start.")
 
 st.markdown("---")
 st.subheader("Market Correlation Agent (Multi-Date)")
