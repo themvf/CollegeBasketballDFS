@@ -1068,7 +1068,26 @@ if run_openai_clicked:
                 )
                 st.session_state["global_agentic_output"] = output
             except Exception as exc:
-                st.exception(exc)
+                exc_text = str(exc or "")
+                if "max_output_tokens" in exc_text.lower():
+                    retry_tokens = min(8000, max(max_output_tokens + 800, int(max_output_tokens * 1.8)))
+                    try:
+                        st.caption(
+                            "Global review hit max-output truncation; retrying with "
+                            f"`max_output_tokens={retry_tokens}`."
+                        )
+                        output = request_openai_review(
+                            api_key=openai_key,
+                            user_prompt=global_user_prompt,
+                            system_prompt=AI_REVIEW_SYSTEM_PROMPT,
+                            model=selected_model,
+                            max_output_tokens=retry_tokens,
+                        )
+                        st.session_state["global_agentic_output"] = output
+                    except Exception as retry_exc:
+                        st.exception(retry_exc)
+                else:
+                    st.exception(exc)
 
 global_output = str(st.session_state.get("global_agentic_output") or "").strip()
 if global_output:
@@ -1105,7 +1124,26 @@ if run_market_openai_clicked:
                 )
                 st.session_state["global_agentic_market_output"] = market_output
             except Exception as exc:
-                st.exception(exc)
+                exc_text = str(exc or "")
+                if "max_output_tokens" in exc_text.lower():
+                    retry_tokens = min(8000, max(max_output_tokens + 800, int(max_output_tokens * 1.8)))
+                    try:
+                        st.caption(
+                            "Market review hit max-output truncation; retrying with "
+                            f"`max_output_tokens={retry_tokens}`."
+                        )
+                        market_output = request_openai_review(
+                            api_key=openai_key,
+                            user_prompt=market_user_prompt,
+                            system_prompt=MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT,
+                            model=selected_model,
+                            max_output_tokens=retry_tokens,
+                        )
+                        st.session_state["global_agentic_market_output"] = market_output
+                    except Exception as retry_exc:
+                        st.exception(retry_exc)
+                else:
+                    st.exception(exc)
 
 market_output_text = str(st.session_state.get("global_agentic_market_output") or "").strip()
 if market_output_text:
