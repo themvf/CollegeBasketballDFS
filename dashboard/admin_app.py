@@ -4152,6 +4152,7 @@ with tab_tournament_review:
         st.session_state.pop("cbb_ai_review_prompt_user", None)
         st.session_state.pop("cbb_ai_review_prompt_system", None)
         st.session_state.pop("cbb_tournament_postmortem_output", None)
+        st.session_state.pop("cbb_tr_expanded_df", None)
 
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to run tournament review.")
@@ -4253,10 +4254,12 @@ with tab_tournament_review:
 
             field_entries_df = pd.DataFrame()
             entries_df = pd.DataFrame()
+            expanded_df = pd.DataFrame()
             exposure_df = pd.DataFrame()
             proj_compare_df = pd.DataFrame()
             adjust_df = pd.DataFrame()
             st.session_state["cbb_tr_entries_df"] = entries_df.copy()
+            st.session_state["cbb_tr_expanded_df"] = expanded_df.copy()
             st.session_state["cbb_tr_exposure_df"] = exposure_df.copy()
             st.session_state["cbb_tr_projection_compare_df"] = proj_compare_df.copy()
             st.session_state["cbb_tr_adjust_df"] = adjust_df.copy()
@@ -4294,7 +4297,14 @@ with tab_tournament_review:
                         if "our_minutes_avg" in projections_df.columns
                         else pd.Series(dtype=float)
                     )
-                    need_pool_fallback = not bool(mins_last7.notna().any() or mins_avg.notna().any())
+                    own_proj = (
+                        pd.to_numeric(projections_df.get("projected_ownership"), errors="coerce")
+                        if "projected_ownership" in projections_df.columns
+                        else pd.Series(dtype=float)
+                    )
+                    missing_minutes = not bool(mins_last7.notna().any() or mins_avg.notna().any())
+                    missing_ownership = not bool(own_proj.notna().any())
+                    need_pool_fallback = bool(missing_minutes or missing_ownership)
 
                 if need_pool_fallback and not slate_df.empty:
                     fallback_pool, _, _, _, _ = build_optimizer_pool_for_date(
@@ -4328,6 +4338,7 @@ with tab_tournament_review:
                             "our_usage_proxy",
                             "our_dk_projection",
                             "blended_projection",
+                            "projected_ownership",
                             "vegas_dk_projection",
                         ]
                         id_cols = ["ID"] + [c for c in enrich_cols if c in fallback_pool.columns]
@@ -4670,6 +4681,7 @@ with tab_tournament_review:
                     )
 
                     st.session_state["cbb_tr_entries_df"] = entries_df.copy()
+                    st.session_state["cbb_tr_expanded_df"] = expanded_df.copy()
                     st.session_state["cbb_tr_exposure_df"] = exposure_df.copy()
                     st.session_state["cbb_tr_projection_compare_df"] = proj_compare_df.copy()
                     st.session_state["cbb_tr_adjust_df"] = adjust_df.copy()
@@ -4961,12 +4973,16 @@ with tab_tournament_review:
             )
 
             pm_entries_df = field_entries_df.copy() if isinstance(field_entries_df, pd.DataFrame) else pd.DataFrame()
+            pm_expanded_df = expanded_df.copy() if isinstance(expanded_df, pd.DataFrame) else pd.DataFrame()
             pm_exposure_df = exposure_df.copy() if isinstance(exposure_df, pd.DataFrame) else pd.DataFrame()
             pm_proj_compare_df = proj_compare_df.copy() if isinstance(proj_compare_df, pd.DataFrame) else pd.DataFrame()
             pm_adjust_df = adjust_df.copy() if isinstance(adjust_df, pd.DataFrame) else pd.DataFrame()
             if pm_entries_df.empty:
                 state_entries = st.session_state.get("cbb_tr_entries_df")
                 pm_entries_df = state_entries.copy() if isinstance(state_entries, pd.DataFrame) else pd.DataFrame()
+            if pm_expanded_df.empty:
+                state_expanded = st.session_state.get("cbb_tr_expanded_df")
+                pm_expanded_df = state_expanded.copy() if isinstance(state_expanded, pd.DataFrame) else pd.DataFrame()
             if pm_exposure_df.empty:
                 state_exposure = st.session_state.get("cbb_tr_exposure_df")
                 pm_exposure_df = state_exposure.copy() if isinstance(state_exposure, pd.DataFrame) else pd.DataFrame()
@@ -4983,10 +4999,10 @@ with tab_tournament_review:
                 phantom_summary_state.copy() if isinstance(phantom_summary_state, pd.DataFrame) else pd.DataFrame()
             )
 
-            if pm_entries_df.empty or pm_exposure_df.empty or pm_proj_compare_df.empty:
+            if pm_entries_df.empty or pm_proj_compare_df.empty:
                 st.info(
                     "Run Tournament Review first (standings + projection comparison), then run Phantom Review "
-                    "to include generated-lineup construction analysis."
+                    "to include generated-lineup construction analysis. Exposure/ownership metrics are optional but recommended."
                 )
             else:
                 post_focus_limit = int(
@@ -5061,6 +5077,195 @@ with tab_tournament_review:
                         sort_col = "avg_would_beat_pct" if "avg_would_beat_pct" in phantom_construction_df.columns else "lineups"
                         phantom_construction_df = phantom_construction_df.sort_values(sort_col, ascending=False).reset_index(drop=True)
 
+                missed_player_df = pd.DataFrame()
+                low_own_standout_df = pd.DataFrame()
+                if not pm_proj_compare_df.empty:
+                    missed_player_df = pm_proj_compare_df.copy()
+                    missed_player_df["Name"] = missed_player_df.get("Name", "").astype(str).str.strip()
+                    missed_player_df["TeamAbbrev"] = missed_player_df.get("TeamAbbrev", "").astype(str).str.strip().str.upper()
+                    missed_player_df["name_key"] = missed_player_df["Name"].map(
+                        lambda x: re.sub(r"[^a-z0-9]", "", str(x or "").strip().lower())
+                    )
+                    missed_player_df["blend_error"] = pd.to_numeric(missed_player_df.get("blend_error"), errors="coerce")
+                    missed_player_df["actual_dk_points"] = pd.to_numeric(missed_player_df.get("actual_dk_points"), errors="coerce")
+                    if not pm_exposure_df.empty:
+                        exposure_join = pm_exposure_df.copy()
+                        exposure_join["Name"] = exposure_join.get("Name", "").astype(str).str.strip()
+                        exposure_join["TeamAbbrev"] = exposure_join.get("TeamAbbrev", "").astype(str).str.strip().str.upper()
+                        exposure_join["name_key"] = exposure_join["Name"].map(
+                            lambda x: re.sub(r"[^a-z0-9]", "", str(x or "").strip().lower())
+                        )
+                        keep_cols = [
+                            c
+                            for c in [
+                                "Name",
+                                "TeamAbbrev",
+                                "name_key",
+                                "field_ownership_pct",
+                                "projected_ownership",
+                                "actual_ownership_from_file",
+                                "ownership_diff_vs_proj",
+                                "final_dk_points",
+                            ]
+                            if c in exposure_join.columns
+                        ]
+                        exposure_join = exposure_join[keep_cols]
+                        strict_cols = [
+                            c
+                            for c in [
+                                "Name",
+                                "TeamAbbrev",
+                                "field_ownership_pct",
+                                "projected_ownership",
+                                "actual_ownership_from_file",
+                                "ownership_diff_vs_proj",
+                                "final_dk_points",
+                            ]
+                            if c in exposure_join.columns
+                        ]
+                        exposure_strict = exposure_join.drop_duplicates(["Name", "TeamAbbrev"])
+                        missed_player_df = missed_player_df.merge(
+                            exposure_strict[strict_cols],
+                            on=["Name", "TeamAbbrev"],
+                            how="left",
+                        )
+                        exposure_by_name = exposure_join.sort_values("field_ownership_pct", ascending=False).drop_duplicates(
+                            ["name_key"]
+                        )
+                        missed_player_df = missed_player_df.merge(
+                            exposure_by_name[
+                                [
+                                    c
+                                    for c in [
+                                        "name_key",
+                                        "field_ownership_pct",
+                                        "projected_ownership",
+                                        "actual_ownership_from_file",
+                                        "ownership_diff_vs_proj",
+                                        "final_dk_points",
+                                    ]
+                                    if c in exposure_by_name.columns
+                                ]
+                            ],
+                            on="name_key",
+                            how="left",
+                            suffixes=("", "_by_name"),
+                        )
+                        for col in [
+                            "field_ownership_pct",
+                            "projected_ownership",
+                            "actual_ownership_from_file",
+                            "ownership_diff_vs_proj",
+                            "final_dk_points",
+                        ]:
+                            by_name_col = f"{col}_by_name"
+                            if by_name_col in missed_player_df.columns:
+                                missed_player_df[col] = pd.to_numeric(missed_player_df.get(col), errors="coerce").where(
+                                    pd.to_numeric(missed_player_df.get(col), errors="coerce").notna(),
+                                    pd.to_numeric(missed_player_df.get(by_name_col), errors="coerce"),
+                                )
+                        missed_player_df = missed_player_df.drop(
+                            columns=[f"{c}_by_name" for c in ["field_ownership_pct", "projected_ownership", "actual_ownership_from_file", "ownership_diff_vs_proj", "final_dk_points"]],
+                            errors="ignore",
+                        )
+                    for col in ["field_ownership_pct", "projected_ownership", "actual_ownership_from_file"]:
+                        if col not in missed_player_df.columns:
+                            missed_player_df[col] = pd.NA
+                    missed_player_df["field_ownership_pct"] = pd.to_numeric(
+                        missed_player_df["field_ownership_pct"], errors="coerce"
+                    )
+                    missed_player_df["projected_ownership"] = pd.to_numeric(
+                        missed_player_df["projected_ownership"], errors="coerce"
+                    )
+                    missed_player_df["actual_ownership_from_file"] = pd.to_numeric(
+                        missed_player_df["actual_ownership_from_file"], errors="coerce"
+                    )
+                    missed_player_df["low_own_smash_flag"] = (
+                        missed_player_df["actual_dk_points"].fillna(0.0) >= 35.0
+                    ) & (
+                        (missed_player_df["field_ownership_pct"].fillna(999.0) <= 10.0)
+                        | (missed_player_df["projected_ownership"].fillna(999.0) <= 10.0)
+                    )
+                    missed_player_df = missed_player_df.loc[missed_player_df["blend_error"].fillna(-999.0) > 0]
+                    missed_player_df = missed_player_df.sort_values("blend_error", ascending=False).head(post_focus_limit)
+                    low_own_standout_df = (
+                        missed_player_df.loc[missed_player_df["low_own_smash_flag"].fillna(False)]
+                        .sort_values("actual_dk_points", ascending=False)
+                        .head(post_focus_limit)
+                    )
+                    missed_player_df = missed_player_df.drop(columns=["name_key"], errors="ignore")
+                    low_own_standout_df = low_own_standout_df.drop(columns=["name_key"], errors="ignore")
+
+                team_stack_summary_df = pd.DataFrame()
+                game_stack_summary_df = pd.DataFrame()
+                missed_game_stack_df = pd.DataFrame()
+                if not pm_expanded_df.empty and "EntryId" in pm_expanded_df.columns:
+                    stack_work = pm_expanded_df.copy()
+                    stack_work["EntryId"] = stack_work["EntryId"].astype(str).str.strip()
+                    if "TeamAbbrev" in stack_work.columns:
+                        stack_work["TeamAbbrev"] = stack_work["TeamAbbrev"].astype(str).str.strip().str.upper()
+                    else:
+                        stack_work["TeamAbbrev"] = ""
+                    if "game_key" in stack_work.columns:
+                        stack_work["game_key"] = stack_work["game_key"].astype(str).str.strip().str.upper()
+                    else:
+                        stack_work["game_key"] = ""
+                    top10_entry_ids: set[str] = set()
+                    if "EntryId" in top10_entries_df.columns:
+                        top10_entry_ids = set(top10_entries_df["EntryId"].astype(str).str.strip().tolist())
+
+                    team_entries = (
+                        stack_work.loc[stack_work["TeamAbbrev"] != ""]
+                        .groupby(["EntryId", "TeamAbbrev"], as_index=False)
+                        .size()
+                        .rename(columns={"size": "stack_size"})
+                    )
+                    team_entries = team_entries.loc[team_entries["stack_size"] >= 2].copy()
+                    if not team_entries.empty:
+                        team_entries["in_top10"] = team_entries["EntryId"].isin(top10_entry_ids)
+                        team_stack_summary_df = (
+                            team_entries.groupby("TeamAbbrev", as_index=False)
+                            .agg(
+                                field_entries_with_stack=("EntryId", "nunique"),
+                                top10_entries_with_stack=("in_top10", "sum"),
+                                avg_stack_size=("stack_size", "mean"),
+                            )
+                            .sort_values(["top10_entries_with_stack", "field_entries_with_stack", "avg_stack_size"], ascending=[False, False, False])
+                            .reset_index(drop=True)
+                        )
+
+                    game_entries = (
+                        stack_work.loc[stack_work["game_key"] != ""]
+                        .groupby(["EntryId", "game_key"], as_index=False)
+                        .size()
+                        .rename(columns={"size": "stack_size"})
+                    )
+                    game_entries = game_entries.loc[game_entries["stack_size"] >= 3].copy()
+                    if not game_entries.empty:
+                        game_entries["in_top10"] = game_entries["EntryId"].isin(top10_entry_ids)
+                        game_stack_summary_df = (
+                            game_entries.groupby("game_key", as_index=False)
+                            .agg(
+                                field_entries_with_stack=("EntryId", "nunique"),
+                                top10_entries_with_stack=("in_top10", "sum"),
+                                avg_stack_size=("stack_size", "mean"),
+                            )
+                            .sort_values(["top10_entries_with_stack", "field_entries_with_stack", "avg_stack_size"], ascending=[False, False, False])
+                            .reset_index(drop=True)
+                        )
+                        phantom_game_keys: set[str] = set()
+                        if not pm_phantom_df.empty and "anchor_game_key" in pm_phantom_df.columns:
+                            phantom_game_keys = {
+                                str(x).strip().upper()
+                                for x in pm_phantom_df["anchor_game_key"].tolist()
+                                if str(x).strip() and str(x).strip().lower() not in {"nan", "none", "null"}
+                            }
+                        if phantom_game_keys:
+                            missed_game_stack_df = game_stack_summary_df.loc[
+                                (game_stack_summary_df["top10_entries_with_stack"] > 0)
+                                & (~game_stack_summary_df["game_key"].isin(phantom_game_keys))
+                            ].head(post_focus_limit)
+
                 rw1, rw2, rw3, rw4, rw5 = st.columns(5)
                 rw1.metric("Field Entries", _safe_int_value(field_quality.get("field_entries"), default=0))
                 rw2.metric("Projection Blend MAE", f"{_safe_float_value(projection_quality.get('blend_mae'), default=0.0):.2f}")
@@ -5100,6 +5305,17 @@ with tab_tournament_review:
                     top10_max_entries = float(pd.to_numeric(top10_user_df["entries"], errors="coerce").fillna(0.0).max())
                     if top10_total_entries > 0:
                         top10_concentration = top10_max_entries / top10_total_entries
+                mapping_coverage = 0.0
+                if "mapped_players" in pm_entries_df.columns and "parsed_players" in pm_entries_df.columns:
+                    parsed_players = pd.to_numeric(pm_entries_df["parsed_players"], errors="coerce").replace(0, pd.NA)
+                    mapped_players = pd.to_numeric(pm_entries_df["mapped_players"], errors="coerce")
+                    mapping_coverage = float((mapped_players / parsed_players).fillna(0.0).mean())
+                projected_own_rows = int(
+                    pd.to_numeric(pm_exposure_df.get("projected_ownership"), errors="coerce").notna().sum()
+                ) if not pm_exposure_df.empty else 0
+                actual_own_rows = int(
+                    pd.to_numeric(pm_exposure_df.get("actual_ownership_from_file"), errors="coerce").notna().sum()
+                ) if not pm_exposure_df.empty else 0
 
                 right_notes: list[str] = []
                 wrong_notes: list[str] = []
@@ -5119,6 +5335,14 @@ with tab_tournament_review:
                     right_notes.append(f"Ownership absolute error stayed reasonable (`ownership_mae={ownership_mae:.2f}`).")
                 else:
                     wrong_notes.append(f"Ownership misses were large (`ownership_mae={ownership_mae:.2f}`).")
+                if projected_own_rows <= 0:
+                    wrong_notes.append("Projected ownership values are missing from exposure rows; verify projection snapshot for this slate.")
+                else:
+                    right_notes.append(f"Projected ownership coverage is populated on `{projected_own_rows}` exposure rows.")
+                if actual_own_rows <= 0:
+                    wrong_notes.append(
+                        "Actual ownership rows from standings are missing; verify contest standings format and slate mapping."
+                    )
                 if lineup_scored > 0:
                     if lineup_avg_delta >= 0.0:
                         right_notes.append(
@@ -5154,6 +5378,21 @@ with tab_tournament_review:
                             "Best phantom lineup trailed the field winner by "
                             f"`{phantom_gap_to_winner:.2f}` points."
                         )
+                if mapping_coverage < 0.4:
+                    wrong_notes.append(
+                        "Slate mapping coverage is low "
+                        f"(`{100.0 * mapping_coverage:.1f}%` mapped players); check that Tournament Review is on the correct slate key."
+                    )
+                elif mapping_coverage > 0:
+                    right_notes.append(f"Slate mapping coverage is strong (`{100.0 * mapping_coverage:.1f}%`).")
+                if not low_own_standout_df.empty:
+                    right_notes.append(
+                        f"Detected `{len(low_own_standout_df)}` low-ownership standout players who outperformed projections."
+                    )
+                if not missed_game_stack_df.empty:
+                    wrong_notes.append(
+                        f"Detected `{len(missed_game_stack_df)}` top field game stacks not represented in phantom anchors."
+                    )
 
                 st.subheader("What Went Right")
                 if right_notes:
@@ -5184,6 +5423,62 @@ with tab_tournament_review:
                     st.info("Phantom rows loaded, but no construction-level grouping columns were found.")
                 else:
                     st.dataframe(phantom_construction_df.head(30), hide_index=True, use_container_width=True)
+
+                st.subheader("Missed Player Standouts")
+                if missed_player_df.empty:
+                    st.info("No positive projection-miss player rows were found.")
+                else:
+                    missed_show_cols = [
+                        "Name",
+                        "TeamAbbrev",
+                        "Position",
+                        "Salary",
+                        "blended_projection",
+                        "actual_dk_points",
+                        "blend_error",
+                        "field_ownership_pct",
+                        "projected_ownership",
+                        "actual_ownership_from_file",
+                        "low_own_smash_flag",
+                    ]
+                    missed_use_cols = [c for c in missed_show_cols if c in missed_player_df.columns]
+                    st.dataframe(missed_player_df[missed_use_cols], hide_index=True, use_container_width=True)
+
+                st.subheader("Low-Ownership Standouts")
+                if low_own_standout_df.empty:
+                    st.info("No low-ownership standout players were detected from current data.")
+                else:
+                    low_show_cols = [
+                        "Name",
+                        "TeamAbbrev",
+                        "Position",
+                        "actual_dk_points",
+                        "blended_projection",
+                        "blend_error",
+                        "field_ownership_pct",
+                        "projected_ownership",
+                        "actual_ownership_from_file",
+                    ]
+                    low_use_cols = [c for c in low_show_cols if c in low_own_standout_df.columns]
+                    st.dataframe(low_own_standout_df[low_use_cols], hide_index=True, use_container_width=True)
+
+                st.subheader("Field Stack Signals")
+                ss1, ss2 = st.columns(2)
+                with ss1:
+                    st.caption("Team stacks (2+ players in same lineup)")
+                    if team_stack_summary_df.empty:
+                        st.info("No team-stack summary available.")
+                    else:
+                        st.dataframe(team_stack_summary_df.head(20), hide_index=True, use_container_width=True)
+                with ss2:
+                    st.caption("Game stacks (3+ players from same game in same lineup)")
+                    if game_stack_summary_df.empty:
+                        st.info("No game-stack summary available.")
+                    else:
+                        st.dataframe(game_stack_summary_df.head(20), hide_index=True, use_container_width=True)
+                if not missed_game_stack_df.empty:
+                    st.caption("Likely missed field game stacks (top-10 field presence, not in phantom anchors)")
+                    st.dataframe(missed_game_stack_df, hide_index=True, use_container_width=True)
 
                 improvement_rows: list[dict[str, Any]] = []
                 improvement_rows.append(
@@ -5233,6 +5528,26 @@ with tab_tournament_review:
                         "success_metric": "Increase overlap with top-10 construction profile while keeping lineup diversity.",
                     }
                 )
+                if not low_own_standout_df.empty:
+                    improvement_rows.append(
+                        {
+                            "priority": 6,
+                            "area": "Low-Own Ceiling Capture",
+                            "why": f"low_own_standouts={int(len(low_own_standout_df))}",
+                            "next_slate_change": "Create explicit low-owned upside bucket and ensure target exposure in GPP runs.",
+                            "success_metric": "Increase low-owned players that exceed projections by >= 8 DK points.",
+                        }
+                    )
+                if not missed_game_stack_df.empty:
+                    improvement_rows.append(
+                        {
+                            "priority": 7,
+                            "area": "Missed Field Stacks",
+                            "why": f"missed_field_game_stacks={int(len(missed_game_stack_df))}",
+                            "next_slate_change": "Bias stack generation toward top field game-stack signals not present in phantom anchors.",
+                            "success_metric": "Reduce missed top game-stack count and improve phantom top-end outcomes.",
+                        }
+                    )
                 improvement_df = pd.DataFrame(improvement_rows).sort_values("priority")
                 st.subheader("What To Improve Next Slate")
                 st.dataframe(improvement_df, hide_index=True, use_container_width=True)
@@ -5243,9 +5558,29 @@ with tab_tournament_review:
                         "review_date": tr_date.isoformat(),
                         "contest_id": str(tr_contest_id or "").strip(),
                     },
+                    "data_quality": {
+                        "mapped_player_coverage_pct": round(100.0 * float(mapping_coverage), 2),
+                        "projected_ownership_rows": int(projected_own_rows),
+                        "actual_ownership_rows": int(actual_own_rows),
+                    },
                     "scorecards": scorecards,
                     "focus_tables": post_packet.get("focus_tables") or {},
                     "top10_user_summary": top10_user_df.to_dict(orient="records") if not top10_user_df.empty else [],
+                    "missed_player_standouts": missed_player_df.to_dict(orient="records") if not missed_player_df.empty else [],
+                    "low_own_standouts": low_own_standout_df.to_dict(orient="records") if not low_own_standout_df.empty else [],
+                    "field_team_stack_summary": (
+                        team_stack_summary_df.head(40).to_dict(orient="records")
+                        if not team_stack_summary_df.empty
+                        else []
+                    ),
+                    "field_game_stack_summary": (
+                        game_stack_summary_df.head(40).to_dict(orient="records")
+                        if not game_stack_summary_df.empty
+                        else []
+                    ),
+                    "likely_missed_game_stacks": (
+                        missed_game_stack_df.to_dict(orient="records") if not missed_game_stack_df.empty else []
+                    ),
                     "phantom_construction_summary": (
                         phantom_construction_df.head(40).to_dict(orient="records")
                         if not phantom_construction_df.empty
@@ -5267,12 +5602,13 @@ with tab_tournament_review:
                     "Required sections:\n"
                     "1) What Went Right (3-6 bullets)\n"
                     "2) What Went Wrong (3-6 bullets)\n"
-                    "3) Top-10 User Construction Insights\n"
-                    "4) Phantom vs Field Construction Findings\n"
+                    "3) Missed Players and Low-Ownership Standouts\n"
+                    "4) Field vs Phantom Stack Findings (include likely missed stacks)\n"
                     "5) Prioritized Tweaks for Next Slate (max 5, each with rationale + success metric)\n\n"
                     "Constraints:\n"
                     "- Use only evidence in the JSON packet.\n"
                     "- Cite exact metric names/values.\n"
+                    "- Reference `data_quality` when signals are missing or unreliable.\n"
                     "- If evidence is insufficient, state what is missing.\n\n"
                     "JSON packet:\n"
                     f"{json.dumps(postmortem_payload, indent=2, ensure_ascii=True)}\n"

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import time
 from datetime import datetime, timezone
 from typing import Any
@@ -34,6 +35,7 @@ OPENAI_REVIEW_MODEL_FALLBACKS = (
     "gpt-4.1-mini",
     "gpt-4.1",
 )
+NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
 class OpenAIReviewError(RuntimeError):
@@ -57,6 +59,17 @@ def _to_int(value: Any, default: int = 0) -> int:
     if as_float is None:
         return int(default)
     return int(as_float)
+
+
+def _norm_name(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _norm_name_loose(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [tok for tok in text.split() if tok and tok not in NAME_SUFFIX_TOKENS]
+    return "".join(tokens)
 
 
 def _to_num_series(df: pd.DataFrame, col: str) -> pd.Series:
@@ -125,11 +138,15 @@ def _build_attention_candidates(
     proj = projection_comparison_df.copy()
     proj["Name"] = proj.get("Name", "").astype(str).str.strip()
     proj["TeamAbbrev"] = proj.get("TeamAbbrev", "").astype(str).str.strip().str.upper()
+    proj["name_key"] = proj["Name"].map(_norm_name)
+    proj["name_key_loose"] = proj["Name"].map(_norm_name_loose)
     proj["abs_projection_error"] = pd.to_numeric(proj.get("blend_error"), errors="coerce").abs()
 
     keep_proj_cols = [
         "Name",
         "TeamAbbrev",
+        "name_key",
+        "name_key_loose",
         "Position",
         "Salary",
         "blended_projection",
@@ -143,6 +160,8 @@ def _build_attention_candidates(
         exp = exposure_df.copy()
         exp["Name"] = exp.get("Name", "").astype(str).str.strip()
         exp["TeamAbbrev"] = exp.get("TeamAbbrev", "").astype(str).str.strip().str.upper()
+        exp["name_key"] = exp["Name"].map(_norm_name)
+        exp["name_key_loose"] = exp["Name"].map(_norm_name_loose)
         exp["abs_ownership_error"] = pd.to_numeric(exp.get("ownership_diff_vs_proj"), errors="coerce").abs()
         exp["field_ownership_pct"] = pd.to_numeric(exp.get("field_ownership_pct"), errors="coerce")
         exp["projected_ownership"] = pd.to_numeric(exp.get("projected_ownership"), errors="coerce")
@@ -153,6 +172,8 @@ def _build_attention_candidates(
                 for c in [
                     "Name",
                     "TeamAbbrev",
+                    "name_key",
+                    "name_key_loose",
                     "field_ownership_pct",
                     "projected_ownership",
                     "actual_ownership_from_file",
@@ -161,8 +182,88 @@ def _build_attention_candidates(
                 ]
                 if c in exp.columns
             ]
-        ].drop_duplicates(["Name", "TeamAbbrev"])
-        merged = proj.merge(exp, on=["Name", "TeamAbbrev"], how="left")
+        ]
+        exp_strict = exp.drop_duplicates(["Name", "TeamAbbrev"])
+        exp_by_name = exp.sort_values("field_ownership_pct", ascending=False).drop_duplicates(["name_key"])
+        exp_by_name_loose = exp.sort_values("field_ownership_pct", ascending=False).drop_duplicates(["name_key_loose"])
+
+        merged = proj.merge(
+            exp_strict[
+                [
+                    "Name",
+                    "TeamAbbrev",
+                    "field_ownership_pct",
+                    "projected_ownership",
+                    "actual_ownership_from_file",
+                    "ownership_diff_vs_proj",
+                    "abs_ownership_error",
+                ]
+            ],
+            on=["Name", "TeamAbbrev"],
+            how="left",
+        )
+        merged = merged.merge(
+            exp_by_name[
+                [
+                    "name_key",
+                    "field_ownership_pct",
+                    "projected_ownership",
+                    "actual_ownership_from_file",
+                    "ownership_diff_vs_proj",
+                    "abs_ownership_error",
+                ]
+            ],
+            on="name_key",
+            how="left",
+            suffixes=("", "_by_name"),
+        )
+        merged = merged.merge(
+            exp_by_name_loose[
+                [
+                    "name_key_loose",
+                    "field_ownership_pct",
+                    "projected_ownership",
+                    "actual_ownership_from_file",
+                    "ownership_diff_vs_proj",
+                    "abs_ownership_error",
+                ]
+            ],
+            on="name_key_loose",
+            how="left",
+            suffixes=("", "_by_name_loose"),
+        )
+        for col in [
+            "field_ownership_pct",
+            "projected_ownership",
+            "actual_ownership_from_file",
+            "ownership_diff_vs_proj",
+            "abs_ownership_error",
+        ]:
+            by_name_col = f"{col}_by_name"
+            by_name_loose_col = f"{col}_by_name_loose"
+            merged[col] = pd.to_numeric(merged[col], errors="coerce")
+            if by_name_col in merged.columns:
+                merged[col] = merged[col].where(merged[col].notna(), pd.to_numeric(merged[by_name_col], errors="coerce"))
+            if by_name_loose_col in merged.columns:
+                merged[col] = merged[col].where(
+                    merged[col].notna(),
+                    pd.to_numeric(merged[by_name_loose_col], errors="coerce"),
+                )
+        merged = merged.drop(
+            columns=[
+                "field_ownership_pct_by_name",
+                "projected_ownership_by_name",
+                "actual_ownership_from_file_by_name",
+                "ownership_diff_vs_proj_by_name",
+                "abs_ownership_error_by_name",
+                "field_ownership_pct_by_name_loose",
+                "projected_ownership_by_name_loose",
+                "actual_ownership_from_file_by_name_loose",
+                "ownership_diff_vs_proj_by_name_loose",
+                "abs_ownership_error_by_name_loose",
+            ],
+            errors="ignore",
+        )
     else:
         merged = proj.copy()
         merged["field_ownership_pct"] = pd.NA
@@ -319,6 +420,165 @@ def build_daily_ai_review_packet(
         exposure_df=exposure_df,
         limit=focus_limit,
     )
+    projection_with_own = projection_comparison_df.copy()
+    projection_with_own["Name"] = projection_with_own.get("Name", "").astype(str).str.strip()
+    projection_with_own["TeamAbbrev"] = projection_with_own.get("TeamAbbrev", "").astype(str).str.strip().str.upper()
+    projection_with_own["name_key"] = projection_with_own["Name"].map(_norm_name)
+    projection_with_own["name_key_loose"] = projection_with_own["Name"].map(_norm_name_loose)
+    projection_with_own["blend_error"] = pd.to_numeric(projection_with_own.get("blend_error"), errors="coerce")
+    projection_with_own["actual_dk_points"] = pd.to_numeric(projection_with_own.get("actual_dk_points"), errors="coerce")
+
+    if not exposure_df.empty:
+        exposure_join = exposure_df.copy()
+        exposure_join["Name"] = exposure_join.get("Name", "").astype(str).str.strip()
+        exposure_join["TeamAbbrev"] = exposure_join.get("TeamAbbrev", "").astype(str).str.strip().str.upper()
+        exposure_join["name_key"] = exposure_join["Name"].map(_norm_name)
+        exposure_join["name_key_loose"] = exposure_join["Name"].map(_norm_name_loose)
+        exposure_join["field_ownership_pct"] = pd.to_numeric(exposure_join.get("field_ownership_pct"), errors="coerce")
+        exposure_join["projected_ownership"] = pd.to_numeric(exposure_join.get("projected_ownership"), errors="coerce")
+        exposure_join["actual_ownership_from_file"] = pd.to_numeric(
+            exposure_join.get("actual_ownership_from_file"), errors="coerce"
+        )
+        use_cols = [
+            "Name",
+            "TeamAbbrev",
+            "name_key",
+            "name_key_loose",
+            "field_ownership_pct",
+            "projected_ownership",
+            "actual_ownership_from_file",
+            "ownership_diff_vs_proj",
+            "final_dk_points",
+        ]
+        exposure_join = exposure_join[[c for c in use_cols if c in exposure_join.columns]]
+        exposure_strict = exposure_join.drop_duplicates(["Name", "TeamAbbrev"])
+        exposure_by_name = exposure_join.sort_values("field_ownership_pct", ascending=False).drop_duplicates(["name_key"])
+        exposure_by_name_loose = exposure_join.sort_values("field_ownership_pct", ascending=False).drop_duplicates(
+            ["name_key_loose"]
+        )
+        projection_with_own = projection_with_own.merge(
+            exposure_strict[
+                [
+                    "Name",
+                    "TeamAbbrev",
+                    "field_ownership_pct",
+                    "projected_ownership",
+                    "actual_ownership_from_file",
+                    "ownership_diff_vs_proj",
+                    "final_dk_points",
+                ]
+            ],
+            on=["Name", "TeamAbbrev"],
+            how="left",
+        )
+        projection_with_own = projection_with_own.merge(
+            exposure_by_name[
+                [
+                    "name_key",
+                    "field_ownership_pct",
+                    "projected_ownership",
+                    "actual_ownership_from_file",
+                    "ownership_diff_vs_proj",
+                    "final_dk_points",
+                ]
+            ],
+            on="name_key",
+            how="left",
+            suffixes=("", "_by_name"),
+        )
+        projection_with_own = projection_with_own.merge(
+            exposure_by_name_loose[
+                [
+                    "name_key_loose",
+                    "field_ownership_pct",
+                    "projected_ownership",
+                    "actual_ownership_from_file",
+                    "ownership_diff_vs_proj",
+                    "final_dk_points",
+                ]
+            ],
+            on="name_key_loose",
+            how="left",
+            suffixes=("", "_by_name_loose"),
+        )
+        for col in [
+            "field_ownership_pct",
+            "projected_ownership",
+            "actual_ownership_from_file",
+            "ownership_diff_vs_proj",
+            "final_dk_points",
+        ]:
+            by_name_col = f"{col}_by_name"
+            by_name_loose_col = f"{col}_by_name_loose"
+            projection_with_own[col] = pd.to_numeric(projection_with_own[col], errors="coerce")
+            if by_name_col in projection_with_own.columns:
+                projection_with_own[col] = projection_with_own[col].where(
+                    projection_with_own[col].notna(),
+                    pd.to_numeric(projection_with_own[by_name_col], errors="coerce"),
+                )
+            if by_name_loose_col in projection_with_own.columns:
+                projection_with_own[col] = projection_with_own[col].where(
+                    projection_with_own[col].notna(),
+                    pd.to_numeric(projection_with_own[by_name_loose_col], errors="coerce"),
+                )
+    for col in [
+        "field_ownership_pct",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "ownership_diff_vs_proj",
+        "final_dk_points",
+    ]:
+        if col not in projection_with_own.columns:
+            projection_with_own[col] = pd.NA
+    projection_with_own["low_own_smash_flag"] = (
+        pd.to_numeric(projection_with_own["actual_dk_points"], errors="coerce").fillna(0.0) >= 35.0
+    ) & (
+        (
+            pd.to_numeric(projection_with_own["field_ownership_pct"], errors="coerce").fillna(999.0) <= 10.0
+        )
+        | (pd.to_numeric(projection_with_own["projected_ownership"], errors="coerce").fillna(999.0) <= 10.0)
+    )
+    underprojected_ceiling_top = _top_records(
+        projection_with_own.loc[pd.to_numeric(projection_with_own["blend_error"], errors="coerce") > 0].copy(),
+        keep_cols=[
+            "ID",
+            "Name",
+            "TeamAbbrev",
+            "Position",
+            "Salary",
+            "blended_projection",
+            "actual_dk_points",
+            "blend_error",
+            "field_ownership_pct",
+            "projected_ownership",
+            "actual_ownership_from_file",
+        ],
+        sort_col="blend_error",
+        ascending=False,
+        limit=focus_limit,
+    )
+    low_own_smash_top = _top_records(
+        projection_with_own.loc[
+            projection_with_own["low_own_smash_flag"].fillna(False)
+        ].copy(),
+        keep_cols=[
+            "ID",
+            "Name",
+            "TeamAbbrev",
+            "Position",
+            "Salary",
+            "actual_dk_points",
+            "blended_projection",
+            "blend_error",
+            "field_ownership_pct",
+            "projected_ownership",
+            "actual_ownership_from_file",
+            "low_own_smash_flag",
+        ],
+        sort_col="actual_dk_points",
+        ascending=False,
+        limit=focus_limit,
+    )
 
     packet = {
         "schema_version": AI_REVIEW_SCHEMA_VERSION,
@@ -337,6 +597,8 @@ def build_daily_ai_review_packet(
             "attention_index_top": attention,
             "projection_miss_top": top_projection_misses,
             "ownership_miss_top": top_ownership_misses,
+            "underprojected_ceiling_top": underprojected_ceiling_top,
+            "low_own_smash_top": low_own_smash_top,
         },
         "adjustment_factors": adjustment_factors_df.to_dict(orient="records") if not adjustment_factors_df.empty else [],
         "phantom_summary": phantom_summary_df.to_dict(orient="records") if not phantom_summary_df.empty else [],
@@ -545,7 +807,8 @@ def build_global_ai_review_user_prompt(global_packet: dict[str, Any]) -> str:
         "- Use only evidence in the JSON packet.\n"
         "- Distinguish one-off noise vs recurring signal.\n"
         "- For each recommendation, include expected impact and confidence.\n"
-        "- Cite exact metric names/values.\n\n"
+        "- Cite exact metric names/values.\n"
+        "- Keep it concise: max 16 bullets total and roughly <= 900 words.\n\n"
         "JSON packet:\n"
         f"{payload_json}\n"
     )

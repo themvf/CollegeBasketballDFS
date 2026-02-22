@@ -10,6 +10,21 @@ NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 HIGH_POINTS_THRESHOLD = 35.0
 LOW_OWNERSHIP_THRESHOLD = 10.0
 NULLISH_TEXT_VALUES = {"", "nan", "none", "null"}
+PROJECTED_OWNERSHIP_ALIASES = (
+    "projected_ownership",
+    "projected ownership",
+    "projectedownership",
+    "proj_ownership",
+    "projownership",
+    "ownership_projection",
+    "ownershipprojection",
+    "ownership_proj",
+    "ownershipproj",
+    "own_pct",
+    "own%",
+    "ownership",
+    "projected_ownership_v1",
+)
 LINEUP_SLOT_TOKENS = (
     "PG",
     "SG",
@@ -64,6 +79,17 @@ def _to_float(value: Any) -> float | None:
 
 def _norm_col_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _resolve_column_alias(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
+    if df is None or df.empty:
+        return None
+    normalized = {_norm_col_key(c): str(c) for c in df.columns}
+    for alias in aliases:
+        key = _norm_col_key(alias)
+        if key in normalized:
+            return normalized[key]
+    return None
 
 
 def parse_lineup_players(lineup_text: str) -> list[dict[str, str]]:
@@ -444,8 +470,20 @@ def build_player_exposure_comparison(
     if expanded_players_df is None or expanded_players_df.empty or entry_count <= 0:
         return pd.DataFrame()
 
+    expanded = expanded_players_df.copy()
+    if "resolved_name" not in expanded.columns:
+        expanded["resolved_name"] = expanded.get("player_name", "")
+    if "TeamAbbrev" not in expanded.columns:
+        expanded["TeamAbbrev"] = ""
+    expanded["resolved_name"] = expanded["resolved_name"].astype(str).str.strip()
+    expanded["TeamAbbrev"] = expanded["TeamAbbrev"].astype(str).str.strip().str.upper()
+    expanded["TeamAbbrev"] = expanded["TeamAbbrev"].replace({"NAN": "", "NONE": "", "NULL": ""})
+    expanded = expanded.loc[expanded["resolved_name"] != ""].copy()
+    if expanded.empty:
+        return pd.DataFrame()
+
     expo = (
-        expanded_players_df.groupby(["resolved_name", "TeamAbbrev"], as_index=False)
+        expanded.groupby(["resolved_name", "TeamAbbrev"], as_index=False)
         .agg(appearances=("EntryId", "count"))
         .rename(columns={"resolved_name": "Name"})
     )
@@ -459,8 +497,16 @@ def build_player_exposure_comparison(
             proj["Name"] = ""
         if "TeamAbbrev" not in proj.columns:
             proj["TeamAbbrev"] = ""
+        projected_ownership_col = _resolve_column_alias(proj, PROJECTED_OWNERSHIP_ALIASES)
+        if not projected_ownership_col:
+            projected_ownership_col = "projected_ownership"
+            proj[projected_ownership_col] = pd.NA
+        elif projected_ownership_col != "projected_ownership":
+            proj["projected_ownership"] = proj[projected_ownership_col]
         proj["name_key"] = proj["Name"].map(_norm)
+        proj["name_key_loose"] = proj["Name"].map(_norm_loose)
         proj["TeamAbbrev"] = proj["TeamAbbrev"].astype(str).str.strip().str.upper()
+        proj["TeamAbbrev"] = proj["TeamAbbrev"].replace({"NAN": "", "NONE": "", "NULL": ""})
         keep = [
             c
             for c in ["name_key", "TeamAbbrev", "projected_ownership", "blended_projection", "our_dk_projection", "vegas_dk_projection"]
@@ -468,6 +514,25 @@ def build_player_exposure_comparison(
         ]
         proj_keep = proj[keep].drop_duplicates(["name_key", "TeamAbbrev"])
         expo = expo.merge(proj_keep, on=["name_key", "TeamAbbrev"], how="left")
+        fallback_keep = [c for c in ["name_key", "name_key_loose", "projected_ownership", "blended_projection", "our_dk_projection", "vegas_dk_projection"] if c in proj.columns]
+        proj_name_keep = proj[fallback_keep].drop_duplicates(["name_key"])
+        expo = expo.merge(
+            proj_name_keep,
+            on="name_key",
+            how="left",
+            suffixes=("", "_name_fallback"),
+        )
+        for col in ["projected_ownership", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
+            fb_col = f"{col}_name_fallback"
+            if col not in expo.columns:
+                expo[col] = pd.NA
+            if fb_col in expo.columns:
+                expo[col] = pd.to_numeric(expo[col], errors="coerce").where(
+                    pd.to_numeric(expo[col], errors="coerce").notna(),
+                    pd.to_numeric(expo[fb_col], errors="coerce"),
+                )
+                expo = expo.drop(columns=[fb_col], errors="ignore")
+        expo = expo.drop(columns=["name_key_loose_name_fallback"], errors="ignore")
         if "projected_ownership" not in expo.columns:
             expo["projected_ownership"] = pd.NA
         expo["ownership_diff_vs_proj"] = pd.to_numeric(expo["field_ownership_pct"], errors="coerce") - pd.to_numeric(
@@ -480,8 +545,25 @@ def build_player_exposure_comparison(
     if actual_ownership_df is not None and not actual_ownership_df.empty:
         own = actual_ownership_df.copy()
         own["name_key"] = own["player_name"].map(_norm)
-        own = own.rename(columns={"actual_ownership": "actual_ownership_from_file"})
-        expo = expo.merge(own[["name_key", "actual_ownership_from_file"]], on="name_key", how="left")
+        own["name_key_loose"] = own["player_name"].map(_norm_loose)
+        own["actual_ownership_from_file"] = pd.to_numeric(own.get("actual_ownership"), errors="coerce")
+        by_name = (
+            own.loc[(own["name_key"] != "") & own["actual_ownership_from_file"].notna()]
+            .groupby("name_key", as_index=False)["actual_ownership_from_file"]
+            .max()
+            .set_index("name_key")["actual_ownership_from_file"]
+            .to_dict()
+        )
+        by_name_loose = (
+            own.loc[(own["name_key_loose"] != "") & own["actual_ownership_from_file"].notna()]
+            .groupby("name_key_loose", as_index=False)["actual_ownership_from_file"]
+            .max()
+            .set_index("name_key_loose")["actual_ownership_from_file"]
+            .to_dict()
+        )
+        expo["actual_ownership_from_file"] = expo["name_key"].map(by_name)
+        missing_own = expo["actual_ownership_from_file"].isna()
+        expo.loc[missing_own, "actual_ownership_from_file"] = expo.loc[missing_own, "name_key_loose"].map(by_name_loose)
     else:
         expo["actual_ownership_from_file"] = pd.NA
 

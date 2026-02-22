@@ -181,6 +181,52 @@ def test_player_exposure_and_user_summary() -> None:
     assert round(float(users["most_points"].max()), 2) == 200.5
 
 
+def test_player_exposure_ownership_alias_and_name_fallback() -> None:
+    expanded = pd.DataFrame(
+        [
+            {"EntryId": "1", "resolved_name": "Alpha One", "TeamAbbrev": ""},
+            {"EntryId": "2", "resolved_name": "Alpha One", "TeamAbbrev": ""},
+        ]
+    )
+    projection_df = pd.DataFrame(
+        [
+            {"Name": "Alpha One", "TeamAbbrev": "AAA", "Ownership": 11.5, "blended_projection": 30.0},
+        ]
+    )
+    actual_ownership_df = pd.DataFrame([{"player_name": "Alpha One", "actual_ownership": 18.0}])
+    expo = build_player_exposure_comparison(
+        expanded_players_df=expanded,
+        entry_count=10,
+        projection_df=projection_df,
+        actual_ownership_df=actual_ownership_df,
+        actual_results_df=None,
+    )
+    assert len(expo) == 1
+    row = expo.iloc[0]
+    assert round(float(row["projected_ownership"]), 2) == 11.5
+    assert round(float(row["actual_ownership_from_file"]), 2) == 18.0
+    assert round(float(row["field_ownership_pct"]), 2) == 20.0
+
+
+def test_player_exposure_keeps_rows_when_team_unmapped() -> None:
+    expanded = pd.DataFrame(
+        [
+            {"EntryId": "1", "resolved_name": "Alpha One", "TeamAbbrev": pd.NA},
+            {"EntryId": "2", "resolved_name": "Bravo Two", "TeamAbbrev": pd.NA},
+        ]
+    )
+    expo = build_player_exposure_comparison(
+        expanded_players_df=expanded,
+        entry_count=10,
+        projection_df=pd.DataFrame(),
+        actual_ownership_df=pd.DataFrame(),
+        actual_results_df=None,
+    )
+    assert len(expo) == 2
+    assert "field_ownership_pct" in expo.columns
+    assert round(float(expo["field_ownership_pct"].sum()), 2) == 20.0
+
+
 def test_build_entry_actual_points_comparison_adds_computed_points() -> None:
     entries, expanded = build_field_entries_and_players(_sample_standings(), _sample_slate())
     actual_df = pd.DataFrame(

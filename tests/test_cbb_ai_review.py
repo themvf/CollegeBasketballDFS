@@ -267,6 +267,54 @@ def test_build_daily_ai_review_packet_has_expected_schema() -> None:
     assert len(packet["focus_tables"]["attention_index_top"]) > 0
 
 
+def test_build_daily_ai_review_packet_attention_falls_back_to_name_match() -> None:
+    projection_df = pd.DataFrame(
+        [
+            {
+                "ID": "1",
+                "Name": "Alpha Guard Jr.",
+                "TeamAbbrev": "AAA",
+                "Position": "G",
+                "Salary": 8200,
+                "blended_projection": 34.0,
+                "actual_dk_points": 45.0,
+                "blend_error": 11.0,
+                "our_error": 9.0,
+                "vegas_error": 13.0,
+            }
+        ]
+    )
+    exposure_df = pd.DataFrame(
+        [
+            {
+                "Name": "Alpha Guard",
+                "TeamAbbrev": "ZZZ",
+                "field_ownership_pct": 35.0,
+                "projected_ownership": 28.0,
+                "actual_ownership_from_file": 40.0,
+                "ownership_diff_vs_proj": 12.0,
+                "final_dk_points": 45.0,
+            }
+        ]
+    )
+    packet = build_daily_ai_review_packet(
+        review_date="2026-02-18",
+        contest_id="abc123",
+        projection_comparison_df=projection_df,
+        entries_df=_sample_entries(),
+        exposure_df=exposure_df,
+        phantom_summary_df=pd.DataFrame(),
+        phantom_lineups_df=_sample_phantom(),
+        adjustment_factors_df=pd.DataFrame(),
+        focus_limit=10,
+    )
+    attention = packet["focus_tables"]["attention_index_top"]
+    assert len(attention) == 1
+    row = attention[0]
+    assert round(float(row["projected_ownership"]), 2) == 28.0
+    assert round(float(row["actual_ownership_from_file"]), 2) == 40.0
+
+
 def test_build_ai_review_user_prompt_contains_json_packet() -> None:
     packet = build_daily_ai_review_packet(
         review_date="2026-02-18",
