@@ -620,6 +620,7 @@ def _build_market_review_rows(
         "ownership_error",
         "game_total_line",
         "game_spread_line",
+        "game_key",
         "game_tail_score",
         "vegas_blend_weight",
     ]
@@ -987,6 +988,8 @@ st.caption(
 if isinstance(market_packet_state, dict) and market_packet_state:
     market_window = market_packet_state.get("window_summary") or {}
     market_quality = market_packet_state.get("global_quality") or {}
+    ownership_re = market_packet_state.get("ownership_reverse_engineering") or {}
+    ownership_re_metrics = ownership_re.get("overall_metrics") or {}
 
     mm1, mm2, mm3, mm4 = st.columns(4)
     mm1.metric("Dates Used", _safe_int(market_window.get("dates_used"), default=0))
@@ -996,6 +999,42 @@ if isinstance(market_packet_state, dict) and market_packet_state:
         "Total->Points Spearman",
         f"{_safe_float(market_quality.get('total_line_vs_actual_points_spearman')):.3f}",
     )
+
+    st.caption("Ownership Reverse-Engineering Tracker")
+    or1, or2, or3, or4 = st.columns(4)
+    or1.metric(
+        "Rows w/ Actual Own",
+        _safe_int(ownership_re_metrics.get("rows_with_actual_ownership"), default=0),
+    )
+    or2.metric(
+        "Current Own MAE",
+        f"{_safe_float(ownership_re_metrics.get('current_ownership_mae')):.2f}",
+    )
+    or3.metric(
+        "Baseline Own MAE",
+        f"{_safe_float(ownership_re_metrics.get('baseline_ownership_mae')):.2f}",
+    )
+    or4.metric(
+        "MAE Improvement",
+        f"{_safe_float(ownership_re_metrics.get('mae_improvement_vs_current')):.2f}",
+        help="Positive means historical baseline is better than current projected ownership.",
+    )
+
+    own_slate_df = pd.DataFrame(ownership_re.get("slate_size_summary") or [])
+    own_curve_df = pd.DataFrame(ownership_re.get("curve_table") or [])
+    ob1, ob2 = st.columns(2)
+    with ob1:
+        st.caption("Ownership Error by Slate Size")
+        if own_slate_df.empty:
+            st.info("No slate-size ownership summary available.")
+        else:
+            st.dataframe(own_slate_df, hide_index=True, use_container_width=True)
+    with ob2:
+        st.caption("Expected Ownership Curve (Projection Bucket x Slate Size)")
+        if own_curve_df.empty:
+            st.info("No ownership curve table available.")
+        else:
+            st.dataframe(own_curve_df, hide_index=True, use_container_width=True)
 
     corr_df = pd.DataFrame(market_packet_state.get("correlation_table") or [])
     if not corr_df.empty:

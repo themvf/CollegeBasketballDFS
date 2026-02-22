@@ -970,6 +970,261 @@ def _build_market_bucket_summary(
     return grouped
 
 
+_SLATE_SIZE_BUCKET_ORDER = {
+    "unknown": 0,
+    "1 game": 1,
+    "2-4 games": 2,
+    "5-7 games": 3,
+    "8-10 games": 4,
+    "11+ games": 5,
+}
+
+
+def _slate_size_bucket_label(game_count: Any) -> str:
+    n = _to_int(game_count, default=0)
+    if n <= 0:
+        return "unknown"
+    if n == 1:
+        return "1 game"
+    if n <= 4:
+        return "2-4 games"
+    if n <= 7:
+        return "5-7 games"
+    if n <= 10:
+        return "8-10 games"
+    return "11+ games"
+
+
+def _projection_decile_label(value: Any) -> str:
+    decile = max(1, min(10, _to_int(value, default=1)))
+    lo = (decile - 1) * 10
+    hi = decile * 10
+    return f"p{lo:02d}_{hi:02d}"
+
+
+def _build_ownership_reverse_engineering(
+    frame: pd.DataFrame,
+    *,
+    min_bucket_samples: int = 20,
+) -> dict[str, Any]:
+    if frame.empty:
+        return {
+            "overall_metrics": {},
+            "slate_size_summary": [],
+            "curve_table": [],
+        }
+
+    out = frame.copy()
+    if "review_date" not in out.columns:
+        out["review_date"] = ""
+    out["review_date"] = out["review_date"].astype(str).str.strip()
+
+    for col in [
+        "blended_projection",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "actual_dk_points",
+        "game_total_line",
+        "abs_game_spread",
+        "ownership_error",
+        "slate_game_count",
+    ]:
+        if col not in out.columns:
+            out[col] = pd.NA
+        out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    if "game_key" not in out.columns:
+        out["game_key"] = ""
+    out["game_key"] = out["game_key"].astype(str).str.strip().str.upper()
+
+    # Infer slate game count from per-date unique game keys when available.
+    game_counts_by_date = (
+        out.loc[(out["review_date"] != "") & (out["game_key"] != "")]
+        .groupby("review_date", as_index=False)["game_key"]
+        .nunique()
+        .rename(columns={"game_key": "slate_game_count_inferred"})
+    )
+    if not game_counts_by_date.empty:
+        out = out.merge(game_counts_by_date, on="review_date", how="left")
+        inferred = pd.to_numeric(out.get("slate_game_count_inferred"), errors="coerce")
+        existing = pd.to_numeric(out.get("slate_game_count"), errors="coerce")
+        out["slate_game_count"] = existing.where(existing.notna(), inferred)
+        out = out.drop(columns=["slate_game_count_inferred"], errors="ignore")
+
+    out["slate_size_bucket"] = out["slate_game_count"].map(_slate_size_bucket_label)
+    out["slate_size_bucket"] = out["slate_size_bucket"].where(out["slate_size_bucket"].notna(), "unknown")
+
+    out["projection_rank_pct"] = (
+        out.groupby("review_date", dropna=False)["blended_projection"]
+        .rank(method="average", pct=True)
+    )
+    global_rank = pd.to_numeric(out["blended_projection"], errors="coerce").rank(method="average", pct=True)
+    out["projection_rank_pct"] = pd.to_numeric(out["projection_rank_pct"], errors="coerce").where(
+        pd.to_numeric(out["projection_rank_pct"], errors="coerce").notna(),
+        global_rank,
+    )
+    out["projection_rank_pct"] = pd.to_numeric(out["projection_rank_pct"], errors="coerce").clip(lower=0.0, upper=1.0)
+
+    decile_bins = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
+    out["projection_decile"] = pd.cut(
+        out["projection_rank_pct"],
+        bins=decile_bins,
+        labels=list(range(1, 11)),
+        include_lowest=True,
+    )
+    out["projection_decile"] = pd.to_numeric(out["projection_decile"], errors="coerce")
+    out["projection_bucket"] = out["projection_decile"].map(_projection_decile_label)
+
+    valid = out.loc[
+        out["actual_ownership_from_file"].notna()
+        & out["projection_decile"].notna()
+    ].copy()
+    if valid.empty:
+        return {
+            "overall_metrics": {
+                "rows_with_actual_ownership": 0,
+                "current_ownership_mae": None,
+                "baseline_ownership_mae": None,
+                "mae_improvement_vs_current": None,
+            },
+            "slate_size_summary": [],
+            "curve_table": [],
+        }
+
+    valid["projection_decile"] = pd.to_numeric(valid["projection_decile"], errors="coerce").astype(int)
+    valid["projection_bucket"] = valid["projection_decile"].map(_projection_decile_label)
+    valid["current_abs_error"] = (
+        pd.to_numeric(valid["actual_ownership_from_file"], errors="coerce")
+        - pd.to_numeric(valid["projected_ownership"], errors="coerce")
+    ).abs()
+
+    pair_stats = (
+        valid.groupby(["slate_size_bucket", "projection_decile", "projection_bucket"], as_index=False)
+        .agg(
+            samples=("actual_ownership_from_file", "count"),
+            avg_actual_ownership=("actual_ownership_from_file", "mean"),
+            avg_projected_ownership=("projected_ownership", "mean"),
+            avg_blended_projection=("blended_projection", "mean"),
+            avg_actual_dk_points=("actual_dk_points", "mean"),
+            avg_game_total_line=("game_total_line", "mean"),
+            avg_abs_spread=("abs_game_spread", "mean"),
+            current_ownership_mae=("current_abs_error", "mean"),
+        )
+        .reset_index(drop=True)
+    )
+    pair_stats["projected_minus_actual_ownership"] = (
+        pd.to_numeric(pair_stats["avg_projected_ownership"], errors="coerce")
+        - pd.to_numeric(pair_stats["avg_actual_ownership"], errors="coerce")
+    )
+
+    pair_stats["_slate_order"] = pair_stats["slate_size_bucket"].map(_SLATE_SIZE_BUCKET_ORDER).fillna(99)
+    pair_stats = pair_stats.sort_values(["_slate_order", "projection_decile"], ascending=[True, True]).reset_index(drop=True)
+
+    decile_stats = (
+        valid.groupby("projection_decile", as_index=False)
+        .agg(
+            decile_samples=("actual_ownership_from_file", "count"),
+            decile_actual_ownership=("actual_ownership_from_file", "mean"),
+        )
+        .reset_index(drop=True)
+    )
+
+    overall_actual_ownership = _safe_mean(pd.to_numeric(valid["actual_ownership_from_file"], errors="coerce"))
+    bucket_min = max(3, int(min_bucket_samples))
+
+    scoring = valid.merge(
+        pair_stats[["slate_size_bucket", "projection_decile", "samples", "avg_actual_ownership"]],
+        on=["slate_size_bucket", "projection_decile"],
+        how="left",
+    ).rename(
+        columns={
+            "samples": "pair_samples",
+            "avg_actual_ownership": "pair_actual_ownership",
+        }
+    )
+    scoring = scoring.merge(
+        decile_stats,
+        on="projection_decile",
+        how="left",
+    )
+    scoring["expected_ownership_baseline"] = pd.to_numeric(
+        scoring["pair_actual_ownership"],
+        errors="coerce",
+    )
+    sparse_pair = pd.to_numeric(scoring["pair_samples"], errors="coerce").fillna(0) < float(bucket_min)
+    scoring.loc[sparse_pair, "expected_ownership_baseline"] = pd.to_numeric(
+        scoring.loc[sparse_pair, "decile_actual_ownership"],
+        errors="coerce",
+    )
+    sparse_decile = sparse_pair & (
+        pd.to_numeric(scoring["decile_samples"], errors="coerce").fillna(0) < float(bucket_min)
+    )
+    scoring.loc[sparse_decile, "expected_ownership_baseline"] = float(overall_actual_ownership)
+
+    source_series = pd.Series(["pair_bucket"] * len(scoring), index=scoring.index, dtype="object")
+    source_series.loc[sparse_pair] = "projection_decile"
+    source_series.loc[sparse_decile] = "overall"
+    scoring["baseline_source"] = source_series
+
+    scoring["baseline_abs_error"] = (
+        pd.to_numeric(scoring["actual_ownership_from_file"], errors="coerce")
+        - pd.to_numeric(scoring["expected_ownership_baseline"], errors="coerce")
+    ).abs()
+
+    baseline_source_counts = scoring["baseline_source"].value_counts(dropna=False).to_dict()
+    total_scored = max(1, len(scoring))
+    overall_metrics = {
+        "rows_with_actual_ownership": int(len(scoring)),
+        "current_ownership_mae": round(_safe_mean(scoring["current_abs_error"]), 4),
+        "baseline_ownership_mae": round(_safe_mean(scoring["baseline_abs_error"]), 4),
+        "mae_improvement_vs_current": round(
+            _safe_mean(scoring["current_abs_error"]) - _safe_mean(scoring["baseline_abs_error"]),
+            4,
+        ),
+        "bucket_min_samples": int(bucket_min),
+        "baseline_source_pair_bucket_pct": round(
+            _safe_pct_value(float(baseline_source_counts.get("pair_bucket", 0.0)), float(total_scored)),
+            2,
+        ),
+        "baseline_source_projection_decile_pct": round(
+            _safe_pct_value(float(baseline_source_counts.get("projection_decile", 0.0)), float(total_scored)),
+            2,
+        ),
+        "baseline_source_overall_pct": round(
+            _safe_pct_value(float(baseline_source_counts.get("overall", 0.0)), float(total_scored)),
+            2,
+        ),
+    }
+
+    slate_summary = (
+        scoring.groupby("slate_size_bucket", as_index=False)
+        .agg(
+            samples=("actual_ownership_from_file", "count"),
+            avg_slate_game_count=("slate_game_count", "mean"),
+            current_ownership_mae=("current_abs_error", "mean"),
+            baseline_ownership_mae=("baseline_abs_error", "mean"),
+            avg_projected_ownership=("projected_ownership", "mean"),
+            avg_actual_ownership=("actual_ownership_from_file", "mean"),
+            avg_baseline_expected_ownership=("expected_ownership_baseline", "mean"),
+        )
+        .reset_index(drop=True)
+    )
+    slate_summary["mae_improvement_vs_current"] = (
+        pd.to_numeric(slate_summary["current_ownership_mae"], errors="coerce")
+        - pd.to_numeric(slate_summary["baseline_ownership_mae"], errors="coerce")
+    )
+    slate_summary["_slate_order"] = slate_summary["slate_size_bucket"].map(_SLATE_SIZE_BUCKET_ORDER).fillna(99)
+    slate_summary = slate_summary.sort_values("_slate_order", ascending=True).drop(columns=["_slate_order"], errors="ignore")
+
+    curve_table = pair_stats.drop(columns=["_slate_order"], errors="ignore")
+
+    return {
+        "overall_metrics": overall_metrics,
+        "slate_size_summary": slate_summary.to_dict(orient="records"),
+        "curve_table": curve_table.to_dict(orient="records"),
+    }
+
+
 def build_market_correlation_ai_review_packet(
     *,
     review_rows_df: pd.DataFrame,
@@ -995,6 +1250,11 @@ def build_market_correlation_ai_review_packet(
                 "total_line_buckets": [],
                 "abs_spread_buckets": [],
             },
+            "ownership_reverse_engineering": {
+                "overall_metrics": {},
+                "slate_size_summary": [],
+                "curve_table": [],
+            },
             "trend_by_date": [],
             "calibration_recommendations": [],
             "notes_for_agent": [
@@ -1019,6 +1279,7 @@ def build_market_correlation_ai_review_packet(
         "game_spread_line",
         "game_tail_score",
         "vegas_blend_weight",
+        "slate_game_count",
     ]
     for col in numeric_cols:
         if col not in frame.columns:
@@ -1033,6 +1294,10 @@ def build_market_correlation_ai_review_packet(
     frame["abs_game_spread"] = pd.to_numeric(frame["game_spread_line"], errors="coerce").abs()
     frame["abs_blend_error"] = pd.to_numeric(frame["blend_error"], errors="coerce").abs()
     frame["abs_ownership_error"] = pd.to_numeric(frame["ownership_error"], errors="coerce").abs()
+    ownership_reverse_engineering = _build_ownership_reverse_engineering(
+        frame,
+        min_bucket_samples=min_bucket_samples,
+    )
 
     corr_specs = [
         ("blended_projection", "actual_dk_points", "blend_projection_vs_actual_points"),
@@ -1158,11 +1423,13 @@ def build_market_correlation_ai_review_packet(
                 spread_bucket_df.to_dict(orient="records") if not spread_bucket_df.empty else []
             ),
         },
+        "ownership_reverse_engineering": ownership_reverse_engineering,
         "trend_by_date": trend_rows,
         "calibration_recommendations": recommendation_rows,
         "notes_for_agent": [
             "Focus on robust signals (higher samples) and avoid overfitting to one-date outliers.",
             "Use suggested_projection_scale by bucket as starting points; validate with next-slate MAE deltas.",
+            "Use ownership_reverse_engineering.curve_table for projection->ownership expectations by slate size.",
             "Separate ownership calibration from projection calibration when signals diverge.",
         ],
     }
@@ -1176,15 +1443,17 @@ def build_market_correlation_ai_review_user_prompt(packet: dict[str, Any]) -> st
         "1) Market Signal Summary (3-6 bullets)\n"
         "2) Odds -> Points Correlations (what is real vs weak)\n"
         "3) Odds -> Ownership Correlations (what to adjust)\n"
-        "4) Odds -> Stack Translation (which totals/spreads imply stackable games, and where to be under/over field)\n"
-        "5) Projection Tightening Plan by Bucket (max 6 actions)\n"
-        "6) Ownership Tightening Plan by Bucket (max 5 actions)\n"
-        "7) GPP Differentiation Edge Plan (max 5 actions; include leverage rationale + risk)\n"
-        "8) Next-Slate Validation Plan (metrics + pass/fail thresholds)\n\n"
+        "4) Projection -> Ownership Curve by Slate Size (map projected points/rank to expected ownership ranges)\n"
+        "5) Odds -> Stack Translation (which totals/spreads imply stackable games, and where to be under/over field)\n"
+        "6) Projection Tightening Plan by Bucket (max 6 actions)\n"
+        "7) Ownership Tightening Plan by Bucket (max 5 actions)\n"
+        "8) GPP Differentiation Edge Plan (max 5 actions; include leverage rationale + risk)\n"
+        "9) Next-Slate Validation Plan (metrics + pass/fail thresholds)\n\n"
         "Constraints:\n"
         "- Use only evidence in the JSON packet.\n"
         "- Cite exact metric names and values.\n"
         "- Prioritize recommendations with adequate sample size.\n"
+        "- Use ownership_reverse_engineering.overall_metrics and curve_table when discussing expected ownership.\n"
         "- Highlight where market signals and ownership behavior diverge (edge opportunities).\n"
         "- If evidence is insufficient, state exactly what is missing.\n"
         "- Do not invent settings that are not represented in the packet.\n\n"

@@ -10,6 +10,8 @@ from college_basketball_dfs.cbb_ai_review import (
     build_game_slate_ai_review_user_prompt,
     build_global_ai_review_packet,
     build_global_ai_review_user_prompt,
+    build_market_correlation_ai_review_packet,
+    build_market_correlation_ai_review_user_prompt,
     request_openai_review,
 )
 
@@ -242,6 +244,53 @@ def _sample_player_pool_for_gpp() -> pd.DataFrame:
             },
         ]
     )
+
+
+def _sample_market_review_rows() -> pd.DataFrame:
+    rows: list[dict[str, object]] = []
+    date_a = "2026-02-20"
+    date_b = "2026-02-21"
+
+    # 3-game slate.
+    games_a = ["AAA@BBB", "CCC@DDD", "EEE@FFF"]
+    for idx in range(6):
+        game_key = games_a[idx % len(games_a)]
+        rows.append(
+            {
+                "review_date": date_a,
+                "game_key": game_key,
+                "Name": f"A-Player-{idx}",
+                "blended_projection": 20.0 + (idx * 2.0),
+                "actual_dk_points": 18.0 + (idx * 2.4),
+                "projected_ownership": 6.0 + (idx * 2.2),
+                "actual_ownership_from_file": 5.0 + (idx * 2.5),
+                "ownership_error": (5.0 + (idx * 2.5)) - (6.0 + (idx * 2.2)),
+                "blend_error": (18.0 + (idx * 2.4)) - (20.0 + (idx * 2.0)),
+                "game_total_line": 142.0 + (idx % 3) * 4.0,
+                "game_spread_line": (-1.0 if idx % 2 == 0 else 1.0) * (2.0 + (idx % 3)),
+            }
+        )
+
+    # 6-game slate.
+    games_b = ["GGG@HHH", "III@JJJ", "KKK@LLL", "MMM@NNN", "OOO@PPP", "QQQ@RRR"]
+    for idx in range(12):
+        game_key = games_b[idx % len(games_b)]
+        rows.append(
+            {
+                "review_date": date_b,
+                "game_key": game_key,
+                "Name": f"B-Player-{idx}",
+                "blended_projection": 16.0 + (idx * 1.6),
+                "actual_dk_points": 14.0 + (idx * 1.9),
+                "projected_ownership": 4.0 + (idx * 1.5),
+                "actual_ownership_from_file": 3.5 + (idx * 1.8),
+                "ownership_error": (3.5 + (idx * 1.8)) - (4.0 + (idx * 1.5)),
+                "blend_error": (14.0 + (idx * 1.9)) - (16.0 + (idx * 1.6)),
+                "game_total_line": 138.0 + (idx % 6) * 3.5,
+                "game_spread_line": (-1.0 if idx % 2 == 0 else 1.0) * (1.5 + (idx % 4)),
+            }
+        )
+    return pd.DataFrame(rows)
 
 
 def test_build_daily_ai_review_packet_has_expected_schema() -> None:
@@ -567,6 +616,35 @@ def test_build_global_ai_review_packet_aggregates_daily_packets() -> None:
     prompt = build_global_ai_review_user_prompt(global_packet)
     assert "Global Diagnostic Summary" in prompt
     assert '"schema_version": "v1_global"' in prompt
+
+
+def test_build_market_correlation_packet_includes_ownership_reverse_engineering() -> None:
+    rows = _sample_market_review_rows()
+    packet = build_market_correlation_ai_review_packet(
+        review_rows_df=rows,
+        focus_limit=10,
+        min_bucket_samples=2,
+    )
+
+    assert packet["schema_version"] == "v1_market_correlation"
+    ownership_re = packet.get("ownership_reverse_engineering") or {}
+    metrics = ownership_re.get("overall_metrics") or {}
+    assert int(metrics.get("rows_with_actual_ownership") or 0) > 0
+    assert metrics.get("current_ownership_mae") is not None
+    assert metrics.get("baseline_ownership_mae") is not None
+    assert len(ownership_re.get("curve_table") or []) > 0
+    assert len(ownership_re.get("slate_size_summary") or []) > 0
+
+
+def test_build_market_correlation_prompt_mentions_projection_to_ownership_curve() -> None:
+    packet = build_market_correlation_ai_review_packet(
+        review_rows_df=_sample_market_review_rows(),
+        focus_limit=10,
+        min_bucket_samples=2,
+    )
+    prompt = build_market_correlation_ai_review_user_prompt(packet)
+    assert "Projection -> Ownership Curve by Slate Size" in prompt
+    assert "ownership_reverse_engineering.overall_metrics" in prompt
 
 
 def test_build_game_slate_ai_review_packet_and_prompt() -> None:
