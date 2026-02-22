@@ -9,6 +9,34 @@ SALARY_CAP = 50000
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 HIGH_POINTS_THRESHOLD = 35.0
 LOW_OWNERSHIP_THRESHOLD = 10.0
+NULLISH_TEXT_VALUES = {"", "nan", "none", "null"}
+LINEUP_SLOT_TOKENS = (
+    "PG",
+    "SG",
+    "SF",
+    "PF",
+    "C",
+    "G",
+    "F",
+    "UTIL",
+    "FLEX",
+    "CPT",
+    "QB",
+    "RB",
+    "WR",
+    "TE",
+    "DST",
+    "D",
+    "P",
+    "C1B",
+    "2B",
+    "3B",
+    "SS",
+    "OF",
+    "M",
+    "W",
+)
+LINEUP_SLOT_SET = set(LINEUP_SLOT_TOKENS)
 
 
 def _norm(value: Any) -> str:
@@ -34,19 +62,111 @@ def _to_float(value: Any) -> float | None:
         return None
 
 
+def _norm_col_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
 def parse_lineup_players(lineup_text: str) -> list[dict[str, str]]:
-    if not str(lineup_text or "").strip():
+    text = str(lineup_text or "").strip()
+    if not text:
         return []
-    pattern = re.compile(r"\b(F|G|UTIL)\s+(.+?)(?=\s+(?:F|G|UTIL)\s+|$)")
     players: list[dict[str, str]] = []
-    for match in pattern.finditer(str(lineup_text)):
-        players.append(
-            {
-                "slot": match.group(1).strip().upper(),
-                "player_name": match.group(2).strip(),
-            }
-        )
+    tokens = re.split(r"\s+", text)
+    idx = 0
+    while idx < len(tokens):
+        slot = str(tokens[idx] or "").strip().upper().rstrip(",:;")
+        if slot not in LINEUP_SLOT_SET:
+            idx += 1
+            continue
+        j = idx + 1
+        player_tokens: list[str] = []
+        while j < len(tokens):
+            next_slot = str(tokens[j] or "").strip().upper().rstrip(",:;")
+            if next_slot in LINEUP_SLOT_SET:
+                break
+            player_tokens.append(tokens[j])
+            j += 1
+        player_name = " ".join(player_tokens).strip(" ,;|-")
+        if player_name:
+            players.append({"slot": slot, "player_name": player_name})
+        idx = j
+    if players:
+        return players
+    # Fallback for comma-separated names without slot labels.
+    parts = [p.strip(" ,;|-") for p in re.split(r"\s*,\s*", text) if p.strip(" ,;|-")]
+    if len(parts) >= 6:
+        return [{"slot": "UTIL", "player_name": p} for p in parts]
     return players
+
+
+def detect_contest_standings_upload(df: pd.DataFrame | None) -> dict[str, Any]:
+    if df is None:
+        return {
+            "kind": "empty",
+            "is_usable": False,
+            "message": "No upload loaded.",
+            "row_count": 0,
+            "column_count": 0,
+            "lineup_nonempty_rows": 0,
+            "columns_preview": [],
+        }
+
+    cols = [str(c).strip() for c in df.columns]
+    col_keys = {_norm_col_key(c) for c in cols if str(c).strip()}
+    lineup_col = next((c for c in df.columns if _norm_col_key(c) == "lineup"), None)
+    lineup_nonempty_rows = 0
+    if lineup_col is not None and lineup_col in df.columns:
+        lineup_vals = df[lineup_col].astype(str).str.strip().str.lower()
+        lineup_nonempty_rows = int((~lineup_vals.isin(NULLISH_TEXT_VALUES)).sum())
+
+    has_rank_or_points = ("rank" in col_keys) or ("points" in col_keys)
+    has_entry_cols = {"entryid", "entryname", "lineup"}.issubset(col_keys)
+    looks_like_standings = has_entry_cols and has_rank_or_points
+    looks_like_dk_entries_template = {"entryid", "contestname", "contestid", "entryfee"}.issubset(col_keys) and (
+        "lineup" not in col_keys
+    )
+    looks_like_dk_salaries = {"nameid", "rosterposition", "salary", "gameinfo", "teamabbrev"}.issubset(col_keys)
+
+    kind = "unknown"
+    is_usable = False
+    message = (
+        "Unrecognized CSV format for Tournament Review. Upload DraftKings contest standings "
+        "(`contest-standings-<contest_id>.csv`)."
+    )
+    if looks_like_standings:
+        kind = "contest_standings"
+        is_usable = True
+        message = "Contest standings format detected."
+        if lineup_nonempty_rows <= 0:
+            message = (
+                "Contest standings columns are present, but `Lineup` rows are empty. "
+                "Contest may not have started or export is incomplete."
+            )
+    elif looks_like_dk_entries_template:
+        kind = "dk_entries_template"
+        message = (
+            "This looks like a DraftKings entry-upload template (`DKEntries_*.csv`). "
+            "Tournament Review needs contest standings export (`contest-standings-<contest_id>.csv`)."
+        )
+    elif looks_like_dk_salaries:
+        kind = "dk_salaries"
+        message = (
+            "This looks like a DraftKings salaries slate file (`DKSalaries*.csv`). "
+            "Tournament Review needs contest standings export (`contest-standings-<contest_id>.csv`)."
+        )
+    elif df.empty:
+        kind = "empty"
+        message = "Uploaded CSV loaded but has no rows."
+
+    return {
+        "kind": kind,
+        "is_usable": bool(is_usable),
+        "message": message,
+        "row_count": int(len(df)),
+        "column_count": int(len(df.columns)),
+        "lineup_nonempty_rows": int(lineup_nonempty_rows),
+        "columns_preview": cols[:12],
+    }
 
 
 def normalize_contest_standings_frame(df: pd.DataFrame | None) -> pd.DataFrame:

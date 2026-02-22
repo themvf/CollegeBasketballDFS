@@ -55,6 +55,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     summarize_phantom_entries,
     summarize_generated_lineups,
     normalize_contest_standings_frame,
+    detect_contest_standings_upload,
     extract_actual_ownership_from_standings,
 )
 from college_basketball_dfs.cbb_ai_review import (
@@ -139,6 +140,38 @@ def _safe_float_value(value: object, default: float = 0.0) -> float:
 
 def _safe_int_value(value: object, default: int = 0) -> int:
     return int(_safe_float_value(value, float(default)))
+
+
+def _read_uploaded_csv_frame(uploaded_file: Any) -> dict[str, Any]:
+    raw_bytes = uploaded_file.getvalue() if uploaded_file is not None else b""
+    decode_warning = ""
+    try:
+        csv_text = raw_bytes.decode("utf-8-sig")
+    except UnicodeDecodeError:
+        csv_text = raw_bytes.decode("utf-8-sig", errors="replace")
+        decode_warning = "Upload contained non-UTF-8 bytes; undecodable characters were replaced."
+
+    parse_mode = "default"
+    parse_error = ""
+    frame = pd.DataFrame()
+    try:
+        frame = pd.read_csv(io.StringIO(csv_text))
+    except Exception as exc:
+        parse_error = str(exc)
+        parse_mode = "failed"
+        try:
+            frame = pd.read_csv(io.StringIO(csv_text), engine="python", on_bad_lines="skip")
+            parse_mode = "relaxed"
+        except Exception as relaxed_exc:
+            parse_error = f"{parse_error}; relaxed parser error: {relaxed_exc}"
+
+    return {
+        "csv_text": csv_text,
+        "frame": frame,
+        "parse_mode": parse_mode,
+        "parse_error": parse_error,
+        "decode_warning": decode_warning,
+    }
 
 
 def _normalize_slate_label(value: object, default: str = "Main") -> str:
@@ -4123,11 +4156,63 @@ with tab_tournament_review:
         st.info("Set a GCS bucket in sidebar to run tournament review.")
     else:
         try:
+            upload_csv_text = ""
+            upload_frame = pd.DataFrame()
+            upload_parse_mode = "none"
+            upload_parse_error = ""
+            upload_decode_warning = ""
+            upload_profile: dict[str, Any] | None = None
+            upload_is_usable = False
+            if tr_upload is not None:
+                upload_payload = _read_uploaded_csv_frame(tr_upload)
+                upload_csv_text = str(upload_payload.get("csv_text") or "")
+                upload_frame = (
+                    upload_payload.get("frame").copy()
+                    if isinstance(upload_payload.get("frame"), pd.DataFrame)
+                    else pd.DataFrame()
+                )
+                upload_parse_mode = str(upload_payload.get("parse_mode") or "failed")
+                upload_parse_error = str(upload_payload.get("parse_error") or "").strip()
+                upload_decode_warning = str(upload_payload.get("decode_warning") or "").strip()
+                if upload_parse_mode == "failed":
+                    st.error(
+                        "Could not parse uploaded CSV. Upload DraftKings contest standings "
+                        "(`contest-standings-<contest_id>.csv`)."
+                    )
+                    if upload_parse_error:
+                        st.caption(f"Parser error: {upload_parse_error}")
+                else:
+                    upload_profile = detect_contest_standings_upload(upload_frame)
+                    row_count = int(upload_profile.get("row_count", len(upload_frame)))
+                    col_count = int(upload_profile.get("column_count", len(upload_frame.columns)))
+                    st.caption(f"Uploaded `{tr_upload.name}` | Rows: {row_count:,} | Columns: {col_count:,}")
+                    if upload_decode_warning:
+                        st.warning(upload_decode_warning)
+                    if upload_parse_mode == "relaxed":
+                        st.warning("Loaded with relaxed CSV parsing; malformed rows were skipped.")
+                    if str(upload_profile.get("kind") or "") != "contest_standings":
+                        st.error(str(upload_profile.get("message") or "Unrecognized tournament standings CSV format."))
+                        preview_cols = [str(c) for c in (upload_profile.get("columns_preview") or [])]
+                        if preview_cols:
+                            st.caption(f"Detected columns: {', '.join(preview_cols)}")
+                    else:
+                        upload_is_usable = bool(upload_profile.get("is_usable"))
+                        if int(upload_profile.get("lineup_nonempty_rows") or 0) <= 0:
+                            st.warning(
+                                str(
+                                    upload_profile.get("message")
+                                    or "Contest standings loaded, but lineup rows are currently empty."
+                                )
+                            )
+
             if tr_save_clicked:
                 if tr_upload is None:
                     st.error("Choose a contest standings CSV before saving.")
+                elif upload_parse_mode == "failed":
+                    st.error("Fix CSV parsing errors before saving to GCS.")
+                elif not upload_is_usable:
+                    st.error("Uploaded file is not a contest standings export. Not saved.")
                 else:
-                    csv_text = tr_upload.getvalue().decode("utf-8-sig")
                     client = build_storage_client(
                         service_account_json=cred_json,
                         service_account_json_b64=cred_json_b64,
@@ -4138,14 +4223,14 @@ with tab_tournament_review:
                         store,
                         tr_date,
                         tr_contest_id,
-                        csv_text,
+                        upload_csv_text,
                         slate_key=shared_slate_key,
                     )
                     load_contest_standings_frame.clear()
                     st.success(f"Saved contest standings to `{blob_name}`")
 
             if tr_upload is not None:
-                standings_df = pd.read_csv(io.StringIO(tr_upload.getvalue().decode("utf-8-sig")))
+                standings_df = upload_frame.copy() if upload_is_usable else pd.DataFrame()
             else:
                 standings_df = load_contest_standings_frame(
                     bucket_name=bucket_name,

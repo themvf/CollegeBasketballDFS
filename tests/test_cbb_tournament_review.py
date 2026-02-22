@@ -6,6 +6,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_player_exposure_comparison,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
+    detect_contest_standings_upload,
     normalize_contest_standings_frame,
     parse_lineup_players,
     score_generated_lineups_against_actuals,
@@ -60,6 +61,46 @@ def test_parse_lineup_players_parses_eight_slots() -> None:
     assert len(parsed) == 8
     assert parsed[0]["slot"] == "F"
     assert parsed[-1]["slot"] == "UTIL"
+
+
+def test_parse_lineup_players_supports_extended_slot_labels() -> None:
+    lineup = "PG Alpha One SG Bravo Two SF Charlie Three PF Delta Four C Echo Five G Foxtrot Six F Gamma Seven UTIL Hotel Eight"
+    parsed = parse_lineup_players(lineup)
+    assert len(parsed) == 8
+    assert parsed[0]["slot"] == "PG"
+    assert parsed[-1]["slot"] == "UTIL"
+
+
+def test_parse_lineup_players_falls_back_to_comma_names() -> None:
+    lineup = "Alpha One, Bravo Two, Charlie Three, Delta Four, Echo Five, Foxtrot Six, Gamma Seven, Hotel Eight"
+    parsed = parse_lineup_players(lineup)
+    assert len(parsed) == 8
+    assert all(p["slot"] == "UTIL" for p in parsed)
+
+
+def test_detect_contest_standings_upload_flags_dk_entries_template() -> None:
+    df = pd.DataFrame(
+        [
+            {
+                "Entry ID": "123",
+                "Contest Name": "CBB $1",
+                "Contest ID": "999",
+                "Entry Fee": "$1",
+                "G": "",
+                "F": "",
+            }
+        ]
+    )
+    meta = detect_contest_standings_upload(df)
+    assert meta["kind"] == "dk_entries_template"
+    assert bool(meta["is_usable"]) is False
+
+
+def test_detect_contest_standings_upload_accepts_standings() -> None:
+    meta = detect_contest_standings_upload(_sample_standings())
+    assert meta["kind"] == "contest_standings"
+    assert bool(meta["is_usable"]) is True
+    assert int(meta["lineup_nonempty_rows"]) == 2
 
 
 def test_normalize_contest_standings_imputes_rank_from_points() -> None:
