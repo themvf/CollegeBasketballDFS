@@ -2790,6 +2790,8 @@ def build_optimizer_pool_for_date(
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
+    recent_form_games: int = 7,
+    recent_points_weight: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     slate_df = load_dk_slate_frame_for_date(
         bucket_name=bucket_name,
@@ -2847,6 +2849,8 @@ def build_optimizer_pool_for_date(
         season_stats_df=season_history_df,
         bookmaker_filter=(bookmaker or None),
         odds_games_df=odds_scored_df,
+        recent_form_games=int(max(1, recent_form_games)),
+        recent_points_weight=float(max(0.0, min(1.0, recent_points_weight))),
     )
     return pool_df, removed_injured, slate_df, injuries_df, season_history_df
 
@@ -3685,6 +3689,30 @@ with tab_slate_vegas:
         key="slate_vegas_bookmaker",
         help="Use the same bookmaker used for odds/props imports (example: fanduel).",
     )
+    sv1, sv2 = st.columns(2)
+    slate_recent_form_games = int(
+        sv1.slider(
+            "Pool Recent Form Games",
+            min_value=3,
+            max_value=12,
+            value=5,
+            step=1,
+            key="slate_vegas_recent_form_games",
+            help="Rolling game window used for recent minutes/points signals in the player pool.",
+        )
+    )
+    slate_recent_points_weight_pct = float(
+        sv2.slider(
+            "Pool Recent Points Weight %",
+            min_value=0,
+            max_value=100,
+            value=35,
+            step=1,
+            key="slate_vegas_recent_points_weight_pct",
+            help="Blends season points with recent-form points in pool projections.",
+        )
+    )
+    slate_recent_points_weight = slate_recent_points_weight_pct / 100.0
     refresh_pool_clicked = st.button("Refresh Slate + Vegas", key="refresh_slate_vegas_pool")
     if refresh_pool_clicked:
         load_dk_slate_frame_for_date.clear()
@@ -3706,6 +3734,8 @@ with tab_slate_vegas:
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
+                recent_form_games=slate_recent_form_games,
+                recent_points_weight=slate_recent_points_weight,
             )
             if raw_slate_df.empty:
                 st.warning("No DraftKings slate found for selected optimizer date. Upload in `DK Slate` tab first.")
@@ -3716,12 +3746,12 @@ with tab_slate_vegas:
                 m3.metric("Active Pool Players", int(len(pool_df)))
                 mins_pct = pd.to_numeric(pool_df.get("our_minutes_avg", pd.Series(dtype=float)), errors="coerce")
                 avg_mins = float(mins_pct.mean()) if len(mins_pct) and mins_pct.notna().any() else 0.0
-                mins_last7 = pd.to_numeric(pool_df.get("our_minutes_last7", pd.Series(dtype=float)), errors="coerce")
-                avg_mins_last7 = float(mins_last7.mean()) if len(mins_last7) and mins_last7.notna().any() else 0.0
+                mins_recent = pd.to_numeric(pool_df.get("our_minutes_recent", pd.Series(dtype=float)), errors="coerce")
+                avg_mins_recent = float(mins_recent.mean()) if len(mins_recent) and mins_recent.notna().any() else 0.0
                 st.caption(
                     f"Season stats rows used: `{len(season_history_df):,}` | "
                     f"Average projected minutes: `{avg_mins:.1f}` | "
-                    f"Average last-7 minutes: `{avg_mins_last7:.1f}`"
+                    f"Average recent minutes ({slate_recent_form_games}g): `{avg_mins_recent:.1f}`"
                 )
 
                 if not removed_injured_df.empty:
@@ -3743,6 +3773,8 @@ with tab_slate_vegas:
                         "blended_projection",
                         "our_minutes_avg",
                         "our_minutes_last7",
+                        "our_minutes_recent",
+                        "our_points_recent",
                         "our_usage_proxy",
                         "our_points_proj",
                         "our_rebounds_proj",
@@ -3788,6 +3820,8 @@ with tab_slate_vegas:
                         "blended_projection",
                         "our_minutes_avg",
                         "our_minutes_last7",
+                        "our_minutes_recent",
+                        "our_points_recent",
                         "our_usage_proxy",
                         "our_points_proj",
                         "our_rebounds_proj",
@@ -3880,6 +3914,34 @@ with tab_lineups:
         value=(default_bookmakers_filter.strip() or "fanduel"),
         key="lineup_bookmaker_source",
     )
+    rf1, rf2 = st.columns(2)
+    recent_form_games = int(
+        rf1.slider(
+            "Recent Form Games",
+            min_value=3,
+            max_value=12,
+            value=int(st.session_state.get("slate_vegas_recent_form_games", 5)),
+            step=1,
+            help=(
+                "Rolling game window used for recency signals. "
+                "Smaller windows react faster to role/minutes changes."
+            ),
+        )
+    )
+    recent_points_weight_pct = float(
+        rf2.slider(
+            "Recent Points Weight %",
+            min_value=0,
+            max_value=100,
+            value=int(st.session_state.get("slate_vegas_recent_points_weight_pct", 35)),
+            step=1,
+            help=(
+                "Blends season points with recent-form points before DK scoring. "
+                "0 = season-only, 100 = recent-only."
+            ),
+        )
+    )
+    recent_points_weight = recent_points_weight_pct / 100.0
     c1, c2, c3, c4 = st.columns(4)
     lineup_count = int(c1.slider("Lineups", min_value=1, max_value=150, value=20, step=1))
     contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=1)
@@ -4293,6 +4355,8 @@ with tab_lineups:
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
+                recent_form_games=recent_form_games,
+                recent_points_weight=recent_points_weight,
             )
 
             if raw_slate_df.empty:
@@ -4761,6 +4825,9 @@ with tab_lineups:
                             "game_agent_bias_strength_pct": game_agent_bias_strength_pct,
                             "game_agent_focus_games": game_agent_focus_games,
                             "game_agent_bias_meta": game_agent_bias_meta,
+                            "recent_form_games": recent_form_games,
+                            "recent_points_weight": recent_points_weight,
+                            "recent_points_weight_pct": recent_points_weight_pct,
                             "promote_phantom_constructions": promote_phantom_constructions,
                             "phantom_promotion_lookback_days": phantom_promotion_lookback_days,
                             "phantom_promotion_meta": phantom_promotion_meta,

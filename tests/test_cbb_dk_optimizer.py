@@ -358,6 +358,67 @@ def test_build_player_pool_blends_our_and_vegas_stats() -> None:
     assert round(float(g2["blend_points_proj"]), 3) == round(float(g2["our_points_proj"]), 3)
 
 
+def test_build_player_pool_recent_form_window_and_points_blend() -> None:
+    season_rows = []
+    recent_points = [10, 12, 14, 16, 18, 20, 30, 40]
+    recent_minutes = [20, 22, 24, 26, 28, 30, 32, 34]
+    for idx, (pts, mins) in enumerate(zip(recent_points, recent_minutes), start=1):
+        season_rows.append(
+            {
+                "game_date": f"2026-02-{idx:02d}",
+                "player_name": "Guard 1",
+                "team_name": "CCC",
+                "minutes_played": mins,
+                "points": pts,
+                "rebounds": 4,
+                "assists": 5,
+                "steals": 1,
+                "blocks": 0,
+                "turnovers": 2,
+                "tpm": 2,
+                "fga": 12,
+                "fta": 3,
+                "dk_fpts": float(pts + 10),
+            }
+        )
+    season_rows.append(
+        {
+            "game_date": "2026-02-01",
+            "player_name": "Forward 1",
+            "team_name": "DDD",
+            "minutes_played": 32,
+            "points": 16,
+            "rebounds": 9,
+            "assists": 2,
+            "steals": 1,
+            "blocks": 1,
+            "turnovers": 2,
+            "tpm": 1,
+            "fga": 12,
+            "fta": 4,
+            "dk_fpts": 31.25,
+        }
+    )
+    season_stats = pd.DataFrame(season_rows)
+
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=season_stats,
+        bookmaker_filter="fanduel",
+        recent_form_games=3,
+        recent_points_weight=0.5,
+    )
+    g1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
+    assert abs(float(g1["our_minutes_last7"]) - 28.0) < 1e-6
+    assert abs(float(g1["our_minutes_recent"]) - 32.0) < 1e-6
+    assert abs(float(g1["our_points_recent"]) - 30.0) < 1e-6
+    # our_points_avg=20.0 blended 50/50 with recent=30.0
+    assert abs(float(g1["our_points_proj"]) - 25.0) < 1e-6
+    assert int(g1["recent_form_games_window"]) == 3
+    assert abs(float(g1["recent_points_weight"]) - 0.5) < 1e-6
+
+
 def test_build_player_pool_attaches_tail_metrics_from_game_odds() -> None:
     odds_scored_df = pd.DataFrame(
         [

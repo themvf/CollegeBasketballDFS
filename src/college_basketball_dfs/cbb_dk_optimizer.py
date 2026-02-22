@@ -378,9 +378,14 @@ def build_player_pool(
     season_stats_df: pd.DataFrame | None = None,
     bookmaker_filter: str | None = None,
     odds_games_df: pd.DataFrame | None = None,
+    recent_form_games: int = 7,
+    recent_points_weight: float = 0.0,
 ) -> pd.DataFrame:
     if slate_df.empty:
         return pd.DataFrame()
+
+    recent_window = max(1, min(15, int(_safe_num(recent_form_games, 7))))
+    points_recent_weight = max(0.0, min(1.0, float(_safe_num(recent_points_weight, 0.0))))
 
     out = slate_df.copy()
     out["ID"] = out["ID"].astype(str)
@@ -470,28 +475,65 @@ def build_player_pool(
             )
         )
 
-        # Rolling form signal: average minutes over each player's most recent 7 games.
-        recent_team = (
-            s.sort_values(["_name_norm", "_team_norm", "game_date"])
-            .groupby(["_name_norm", "_team_norm"], as_index=False, group_keys=False)
-            .tail(7)
-            .groupby(["_name_norm", "_team_norm"], as_index=False)["minutes_played"]
-            .mean(numeric_only=True)
-            .rename(columns={"minutes_played": "our_minutes_last7_team"})
+        recent_numeric_cols = ["minutes_played", "points", "dk_fpts"]
+
+        def _recent_rollup(
+            frame: pd.DataFrame,
+            group_cols: list[str],
+            sort_cols: list[str],
+            window: int,
+            suffix: str,
+        ) -> pd.DataFrame:
+            return (
+                frame.sort_values(sort_cols)
+                .groupby(group_cols, as_index=False, group_keys=False)
+                .tail(int(window))
+                .groupby(group_cols, as_index=False)[recent_numeric_cols]
+                .mean(numeric_only=True)
+                .rename(
+                    columns={
+                        "minutes_played": f"our_minutes_{suffix}",
+                        "points": f"our_points_{suffix}",
+                        "dk_fpts": f"our_dk_fpts_{suffix}",
+                    }
+                )
+            )
+
+        recent_last7_team = _recent_rollup(
+            s,
+            group_cols=["_name_norm", "_team_norm"],
+            sort_cols=["_name_norm", "_team_norm", "game_date"],
+            window=7,
+            suffix="last7_team",
         )
-        recent_name = (
-            s.sort_values(["_name_norm", "game_date"])
-            .groupby(["_name_norm"], as_index=False, group_keys=False)
-            .tail(7)
-            .groupby(["_name_norm"], as_index=False)["minutes_played"]
-            .mean(numeric_only=True)
-            .rename(columns={"minutes_played": "our_minutes_last7_name"})
+        recent_last7_name = _recent_rollup(
+            s,
+            group_cols=["_name_norm"],
+            sort_cols=["_name_norm", "game_date"],
+            window=7,
+            suffix="last7_name",
+        )
+        recent_dynamic_team = _recent_rollup(
+            s,
+            group_cols=["_name_norm", "_team_norm"],
+            sort_cols=["_name_norm", "_team_norm", "game_date"],
+            window=recent_window,
+            suffix="recent_team",
+        )
+        recent_dynamic_name = _recent_rollup(
+            s,
+            group_cols=["_name_norm"],
+            sort_cols=["_name_norm", "game_date"],
+            window=recent_window,
+            suffix="recent_name",
         )
 
         out = out.merge(agg_team, on=["_name_norm", "_team_norm"], how="left")
         out = out.merge(agg_name, on=["_name_norm"], how="left")
-        out = out.merge(recent_team, on=["_name_norm", "_team_norm"], how="left")
-        out = out.merge(recent_name, on=["_name_norm"], how="left")
+        out = out.merge(recent_last7_team, on=["_name_norm", "_team_norm"], how="left")
+        out = out.merge(recent_last7_name, on=["_name_norm"], how="left")
+        out = out.merge(recent_dynamic_team, on=["_name_norm", "_team_norm"], how="left")
+        out = out.merge(recent_dynamic_name, on=["_name_norm"], how="left")
 
         for base in [
             "our_points_avg",
@@ -520,6 +562,37 @@ def build_player_pool(
             out["our_minutes_last7"].notna(),
             pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"),
         )
+        out["our_minutes_recent"] = pd.to_numeric(out.get("our_minutes_recent_team"), errors="coerce")
+        out["our_minutes_recent"] = out["our_minutes_recent"].where(
+            out["our_minutes_recent"].notna(),
+            pd.to_numeric(out.get("our_minutes_recent_name"), errors="coerce"),
+        )
+        out["our_minutes_recent"] = out["our_minutes_recent"].where(
+            out["our_minutes_recent"].notna(),
+            pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"),
+        )
+        out["our_points_recent"] = pd.to_numeric(out.get("our_points_recent_team"), errors="coerce")
+        out["our_points_recent"] = out["our_points_recent"].where(
+            out["our_points_recent"].notna(),
+            pd.to_numeric(out.get("our_points_recent_name"), errors="coerce"),
+        )
+        out["our_points_recent"] = out["our_points_recent"].where(
+            out["our_points_recent"].notna(),
+            pd.to_numeric(out.get("our_points_avg"), errors="coerce"),
+        )
+        out["our_points_recent"] = out["our_points_recent"].where(
+            out["our_points_recent"].notna(),
+            pd.to_numeric(out.get("AvgPointsPerGame"), errors="coerce"),
+        )
+        out["our_dk_fpts_recent"] = pd.to_numeric(out.get("our_dk_fpts_recent_team"), errors="coerce")
+        out["our_dk_fpts_recent"] = out["our_dk_fpts_recent"].where(
+            out["our_dk_fpts_recent"].notna(),
+            pd.to_numeric(out.get("our_dk_fpts_recent_name"), errors="coerce"),
+        )
+        out["our_dk_fpts_recent"] = out["our_dk_fpts_recent"].where(
+            out["our_dk_fpts_recent"].notna(),
+            pd.to_numeric(out.get("our_dk_fpts_avg"), errors="coerce"),
+        )
 
         # Usage proxy: possession involvement estimate per minute.
         out["our_usage_proxy"] = (
@@ -540,6 +613,9 @@ def build_player_pool(
             "our_fta_avg",
             "our_dk_fpts_avg",
             "our_minutes_last7",
+            "our_minutes_recent",
+            "our_points_recent",
+            "our_dk_fpts_recent",
             "our_usage_proxy",
         ]:
             out[col] = pd.NA
@@ -570,15 +646,27 @@ def build_player_pool(
             out[col] = pd.NA
         out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    # Our projection stat line (season averages), with DK Avg fallback for points only.
-    out["our_points_proj"] = pd.to_numeric(out["our_points_avg"], errors="coerce")
-    out["our_points_proj"] = out["our_points_proj"].where(out["our_points_proj"].notna(), out["AvgPointsPerGame"])
+    # Our projection stat line (season averages), with optional recent-form blend for points.
+    points_base = pd.to_numeric(out["our_points_avg"], errors="coerce")
+    points_base = points_base.where(points_base.notna(), out["AvgPointsPerGame"])
+    points_recent = pd.to_numeric(out.get("our_points_recent"), errors="coerce")
+    out["our_points_proj"] = points_base
+    if points_recent_weight > 0.0:
+        points_base_fill = points_base.where(points_base.notna(), points_recent)
+        points_recent_fill = points_recent.where(points_recent.notna(), points_base)
+        out["our_points_proj"] = ((1.0 - points_recent_weight) * points_base_fill) + (
+            points_recent_weight * points_recent_fill
+        )
+    out["our_points_proj"] = pd.to_numeric(out["our_points_proj"], errors="coerce")
+    out["our_points_proj"] = out["our_points_proj"].where(out["our_points_proj"].notna(), points_base)
     out["our_rebounds_proj"] = pd.to_numeric(out["our_rebounds_avg"], errors="coerce")
     out["our_assists_proj"] = pd.to_numeric(out["our_assists_avg"], errors="coerce")
     out["our_threes_proj"] = pd.to_numeric(out["our_threes_avg"], errors="coerce")
     out["our_steals_proj"] = pd.to_numeric(out["our_steals_avg"], errors="coerce")
     out["our_blocks_proj"] = pd.to_numeric(out["our_blocks_avg"], errors="coerce")
     out["our_turnovers_proj"] = pd.to_numeric(out["our_turnovers_avg"], errors="coerce")
+    out["recent_form_games_window"] = int(recent_window)
+    out["recent_points_weight"] = float(round(points_recent_weight, 4))
 
     vegas_market_cols = ["vegas_points_line", "vegas_rebounds_line", "vegas_assists_line", "vegas_threes_line"]
     out["vegas_markets_found"] = out[vegas_market_cols].notna().sum(axis=1).astype(int)
@@ -668,7 +756,8 @@ def build_player_pool(
     proj_pct = _rank_pct_series(out["projected_dk_points"])
     sal_pct = _rank_pct_series(out["Salary"])
     val_pct = _rank_pct_series(out["value_per_1k"])
-    mins_signal = pd.to_numeric(out.get("our_minutes_last7"), errors="coerce")
+    mins_signal = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"))
     mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"))
     mins_pct = _rank_pct_series(mins_signal)
     vegas_pts_pct = _rank_pct_series(pd.to_numeric(out.get("vegas_dk_projection"), errors="coerce"))
@@ -685,10 +774,14 @@ def build_player_pool(
 
     # Lightweight minutes/DNP uncertainty model from trend + usage + slate volatility.
     mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
-    mins_last7 = pd.to_numeric(out.get("our_minutes_last7"), errors="coerce")
-    mins_ref = mins_avg.where(mins_avg.notna(), mins_last7)
+    mins_recent_signal = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    mins_recent_signal = mins_recent_signal.where(
+        mins_recent_signal.notna(),
+        pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"),
+    )
+    mins_ref = mins_avg.where(mins_avg.notna(), mins_recent_signal)
     mins_ref = mins_ref.where(mins_ref.notna(), pd.Series([28.0] * len(out), index=out.index, dtype="float64"))
-    mins_recent = mins_last7.where(mins_last7.notna(), mins_avg)
+    mins_recent = mins_recent_signal.where(mins_recent_signal.notna(), mins_avg)
     mins_recent = mins_recent.where(mins_recent.notna(), mins_ref)
     minutes_drop_ratio = ((mins_ref - mins_recent).clip(lower=0.0) / mins_ref.replace(0.0, pd.NA)).fillna(0.0)
     minutes_drop_ratio = minutes_drop_ratio.clip(lower=0.0, upper=1.0)
@@ -856,8 +949,18 @@ def build_player_pool(
         "our_fga_avg_name",
         "our_fta_avg_name",
         "our_dk_fpts_avg_name",
+        "our_minutes_recent_team",
+        "our_minutes_recent_name",
+        "our_points_recent_team",
+        "our_points_recent_name",
+        "our_dk_fpts_recent_team",
+        "our_dk_fpts_recent_name",
         "our_minutes_last7_team",
         "our_minutes_last7_name",
+        "our_points_last7_team",
+        "our_points_last7_name",
+        "our_dk_fpts_last7_team",
+        "our_dk_fpts_last7_name",
     ]
     existing_drop = [c for c in drop_cols if c in out.columns]
     return out.drop(columns=existing_drop)
