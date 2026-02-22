@@ -63,12 +63,15 @@ from college_basketball_dfs.cbb_tournament_review import (
 from college_basketball_dfs.cbb_ai_review import (
     AI_REVIEW_SYSTEM_PROMPT,
     GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT,
+    MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT,
     build_ai_review_user_prompt,
     build_daily_ai_review_packet,
     build_game_slate_ai_review_packet,
     build_game_slate_ai_review_user_prompt,
     build_global_ai_review_packet,
     build_global_ai_review_user_prompt,
+    build_market_correlation_ai_review_packet,
+    build_market_correlation_ai_review_user_prompt,
     request_openai_review,
 )
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
@@ -7739,6 +7742,447 @@ with tab_agentic_review:
                         file_name=f"global_ai_recommendations_{ar_date.isoformat()}_{ar_contest_id}.txt",
                         mime="text/plain",
                         key="download_global_ai_recommendations_txt",
+                    )
+
+            st.markdown("---")
+            st.subheader("Market Correlation Agent (Multi-Date)")
+            st.caption(
+                "Correlates market signals (totals/spreads/vegas features) against ownership and actual points "
+                "across multiple dates, then surfaces projection-calibration suggestions by bucket."
+            )
+            mc1, mc2, mc3 = st.columns(3)
+            market_end_date = mc1.date_input(
+                "Market Review End Date",
+                value=ar_date,
+                key="market_corr_end_date",
+            )
+            default_start = market_end_date - timedelta(days=29)
+            market_start_date = mc2.date_input(
+                "Market Review Start Date",
+                value=default_start,
+                key="market_corr_start_date",
+            )
+            market_focus_limit = int(
+                mc3.slider(
+                    "Market Focus Rows",
+                    min_value=5,
+                    max_value=80,
+                    value=25,
+                    step=1,
+                    key="market_corr_focus_limit",
+                )
+            )
+            mc4, mc5, mc6 = st.columns(3)
+            market_min_bucket_samples = int(
+                mc4.slider(
+                    "Min Bucket Samples",
+                    min_value=5,
+                    max_value=120,
+                    value=20,
+                    step=1,
+                    key="market_corr_min_bucket_samples",
+                )
+            )
+            market_use_saved_run_dates = bool(
+                mc5.checkbox(
+                    "Use Saved Run Dates Only",
+                    value=True,
+                    key="market_corr_use_saved_dates",
+                    help="If enabled, only dates with saved lineup runs are scanned.",
+                )
+            )
+            build_market_packet_clicked = mc6.button(
+                "Build Market Packet",
+                key="build_market_corr_packet",
+            )
+
+            if build_market_packet_clicked:
+                if market_start_date > market_end_date:
+                    st.error("`Market Review Start Date` must be on or before `Market Review End Date`.")
+                else:
+                    try:
+                        store = None
+                        try:
+                            client = build_storage_client(
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                                project=gcp_project or None,
+                            )
+                            store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                        except Exception:
+                            store = None
+
+                        if market_use_saved_run_dates:
+                            candidate_dates = load_saved_lineup_run_dates(
+                                bucket_name=bucket_name,
+                                selected_slate_key=shared_slate_key,
+                                gcp_project=gcp_project or None,
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                            )
+                        else:
+                            candidate_dates = [d for d in iter_dates(market_start_date, market_end_date)]
+                        candidate_dates = [
+                            d
+                            for d in candidate_dates
+                            if isinstance(d, date) and market_start_date <= d <= market_end_date
+                        ]
+                        candidate_dates = sorted(set(candidate_dates))
+
+                        scanned_dates = 0
+                        used_dates = 0
+                        market_frames: list[pd.DataFrame] = []
+
+                        for review_day in candidate_dates:
+                            scanned_dates += 1
+                            proj_snap_day = load_projection_snapshot_frame(
+                                bucket_name=bucket_name,
+                                selected_date=review_day,
+                                selected_slate_key=shared_slate_key,
+                                gcp_project=gcp_project or None,
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                            )
+                            actual_day = load_actual_results_frame_for_date(
+                                bucket_name=bucket_name,
+                                selected_date=review_day,
+                                gcp_project=gcp_project or None,
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                            )
+                            if proj_snap_day.empty or actual_day.empty:
+                                continue
+
+                            proj_cmp_day = build_projection_actual_comparison(
+                                projection_df=proj_snap_day,
+                                actual_results_df=actual_day,
+                            )
+                            if proj_cmp_day.empty:
+                                continue
+
+                            market_day = proj_snap_day.copy()
+                            cmp_day = proj_cmp_day.copy()
+
+                            if "ID" in market_day.columns:
+                                market_day["ID"] = market_day["ID"].astype(str).str.strip()
+                            if "Name" in market_day.columns:
+                                market_day["Name"] = market_day["Name"].astype(str).str.strip()
+                            if "TeamAbbrev" in market_day.columns:
+                                market_day["TeamAbbrev"] = market_day["TeamAbbrev"].astype(str).str.strip().str.upper()
+
+                            if "ID" in cmp_day.columns:
+                                cmp_day["ID"] = cmp_day["ID"].astype(str).str.strip()
+                            if "Name" in cmp_day.columns:
+                                cmp_day["Name"] = cmp_day["Name"].astype(str).str.strip()
+
+                            cmp_cols = [c for c in ["actual_dk_points", "blend_error", "our_error", "vegas_error", "actual_minutes"] if c in cmp_day.columns]
+                            if cmp_cols:
+                                if "ID" in market_day.columns and "ID" in cmp_day.columns:
+                                    cmp_by_id = (
+                                        cmp_day.loc[cmp_day["ID"] != "", ["ID"] + cmp_cols]
+                                        .drop_duplicates("ID")
+                                    )
+                                    market_day = market_day.merge(cmp_by_id, on="ID", how="left", suffixes=("", "_cmp_id"))
+                                    for col in cmp_cols:
+                                        cmp_col = f"{col}_cmp_id"
+                                        if cmp_col in market_day.columns:
+                                            if col not in market_day.columns:
+                                                market_day[col] = pd.NA
+                                            base_vals = pd.to_numeric(market_day[col], errors="coerce")
+                                            fill_vals = pd.to_numeric(market_day[cmp_col], errors="coerce")
+                                            market_day[col] = base_vals.where(base_vals.notna(), fill_vals)
+                                            market_day = market_day.drop(columns=[cmp_col], errors="ignore")
+                                elif "Name" in market_day.columns and "Name" in cmp_day.columns:
+                                    cmp_by_name = (
+                                        cmp_day.loc[cmp_day["Name"] != "", ["Name"] + cmp_cols]
+                                        .drop_duplicates("Name")
+                                    )
+                                    market_day = market_day.merge(cmp_by_name, on="Name", how="left", suffixes=("", "_cmp_name"))
+                                    for col in cmp_cols:
+                                        cmp_col = f"{col}_cmp_name"
+                                        if cmp_col in market_day.columns:
+                                            if col not in market_day.columns:
+                                                market_day[col] = pd.NA
+                                            base_vals = pd.to_numeric(market_day[col], errors="coerce")
+                                            fill_vals = pd.to_numeric(market_day[cmp_col], errors="coerce")
+                                            market_day[col] = base_vals.where(base_vals.notna(), fill_vals)
+                                            market_day = market_day.drop(columns=[cmp_col], errors="ignore")
+
+                            own_day = load_ownership_frame_for_date(
+                                bucket_name=bucket_name,
+                                selected_date=review_day,
+                                selected_slate_key=shared_slate_key,
+                                gcp_project=gcp_project or None,
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                            )
+                            market_day["actual_ownership_from_file"] = pd.NA
+                            if not own_day.empty:
+                                own = own_day.copy()
+                                if "ID" in own.columns:
+                                    own["ID"] = own["ID"].astype(str).str.strip()
+                                if "Name" in own.columns:
+                                    own["Name"] = own["Name"].astype(str).str.strip()
+                                if "actual_ownership" in own.columns:
+                                    own["actual_ownership"] = pd.to_numeric(own["actual_ownership"], errors="coerce")
+                                else:
+                                    own["actual_ownership"] = pd.NA
+
+                                if "ID" in market_day.columns and "ID" in own.columns:
+                                    own_by_id = (
+                                        own.loc[(own["ID"] != "") & own["actual_ownership"].notna(), ["ID", "actual_ownership"]]
+                                        .drop_duplicates("ID")
+                                        .rename(columns={"actual_ownership": "actual_ownership_id"})
+                                    )
+                                    if not own_by_id.empty:
+                                        market_day = market_day.merge(own_by_id, on="ID", how="left")
+                                        market_day["actual_ownership_from_file"] = pd.to_numeric(
+                                            market_day.get("actual_ownership_id"),
+                                            errors="coerce",
+                                        )
+
+                                if "Name" in market_day.columns and "Name" in own.columns:
+                                    market_day["name_key"] = market_day["Name"].map(_norm_name_key)
+                                    market_day["name_key_loose"] = market_day["Name"].map(_norm_name_key_loose)
+                                    own["name_key"] = own["Name"].map(_norm_name_key)
+                                    own["name_key_loose"] = own["Name"].map(_norm_name_key_loose)
+
+                                    own_by_name = (
+                                        own.loc[(own["name_key"] != "") & own["actual_ownership"].notna(), ["name_key", "actual_ownership"]]
+                                        .drop_duplicates("name_key")
+                                        .rename(columns={"actual_ownership": "actual_ownership_name"})
+                                    )
+                                    own_by_name_loose = (
+                                        own.loc[(own["name_key_loose"] != "") & own["actual_ownership"].notna(), ["name_key_loose", "actual_ownership"]]
+                                        .drop_duplicates("name_key_loose")
+                                        .rename(columns={"actual_ownership": "actual_ownership_name_loose"})
+                                    )
+                                    if not own_by_name.empty:
+                                        market_day = market_day.merge(own_by_name, on="name_key", how="left")
+                                    if not own_by_name_loose.empty:
+                                        market_day = market_day.merge(own_by_name_loose, on="name_key_loose", how="left")
+
+                                    own_base = pd.to_numeric(market_day.get("actual_ownership_from_file"), errors="coerce")
+                                    own_fill_name = pd.to_numeric(market_day.get("actual_ownership_name"), errors="coerce")
+                                    own_fill_loose = pd.to_numeric(market_day.get("actual_ownership_name_loose"), errors="coerce")
+                                    own_base = own_base.where(own_base.notna(), own_fill_name)
+                                    own_base = own_base.where(own_base.notna(), own_fill_loose)
+                                    market_day["actual_ownership_from_file"] = own_base
+                                    market_day = market_day.drop(
+                                        columns=[
+                                            "name_key",
+                                            "name_key_loose",
+                                            "actual_ownership_id",
+                                            "actual_ownership_name",
+                                            "actual_ownership_name_loose",
+                                        ],
+                                        errors="ignore",
+                                    )
+
+                            if "blend_error" not in market_day.columns:
+                                market_day["blend_error"] = pd.NA
+                            if (
+                                "actual_dk_points" in market_day.columns
+                                and "blended_projection" in market_day.columns
+                            ):
+                                blend_vals = pd.to_numeric(market_day.get("blend_error"), errors="coerce")
+                                computed_blend = pd.to_numeric(market_day["actual_dk_points"], errors="coerce") - pd.to_numeric(
+                                    market_day["blended_projection"], errors="coerce"
+                                )
+                                market_day["blend_error"] = blend_vals.where(blend_vals.notna(), computed_blend)
+
+                            market_day["projected_ownership"] = pd.to_numeric(
+                                market_day.get("projected_ownership"),
+                                errors="coerce",
+                            )
+                            market_day["actual_ownership_from_file"] = pd.to_numeric(
+                                market_day.get("actual_ownership_from_file"),
+                                errors="coerce",
+                            )
+                            market_day["ownership_error"] = (
+                                market_day["actual_ownership_from_file"] - market_day["projected_ownership"]
+                            )
+                            market_day["review_date"] = review_day.isoformat()
+
+                            keep_cols = [
+                                "review_date",
+                                "ID",
+                                "Name",
+                                "TeamAbbrev",
+                                "Position",
+                                "Salary",
+                                "blended_projection",
+                                "our_dk_projection",
+                                "vegas_dk_projection",
+                                "actual_dk_points",
+                                "blend_error",
+                                "projected_ownership",
+                                "actual_ownership_from_file",
+                                "ownership_error",
+                                "game_total_line",
+                                "game_spread_line",
+                                "game_tail_score",
+                                "vegas_blend_weight",
+                            ]
+                            market_frames.append(market_day[[c for c in keep_cols if c in market_day.columns]].copy())
+                            used_dates += 1
+
+                        combined_market_df = pd.concat(market_frames, ignore_index=True) if market_frames else pd.DataFrame()
+                        market_packet = build_market_correlation_ai_review_packet(
+                            review_rows_df=combined_market_df,
+                            focus_limit=market_focus_limit,
+                            min_bucket_samples=market_min_bucket_samples,
+                        )
+                        market_prompt = build_market_correlation_ai_review_user_prompt(market_packet)
+                        st.session_state["cbb_market_correlation_packet"] = market_packet
+                        st.session_state["cbb_market_correlation_prompt_user"] = market_prompt
+                        st.session_state["cbb_market_correlation_meta"] = {
+                            "scanned_dates": int(scanned_dates),
+                            "used_dates": int(used_dates),
+                            "start_date": market_start_date.isoformat(),
+                            "end_date": market_end_date.isoformat(),
+                            "rows": int(len(combined_market_df)),
+                            "used_saved_dates_only": bool(market_use_saved_run_dates),
+                        }
+                        st.session_state.pop("cbb_market_correlation_output", None)
+                    except Exception as exc:
+                        st.exception(exc)
+
+            market_packet_state = st.session_state.get("cbb_market_correlation_packet")
+            market_prompt_user = str(st.session_state.get("cbb_market_correlation_prompt_user") or "").strip()
+            market_meta = st.session_state.get("cbb_market_correlation_meta") or {}
+            if isinstance(market_packet_state, dict) and market_packet_state:
+                ws = market_packet_state.get("window_summary") or {}
+                gq = market_packet_state.get("global_quality") or {}
+                mc_m1, mc_m2, mc_m3, mc_m4, mc_m5 = st.columns(5)
+                mc_m1.metric("Dates Used", int(_safe_int_value(ws.get("dates_used"), default=0)))
+                mc_m2.metric("Rows", int(_safe_int_value(ws.get("rows"), default=0)))
+                mc_m3.metric(
+                    "Blend MAE",
+                    f"{_safe_float_value(gq.get('blend_mae'), default=0.0):.2f}",
+                )
+                mc_m4.metric(
+                    "Ownership MAE",
+                    f"{_safe_float_value(gq.get('ownership_mae'), default=0.0):.2f}",
+                )
+                mc_m5.metric(
+                    "Total->Points Corr",
+                    f"{_safe_float_value(gq.get('total_line_vs_actual_points_spearman'), default=0.0):.3f}",
+                )
+                st.caption(
+                    "Market packet build summary: "
+                    f"scanned_dates={int(_safe_int_value(market_meta.get('scanned_dates'), default=0))}, "
+                    f"used_dates={int(_safe_int_value(market_meta.get('used_dates'), default=0))}, "
+                    f"range={str(market_meta.get('start_date') or '')}..{str(market_meta.get('end_date') or '')}, "
+                    f"rows={int(_safe_int_value(market_meta.get('rows'), default=0))}"
+                )
+
+                corr_df = pd.DataFrame(market_packet_state.get("correlation_table") or [])
+                if not corr_df.empty:
+                    st.caption("Correlation Table")
+                    st.dataframe(corr_df, hide_index=True, use_container_width=True)
+
+                bucket_tables = market_packet_state.get("bucket_calibration") or {}
+                total_bucket_df = pd.DataFrame(bucket_tables.get("total_line_buckets") or [])
+                spread_bucket_df = pd.DataFrame(bucket_tables.get("abs_spread_buckets") or [])
+                bc1, bc2 = st.columns(2)
+                with bc1:
+                    st.caption("Total-Line Buckets")
+                    if total_bucket_df.empty:
+                        st.info("No total-line bucket summary available.")
+                    else:
+                        st.dataframe(total_bucket_df, hide_index=True, use_container_width=True)
+                with bc2:
+                    st.caption("Abs-Spread Buckets")
+                    if spread_bucket_df.empty:
+                        st.info("No spread bucket summary available.")
+                    else:
+                        st.dataframe(spread_bucket_df, hide_index=True, use_container_width=True)
+
+                rec_df = pd.DataFrame(market_packet_state.get("calibration_recommendations") or [])
+                if not rec_df.empty:
+                    st.caption("Calibration Recommendations")
+                    st.dataframe(rec_df, hide_index=True, use_container_width=True)
+
+                trend_df = pd.DataFrame(market_packet_state.get("trend_by_date") or [])
+                if not trend_df.empty:
+                    st.caption("Trend By Date")
+                    st.dataframe(trend_df, hide_index=True, use_container_width=True)
+
+                market_packet_json = json.dumps(market_packet_state, indent=2, ensure_ascii=True)
+                mdc1, mdc2 = st.columns(2)
+                mdc1.download_button(
+                    "Download Market Packet JSON",
+                    data=market_packet_json,
+                    file_name=f"market_corr_packet_{market_end_date.isoformat()}_{ar_contest_id}.json",
+                    mime="application/json",
+                    key="download_market_corr_packet_json",
+                )
+                mdc2.download_button(
+                    "Download Market Prompt TXT",
+                    data=market_prompt_user,
+                    file_name=f"market_corr_prompt_{market_end_date.isoformat()}_{ar_contest_id}.txt",
+                    mime="text/plain",
+                    key="download_market_corr_prompt_txt",
+                )
+                with st.expander("Market Packet Preview"):
+                    st.json(market_packet_state)
+                with st.expander("Market Prompt Preview"):
+                    st.text_area(
+                        "Market User Prompt",
+                        value=market_prompt_user,
+                        height=260,
+                        key="market_corr_prompt_preview_text",
+                    )
+
+                ma1, ma2 = st.columns(2)
+                market_model = ma1.text_input(
+                    "Market OpenAI Model",
+                    value=str(st.session_state.get("ai_review_model", "gpt-5-mini")),
+                    key="market_corr_model",
+                ).strip()
+                market_max_tokens = int(
+                    ma2.number_input(
+                        "Market Max Output Tokens",
+                        min_value=200,
+                        max_value=8000,
+                        value=1800,
+                        step=100,
+                        key="market_corr_max_output_tokens",
+                    )
+                )
+                run_market_openai = st.button("Run Market Correlation OpenAI Review", key="run_market_corr_openai")
+                if run_market_openai:
+                    if not openai_key:
+                        st.error("Set `OPENAI_API_KEY` or Streamlit secret `openai_api_key` first.")
+                    else:
+                        with st.spinner("Generating market-correlation AI recommendations..."):
+                            try:
+                                market_ai_text = request_openai_review(
+                                    api_key=openai_key,
+                                    user_prompt=market_prompt_user,
+                                    system_prompt=MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT,
+                                    model=(market_model or "gpt-5-mini"),
+                                    max_output_tokens=market_max_tokens,
+                                )
+                                st.session_state["cbb_market_correlation_output"] = market_ai_text
+                            except Exception as exc:
+                                st.exception(exc)
+                market_output = str(st.session_state.get("cbb_market_correlation_output") or "").strip()
+                if market_output:
+                    st.subheader("Market Correlation AI Recommendations")
+                    st.text_area(
+                        "Market Model Output",
+                        value=market_output,
+                        height=340,
+                        key="market_corr_output_preview",
+                    )
+                    st.download_button(
+                        "Download Market AI Recommendations TXT",
+                        data=market_output,
+                        file_name=f"market_corr_recommendations_{market_end_date.isoformat()}_{ar_contest_id}.txt",
+                        mime="text/plain",
+                        key="download_market_corr_recommendations_txt",
                     )
         except Exception as exc:
             st.exception(exc)

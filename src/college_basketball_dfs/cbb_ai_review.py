@@ -12,6 +12,7 @@ import requests
 
 AI_REVIEW_SCHEMA_VERSION = "v1"
 GAME_SLATE_AI_REVIEW_SCHEMA_VERSION = "v1_game_slate"
+MARKET_CORRELATION_AI_REVIEW_SCHEMA_VERSION = "v1_market_correlation"
 
 AI_REVIEW_SYSTEM_PROMPT = (
     "You are an expert college basketball DFS review analyst. "
@@ -26,6 +27,13 @@ GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT = (
     "Use only the evidence in the JSON packet to identify high-upside GPP game stacks, "
     "team cores, bring-back options, winner confidence, and leverage/upset angles. "
     "Rank recommendations by expected DFS impact and state confidence per call."
+)
+
+MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT = (
+    "You are an expert DFS market-calibration analyst. "
+    "Use only evidence in the provided JSON packet to explain how market signals "
+    "(totals/spreads/vegas-derived features) correlate with ownership and points outcomes. "
+    "Recommend concrete projection and ownership calibration changes by segment, with measurable success criteria."
 )
 
 DEFAULT_OPENAI_REVIEW_MODEL = "gpt-5-mini"
@@ -103,6 +111,18 @@ def _safe_spearman(left: pd.Series, right: pd.Series) -> float | None:
     if len(frame) < 3:
         return None
     corr = frame["l"].rank(method="average").corr(frame["r"].rank(method="average"))
+    if pd.isna(corr):
+        return None
+    return float(corr)
+
+
+def _safe_pearson(left: pd.Series, right: pd.Series) -> float | None:
+    if left.empty or right.empty:
+        return None
+    frame = pd.DataFrame({"l": pd.to_numeric(left, errors="coerce"), "r": pd.to_numeric(right, errors="coerce")}).dropna()
+    if len(frame) < 3:
+        return None
+    corr = frame["l"].corr(frame["r"])
     if pd.isna(corr):
         return None
     return float(corr)
@@ -855,6 +875,307 @@ def build_global_ai_review_user_prompt(global_packet: dict[str, Any]) -> str:
         "- For each recommendation, include expected impact and confidence.\n"
         "- Cite exact metric names/values.\n"
         "- Keep it concise: max 16 bullets total and roughly <= 900 words.\n\n"
+        "JSON packet:\n"
+        f"{payload_json}\n"
+    )
+
+
+def _build_market_correlation_row(
+    df: pd.DataFrame,
+    *,
+    x_col: str,
+    y_col: str,
+    metric: str,
+) -> dict[str, Any]:
+    if x_col not in df.columns or y_col not in df.columns:
+        return {
+            "metric": metric,
+            "x_col": x_col,
+            "y_col": y_col,
+            "samples": 0,
+            "pearson": None,
+            "spearman": None,
+        }
+    x = pd.to_numeric(df[x_col], errors="coerce")
+    y = pd.to_numeric(df[y_col], errors="coerce")
+    valid = pd.DataFrame({"x": x, "y": y}).dropna()
+    return {
+        "metric": metric,
+        "x_col": x_col,
+        "y_col": y_col,
+        "samples": int(len(valid)),
+        "pearson": _safe_pearson(valid["x"], valid["y"]),
+        "spearman": _safe_spearman(valid["x"], valid["y"]),
+    }
+
+
+def _build_market_bucket_summary(
+    df: pd.DataFrame,
+    *,
+    source_col: str,
+    bucket_name: str,
+) -> pd.DataFrame:
+    if source_col not in df.columns:
+        return pd.DataFrame()
+    out = df.copy()
+    out[source_col] = pd.to_numeric(out[source_col], errors="coerce")
+    out = out.loc[out[source_col].notna()].copy()
+    if out.empty:
+        return pd.DataFrame()
+    unique_values = int(out[source_col].nunique(dropna=True))
+    if unique_values < 3:
+        return pd.DataFrame()
+
+    try:
+        out["bucket"] = pd.qcut(out[source_col], q=min(4, unique_values), duplicates="drop")
+    except Exception:
+        return pd.DataFrame()
+    out = out.loc[out["bucket"].notna()].copy()
+    if out.empty:
+        return pd.DataFrame()
+
+    grouped = (
+        out.groupby("bucket", as_index=False)
+        .agg(
+            samples=("bucket", "count"),
+            avg_source=(source_col, "mean"),
+            avg_blended_projection=("blended_projection", "mean"),
+            avg_actual_dk_points=("actual_dk_points", "mean"),
+            avg_blend_error=("blend_error", "mean"),
+            blend_mae=("blend_error", lambda s: float(pd.to_numeric(s, errors="coerce").abs().mean())),
+            avg_projected_ownership=("projected_ownership", "mean"),
+            avg_actual_ownership=("actual_ownership_from_file", "mean"),
+            ownership_mae=("ownership_error", lambda s: float(pd.to_numeric(s, errors="coerce").abs().mean())),
+        )
+        .sort_values("avg_source", ascending=True)
+        .reset_index(drop=True)
+    )
+    grouped["bucket"] = grouped["bucket"].astype(str)
+    grouped["bucket_name"] = str(bucket_name)
+    avg_proj = pd.to_numeric(grouped["avg_blended_projection"], errors="coerce")
+    avg_actual = pd.to_numeric(grouped["avg_actual_dk_points"], errors="coerce")
+    grouped["suggested_projection_scale"] = (
+        avg_actual / avg_proj.replace(0, pd.NA)
+    )
+    grouped["suggested_projection_scale"] = pd.to_numeric(grouped["suggested_projection_scale"], errors="coerce")
+    return grouped
+
+
+def build_market_correlation_ai_review_packet(
+    *,
+    review_rows_df: pd.DataFrame,
+    focus_limit: int = 20,
+    min_bucket_samples: int = 20,
+) -> dict[str, Any]:
+    frame = review_rows_df.copy() if isinstance(review_rows_df, pd.DataFrame) else pd.DataFrame()
+    if frame.empty:
+        return {
+            "schema_version": MARKET_CORRELATION_AI_REVIEW_SCHEMA_VERSION,
+            "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+            "window_summary": {
+                "dates_used": 0,
+                "start_date": "",
+                "end_date": "",
+                "rows": 0,
+                "rows_with_actual_points": 0,
+                "rows_with_actual_ownership": 0,
+            },
+            "global_quality": {},
+            "correlation_table": [],
+            "bucket_calibration": {
+                "total_line_buckets": [],
+                "abs_spread_buckets": [],
+            },
+            "trend_by_date": [],
+            "calibration_recommendations": [],
+            "notes_for_agent": [
+                "No multi-date rows were available; ensure projection snapshots and actual results exist for selected dates.",
+            ],
+        }
+
+    if "review_date" not in frame.columns:
+        frame["review_date"] = ""
+    frame["review_date"] = frame["review_date"].astype(str).str.strip()
+
+    numeric_cols = [
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "actual_dk_points",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "blend_error",
+        "ownership_error",
+        "game_total_line",
+        "game_spread_line",
+        "game_tail_score",
+        "vegas_blend_weight",
+    ]
+    for col in numeric_cols:
+        if col not in frame.columns:
+            frame[col] = pd.NA
+        frame[col] = pd.to_numeric(frame[col], errors="coerce")
+
+    if frame["blend_error"].isna().all():
+        frame["blend_error"] = frame["actual_dk_points"] - frame["blended_projection"]
+    if frame["ownership_error"].isna().all():
+        frame["ownership_error"] = frame["actual_ownership_from_file"] - frame["projected_ownership"]
+
+    frame["abs_game_spread"] = pd.to_numeric(frame["game_spread_line"], errors="coerce").abs()
+    frame["abs_blend_error"] = pd.to_numeric(frame["blend_error"], errors="coerce").abs()
+    frame["abs_ownership_error"] = pd.to_numeric(frame["ownership_error"], errors="coerce").abs()
+
+    corr_specs = [
+        ("blended_projection", "actual_dk_points", "blend_projection_vs_actual_points"),
+        ("vegas_dk_projection", "actual_dk_points", "vegas_projection_vs_actual_points"),
+        ("game_total_line", "actual_dk_points", "game_total_line_vs_actual_points"),
+        ("abs_game_spread", "actual_dk_points", "abs_spread_vs_actual_points"),
+        ("game_total_line", "projected_ownership", "game_total_line_vs_projected_ownership"),
+        ("game_total_line", "actual_ownership_from_file", "game_total_line_vs_actual_ownership"),
+        ("abs_game_spread", "projected_ownership", "abs_spread_vs_projected_ownership"),
+        ("game_tail_score", "actual_dk_points", "game_tail_score_vs_actual_points"),
+        ("vegas_blend_weight", "abs_blend_error", "vegas_blend_weight_vs_abs_blend_error"),
+    ]
+    correlation_rows = [
+        _build_market_correlation_row(frame, x_col=x_col, y_col=y_col, metric=metric)
+        for x_col, y_col, metric in corr_specs
+    ]
+
+    total_bucket_df = _build_market_bucket_summary(
+        frame,
+        source_col="game_total_line",
+        bucket_name="game_total_line",
+    )
+    spread_bucket_df = _build_market_bucket_summary(
+        frame,
+        source_col="abs_game_spread",
+        bucket_name="abs_game_spread",
+    )
+
+    recommendation_rows: list[dict[str, Any]] = []
+    for bucket_df in [total_bucket_df, spread_bucket_df]:
+        if bucket_df.empty:
+            continue
+        work = bucket_df.copy()
+        work["samples"] = pd.to_numeric(work["samples"], errors="coerce").fillna(0).astype(int)
+        work["avg_blend_error"] = pd.to_numeric(work["avg_blend_error"], errors="coerce")
+        work["suggested_projection_scale"] = pd.to_numeric(work["suggested_projection_scale"], errors="coerce")
+        work = work.loc[
+            (work["samples"] >= int(max(1, min_bucket_samples)))
+            & work["avg_blend_error"].notna()
+            & (work["avg_blend_error"].abs() >= 1.0)
+        ].copy()
+        if work.empty:
+            continue
+        work["priority_score"] = work["avg_blend_error"].abs() * (work["samples"] ** 0.5)
+        for _, row in work.iterrows():
+            recommendation_rows.append(
+                {
+                    "bucket_name": str(row.get("bucket_name") or ""),
+                    "bucket": str(row.get("bucket") or ""),
+                    "samples": int(row.get("samples") or 0),
+                    "avg_blend_error": float(row.get("avg_blend_error") or 0.0),
+                    "blend_mae": float(row.get("blend_mae") or 0.0),
+                    "suggested_projection_scale": (
+                        float(row.get("suggested_projection_scale"))
+                        if pd.notna(row.get("suggested_projection_scale"))
+                        else None
+                    ),
+                    "priority_score": float(row.get("priority_score") or 0.0),
+                }
+            )
+    recommendation_rows = sorted(
+        recommendation_rows,
+        key=lambda x: float(x.get("priority_score") or 0.0),
+        reverse=True,
+    )[: max(1, int(focus_limit))]
+
+    trend_rows: list[dict[str, Any]] = []
+    dated = frame.loc[frame["review_date"] != ""].copy()
+    for review_date, day in dated.groupby("review_date", as_index=False):
+        day = day.copy()
+        trend_rows.append(
+            {
+                "review_date": str(review_date),
+                "rows": int(len(day)),
+                "rows_with_actual_points": int(pd.to_numeric(day["actual_dk_points"], errors="coerce").notna().sum()),
+                "rows_with_actual_ownership": int(pd.to_numeric(day["actual_ownership_from_file"], errors="coerce").notna().sum()),
+                "blend_mae": round(_safe_mean(pd.to_numeric(day["blend_error"], errors="coerce").abs()), 4),
+                "ownership_mae": round(_safe_mean(pd.to_numeric(day["ownership_error"], errors="coerce").abs()), 4),
+                "corr_total_vs_actual_points_spearman": _safe_spearman(
+                    pd.to_numeric(day["game_total_line"], errors="coerce"),
+                    pd.to_numeric(day["actual_dk_points"], errors="coerce"),
+                ),
+                "corr_total_vs_actual_ownership_spearman": _safe_spearman(
+                    pd.to_numeric(day["game_total_line"], errors="coerce"),
+                    pd.to_numeric(day["actual_ownership_from_file"], errors="coerce"),
+                ),
+            }
+        )
+    trend_rows = sorted(trend_rows, key=lambda x: str(x.get("review_date") or ""))
+
+    nonempty_dates = sorted({d for d in frame["review_date"].tolist() if str(d).strip()})
+    window_summary = {
+        "dates_used": int(len(nonempty_dates)),
+        "start_date": str(nonempty_dates[0]) if nonempty_dates else "",
+        "end_date": str(nonempty_dates[-1]) if nonempty_dates else "",
+        "rows": int(len(frame)),
+        "rows_with_actual_points": int(frame["actual_dk_points"].notna().sum()),
+        "rows_with_actual_ownership": int(frame["actual_ownership_from_file"].notna().sum()),
+    }
+
+    global_quality = {
+        "blend_mae": round(_safe_mean(frame["abs_blend_error"]), 4),
+        "ownership_mae": round(_safe_mean(frame["abs_ownership_error"]), 4),
+        "blend_rank_spearman": _safe_spearman(frame["blended_projection"], frame["actual_dk_points"]),
+        "total_line_vs_actual_points_spearman": _safe_spearman(frame["game_total_line"], frame["actual_dk_points"]),
+        "total_line_vs_actual_ownership_spearman": _safe_spearman(
+            frame["game_total_line"],
+            frame["actual_ownership_from_file"],
+        ),
+    }
+
+    return {
+        "schema_version": MARKET_CORRELATION_AI_REVIEW_SCHEMA_VERSION,
+        "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "window_summary": window_summary,
+        "global_quality": global_quality,
+        "correlation_table": correlation_rows,
+        "bucket_calibration": {
+            "total_line_buckets": (
+                total_bucket_df.to_dict(orient="records") if not total_bucket_df.empty else []
+            ),
+            "abs_spread_buckets": (
+                spread_bucket_df.to_dict(orient="records") if not spread_bucket_df.empty else []
+            ),
+        },
+        "trend_by_date": trend_rows,
+        "calibration_recommendations": recommendation_rows,
+        "notes_for_agent": [
+            "Focus on robust signals (higher samples) and avoid overfitting to one-date outliers.",
+            "Use suggested_projection_scale by bucket as starting points; validate with next-slate MAE deltas.",
+            "Separate ownership calibration from projection calibration when signals diverge.",
+        ],
+    }
+
+
+def build_market_correlation_ai_review_user_prompt(packet: dict[str, Any]) -> str:
+    payload_json = json.dumps(packet, indent=2, ensure_ascii=True)
+    return (
+        "Review this multi-date market-correlation packet and provide actionable DFS calibration guidance.\n\n"
+        "Required output format:\n"
+        "1) Market Signal Summary (3-6 bullets)\n"
+        "2) Odds -> Points Correlations (what is real vs weak)\n"
+        "3) Odds -> Ownership Correlations (what to adjust)\n"
+        "4) Projection Tightening Plan by Bucket (max 6 actions)\n"
+        "5) Ownership Tightening Plan by Bucket (max 5 actions)\n"
+        "6) Next-Slate Validation Plan (metrics + pass/fail thresholds)\n\n"
+        "Constraints:\n"
+        "- Use only evidence in the JSON packet.\n"
+        "- Cite exact metric names and values.\n"
+        "- Prioritize recommendations with adequate sample size.\n"
+        "- If evidence is insufficient, state exactly what is missing.\n"
+        "- Do not invent settings that are not represented in the packet.\n\n"
         "JSON packet:\n"
         f"{payload_json}\n"
     )
