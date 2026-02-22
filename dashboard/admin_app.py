@@ -463,6 +463,402 @@ def _build_game_agent_lineup_objective_adjustments(
     }
 
 
+def _extract_game_keys_from_text(value: Any) -> set[str]:
+    text = str(value or "").strip().upper()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return set()
+    return {
+        str(match.group(0) or "").strip().upper()
+        for match in re.finditer(r"[A-Z0-9.&']+@[A-Z0-9.&']+", text)
+        if str(match.group(0) or "").strip()
+    }
+
+
+def _lineup_game_keys_from_payload(lineup: dict[str, Any]) -> set[str]:
+    keys: set[str] = set()
+    for player in (lineup.get("players") or []):
+        game_key = _normalize_game_key_token(player.get("game_key"))
+        if "@" in game_key:
+            keys.add(game_key)
+    anchor_key = _normalize_game_key_token(lineup.get("anchor_game_key"))
+    if "@" in anchor_key:
+        keys.add(anchor_key)
+    keys.update(_extract_game_keys_from_text(lineup.get("stack_signature")))
+    return keys
+
+
+def build_lineup_consistency_packet(
+    *,
+    run_bundle: dict[str, Any] | None,
+    active_version_key: str,
+    active_version: dict[str, Any] | None,
+    phantom_df: pd.DataFrame | None,
+    phantom_summary_df: pd.DataFrame | None,
+    phantom_meta: dict[str, Any] | None,
+) -> dict[str, Any]:
+    run_data = run_bundle if isinstance(run_bundle, dict) else {}
+    settings = run_data.get("settings") if isinstance(run_data.get("settings"), dict) else {}
+    version_data = active_version if isinstance(active_version, dict) else {}
+    generated_lineups = version_data.get("lineups") or []
+    generated_lineups = generated_lineups if isinstance(generated_lineups, list) else []
+    total_generated = int(len(generated_lineups))
+    run_id = str(run_data.get("run_id") or "").strip()
+    phantom_meta = phantom_meta if isinstance(phantom_meta, dict) else {}
+
+    phantom_frame = phantom_df.copy() if isinstance(phantom_df, pd.DataFrame) else pd.DataFrame()
+    phantom_summary = phantom_summary_df.copy() if isinstance(phantom_summary_df, pd.DataFrame) else pd.DataFrame()
+    if not phantom_frame.empty and active_version_key and "version_key" in phantom_frame.columns:
+        phantom_active = phantom_frame.loc[
+            phantom_frame["version_key"].astype(str).str.strip() == str(active_version_key).strip()
+        ].copy()
+    else:
+        phantom_active = phantom_frame.copy()
+
+    summary_active_row: dict[str, Any] = {}
+    if not phantom_summary.empty and active_version_key and "version_key" in phantom_summary.columns:
+        filtered = phantom_summary.loc[
+            phantom_summary["version_key"].astype(str).str.strip() == str(active_version_key).strip()
+        ].copy()
+        if not filtered.empty:
+            summary_active_row = filtered.iloc[0].to_dict()
+    if not summary_active_row and not phantom_summary.empty:
+        summary_active_row = phantom_summary.iloc[0].to_dict()
+
+    checks: list[dict[str, Any]] = []
+
+    def add_check(
+        *,
+        area: str,
+        status: str,
+        target: str,
+        actual: str,
+        gap: str = "",
+        note: str = "",
+    ) -> None:
+        checks.append(
+            {
+                "area": str(area),
+                "status": str(status).strip().lower(),
+                "target": str(target),
+                "actual": str(actual),
+                "gap": str(gap),
+                "note": str(note),
+            }
+        )
+
+    phantom_run_id = str(phantom_meta.get("run_id") or "").strip()
+    if run_id and phantom_run_id and run_id != phantom_run_id:
+        add_check(
+            area="Phantom Alignment",
+            status="warn",
+            target=f"phantom run_id={run_id}",
+            actual=f"phantom run_id={phantom_run_id}",
+            gap="run mismatch",
+            note="Phantom review results are from a different run bundle.",
+        )
+    elif phantom_active.empty and not summary_active_row:
+        add_check(
+            area="Phantom Alignment",
+            status="fail",
+            target="phantom results loaded for active version",
+            actual="no phantom rows",
+            gap="missing",
+            note="Run Phantom Review for this run/version before consistency validation.",
+        )
+    else:
+        add_check(
+            area="Phantom Alignment",
+            status="pass",
+            target="phantom results loaded for active version",
+            actual=f"lineups={int(len(phantom_active))}",
+            note="Phantom data is available for consistency checks.",
+        )
+
+    target_low_own_pct = _safe_float_value(settings.get("low_own_bucket_exposure_pct"), default=0.0)
+    low_own_min = max(0, _safe_int_value(settings.get("low_own_bucket_min_per_lineup"), default=0))
+    if total_generated > 0 and target_low_own_pct > 0 and low_own_min > 0:
+        expected = max(1, int(round((target_low_own_pct / 100.0) * total_generated)))
+        actual = int(
+            sum(1 for lineup in generated_lineups if _safe_int_value(lineup.get("low_own_upside_count"), 0) >= low_own_min)
+        )
+        status = "pass" if actual >= expected else ("warn" if actual >= max(1, expected - 1) else "fail")
+        add_check(
+            area="Low-Own Bucket",
+            status=status,
+            target=f">= {expected}/{total_generated} lineups (min {low_own_min} low-own players)",
+            actual=f"{actual}/{total_generated}",
+            gap=f"{actual - expected:+d}",
+            note=f"configured exposure={target_low_own_pct:.1f}%",
+        )
+
+    target_ceiling_pct = _safe_float_value(settings.get("ceiling_boost_lineup_pct"), default=0.0)
+    if total_generated > 0 and target_ceiling_pct > 0:
+        expected = max(1, int(round((target_ceiling_pct / 100.0) * total_generated)))
+        actual = int(sum(1 for lineup in generated_lineups if bool(lineup.get("ceiling_boost_active"))))
+        status = "pass" if actual >= expected else ("warn" if actual >= max(1, expected - 1) else "fail")
+        add_check(
+            area="Ceiling Archetype Share",
+            status=status,
+            target=f">= {expected}/{total_generated} lineups",
+            actual=f"{actual}/{total_generated}",
+            gap=f"{actual - expected:+d}",
+            note=f"configured ceiling share={target_ceiling_pct:.1f}%",
+        )
+
+    salary_left_target = settings.get("salary_left_target")
+    if total_generated > 0 and salary_left_target is not None:
+        salary_left_vals = pd.to_numeric(
+            pd.Series([lineup.get("salary_left") for lineup in generated_lineups]),
+            errors="coerce",
+        ).dropna()
+        if not salary_left_vals.empty:
+            avg_left = float(salary_left_vals.mean())
+            target_left = _safe_float_value(salary_left_target, default=0.0)
+            delta = avg_left - target_left
+            abs_delta = abs(delta)
+            status = "pass" if abs_delta <= 120.0 else ("warn" if abs_delta <= 220.0 else "fail")
+            add_check(
+                area="Salary Utilization",
+                status=status,
+                target=f"avg salary_left ~ {target_left:.0f}",
+                actual=f"{avg_left:.1f}",
+                gap=f"{delta:+.1f}",
+                note="Uses generated lineup salary_left means.",
+            )
+
+    preferred_games = {
+        _normalize_game_key_token(x)
+        for x in ((settings.get("game_agent_bias_meta") or {}).get("applied_game_keys") or [])
+        if _normalize_game_key_token(x)
+    }
+    if bool(settings.get("apply_game_agent_stack_bias")):
+        if total_generated > 0 and preferred_games:
+            lineup_hits = 0
+            preferred_player_hits = 0
+            for lineup in generated_lineups:
+                lineup_keys = _lineup_game_keys_from_payload(lineup)
+                if lineup_keys & preferred_games:
+                    lineup_hits += 1
+                preferred_player_hits += int(
+                    sum(
+                        1
+                        for player in (lineup.get("players") or [])
+                        if _normalize_game_key_token(player.get("game_key")) in preferred_games
+                    )
+                )
+            lineup_hit_pct = (100.0 * float(lineup_hits) / float(max(1, total_generated)))
+            avg_pref_players = float(preferred_player_hits) / float(max(1, total_generated))
+            status = "pass" if lineup_hit_pct >= 45.0 else ("warn" if lineup_hit_pct >= 20.0 else "fail")
+            add_check(
+                area="Game Agent Stack Bias",
+                status=status,
+                target=f">=20% lineups include preferred games ({len(preferred_games)} games)",
+                actual=f"{lineup_hit_pct:.1f}% lineups | {avg_pref_players:.2f} preferred players/lineup",
+                gap=f"{lineup_hit_pct - 20.0:+.1f}pp vs minimum",
+                note="Checks whether generated portfolios reflect Game Agent game targets.",
+            )
+        elif total_generated > 0 and not preferred_games:
+            add_check(
+                area="Game Agent Stack Bias",
+                status="warn",
+                target="preferred game keys present when stack bias enabled",
+                actual="no preferred games in settings",
+                gap="missing target list",
+                note="Bias enabled but no game-level targets were captured.",
+            )
+
+    if summary_active_row:
+        beat = _safe_float_value(summary_active_row.get("avg_would_beat_pct"), default=0.0)
+        drift = _safe_float_value(summary_active_row.get("avg_actual_minus_projected"), default=0.0)
+        winner_gap = _safe_float_value(summary_active_row.get("winner_gap"), default=0.0)
+        beat_status = "pass" if beat >= 30.0 else ("warn" if beat >= 20.0 else "fail")
+        drift_status = "pass" if drift >= -35.0 else ("warn" if drift >= -55.0 else "fail")
+        gap_status = "pass" if winner_gap <= 45.0 else ("warn" if winner_gap <= 70.0 else "fail")
+        add_check(
+            area="Phantom Beat Rate",
+            status=beat_status,
+            target="avg_would_beat_pct >= 30",
+            actual=f"{beat:.2f}",
+            gap=f"{beat - 30.0:+.2f}",
+            note="Version-level phantom competitiveness.",
+        )
+        add_check(
+            area="Projection Drift",
+            status=drift_status,
+            target="avg_actual_minus_projected >= -35",
+            actual=f"{drift:.2f}",
+            gap=f"{drift + 35.0:+.2f}",
+            note="Negative drift indicates under-delivery vs projection.",
+        )
+        if _safe_float_value(summary_active_row.get("winner_points"), default=0.0) > 0.0:
+            add_check(
+                area="Winner Gap",
+                status=gap_status,
+                target="winner_gap <= 45",
+                actual=f"{winner_gap:.2f}",
+                gap=f"{winner_gap - 45.0:+.2f}",
+                note="Top-end capture versus field winner.",
+            )
+
+    version_allocation_rows: list[dict[str, Any]] = []
+    versions_dict = run_data.get("versions") if isinstance(run_data.get("versions"), dict) else {}
+    if str(run_data.get("run_mode") or "").strip().lower() == "all" and bool(settings.get("promote_phantom_constructions")):
+        version_keys = [str(k) for k in versions_dict.keys()]
+        requested_counts = {
+            str(k): int(
+                _safe_int_value((versions_dict.get(k) or {}).get("lineup_count_requested"), default=len((versions_dict.get(k) or {}).get("lineups") or []))
+            )
+            for k in version_keys
+        }
+        total_requested = int(sum(requested_counts.values()))
+        promo_meta = settings.get("phantom_promotion_meta") if isinstance(settings.get("phantom_promotion_meta"), dict) else {}
+        weights = {
+            str(k): float(v)
+            for k, v in (promo_meta.get("weights") or {}).items()
+            if str(k).strip()
+        }
+        expected_counts = _allocate_weighted_counts(
+            keys=version_keys,
+            total_count=total_requested,
+            weights=weights,
+            min_per_key=1,
+        )
+        max_gap = 0
+        for key in version_keys:
+            requested = int(requested_counts.get(key, 0))
+            expected = int(expected_counts.get(key, 0))
+            gap = requested - expected
+            max_gap = max(max_gap, abs(gap))
+            version_allocation_rows.append(
+                {
+                    "version_key": key,
+                    "requested_lineups": requested,
+                    "expected_lineups_from_weights": expected,
+                    "allocation_gap": gap,
+                }
+            )
+        if version_allocation_rows:
+            promo_status = "pass" if max_gap <= 1 else ("warn" if max_gap <= 2 else "fail")
+            add_check(
+                area="Version Promotion Allocation",
+                status=promo_status,
+                target="requested lineup counts align with phantom promotion weights",
+                actual=f"max abs gap={max_gap}",
+                gap=f"{max_gap}",
+                note="Validates promoted version mix against computed weights.",
+            )
+
+    preferred_game_phantom_rows: list[dict[str, Any]] = []
+    if not phantom_active.empty and preferred_games:
+        total_phantom_lineups = int(len(phantom_active))
+        exposure_counts: dict[str, int] = {game_key: 0 for game_key in sorted(preferred_games)}
+        for _, row in phantom_active.iterrows():
+            keys: set[str] = set()
+            anchor_key = _normalize_game_key_token(row.get("anchor_game_key"))
+            if "@" in anchor_key:
+                keys.add(anchor_key)
+            keys.update(_extract_game_keys_from_text(row.get("stack_signature")))
+            for game_key in preferred_games:
+                if game_key in keys:
+                    exposure_counts[game_key] += 1
+        for game_key, count in exposure_counts.items():
+            rate = (float(count) / float(max(1, total_phantom_lineups)))
+            preferred_game_phantom_rows.append(
+                {
+                    "game_key": game_key,
+                    "phantom_lineups_with_game": int(count),
+                    "phantom_lineup_rate": round(rate, 4),
+                    "under_exposed_flag": bool(rate < 0.20),
+                }
+            )
+
+    upside_rows: list[dict[str, Any]] = []
+    if not phantom_summary.empty:
+        view_cols = [c for c in ["version_key", "version_label", "avg_would_beat_pct", "best_actual_points", "winner_gap"] if c in phantom_summary.columns]
+        if view_cols:
+            top_versions = (
+                phantom_summary[view_cols]
+                .copy()
+                .sort_values(["avg_would_beat_pct", "best_actual_points"], ascending=[False, False])
+                .head(5)
+            )
+            upside_rows.extend(top_versions.to_dict(orient="records"))
+
+    stack_upside_rows: list[dict[str, Any]] = []
+    if not phantom_active.empty and "stack_signature" in phantom_active.columns:
+        stack_work = phantom_active.copy()
+        stack_work["stack_signature"] = stack_work["stack_signature"].astype(str).str.strip()
+        stack_work = stack_work.loc[(stack_work["stack_signature"] != "") & (stack_work["stack_signature"].str.lower() != "nan")]
+        if not stack_work.empty and "would_beat_pct" in stack_work.columns:
+            stack_summary = (
+                stack_work.groupby("stack_signature", as_index=False)
+                .agg(
+                    lineups=("stack_signature", "count"),
+                    avg_would_beat_pct=("would_beat_pct", lambda s: float(pd.to_numeric(s, errors="coerce").mean())),
+                    best_actual_points=("actual_points", lambda s: float(pd.to_numeric(s, errors="coerce").max())),
+                )
+                .sort_values(["avg_would_beat_pct", "best_actual_points"], ascending=[False, False])
+                .head(10)
+            )
+            stack_upside_rows = stack_summary.to_dict(orient="records")
+
+    fail_count = int(sum(1 for row in checks if str(row.get("status")).lower() == "fail"))
+    warn_count = int(sum(1 for row in checks if str(row.get("status")).lower() == "warn"))
+    pass_count = int(sum(1 for row in checks if str(row.get("status")).lower() == "pass"))
+    overall_status = "fail" if fail_count > 0 else ("warn" if warn_count > 0 else "pass")
+
+    gap_rows = [row for row in checks if str(row.get("status")).lower() in {"warn", "fail"}]
+    if preferred_game_phantom_rows:
+        for row in preferred_game_phantom_rows:
+            if bool(row.get("under_exposed_flag")):
+                gap_rows.append(
+                    {
+                        "area": "Preferred Game Phantom Exposure",
+                        "status": "warn",
+                        "target": "phantom_lineup_rate >= 0.20",
+                        "actual": f"{str(row.get('game_key'))} -> {100.0 * _safe_float_value(row.get('phantom_lineup_rate')):.1f}%",
+                        "gap": f"{(100.0 * (_safe_float_value(row.get('phantom_lineup_rate')) - 0.20)):+.1f}pp",
+                        "note": "Preferred game may be underrepresented in phantom constructions.",
+                    }
+                )
+
+    return {
+        "schema_version": "lineup_consistency_v1",
+        "generated_at_utc": datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "review_context": {
+            "run_id": run_id,
+            "slate_date": str(run_data.get("slate_date") or ""),
+            "slate_key": str(run_data.get("slate_key") or ""),
+            "active_version_key": str(active_version_key or ""),
+            "active_version_label": str(version_data.get("version_label") or active_version_key or ""),
+        },
+        "status_summary": {
+            "overall_status": overall_status,
+            "pass_checks": pass_count,
+            "warn_checks": warn_count,
+            "fail_checks": fail_count,
+        },
+        "settings_snapshot": {
+            "lineup_count": _safe_int_value(settings.get("lineup_count"), default=0),
+            "contest_type": str(settings.get("contest_type") or ""),
+            "salary_left_target": settings.get("salary_left_target"),
+            "low_own_bucket_exposure_pct": settings.get("low_own_bucket_exposure_pct"),
+            "low_own_bucket_min_per_lineup": settings.get("low_own_bucket_min_per_lineup"),
+            "ceiling_boost_lineup_pct": settings.get("ceiling_boost_lineup_pct"),
+            "apply_game_agent_stack_bias": bool(settings.get("apply_game_agent_stack_bias")),
+            "preferred_game_keys": sorted(preferred_games),
+            "promote_phantom_constructions": bool(settings.get("promote_phantom_constructions")),
+        },
+        "checks": checks,
+        "gap_candidates": gap_rows,
+        "upside_candidates": upside_rows,
+        "stack_upside_candidates": stack_upside_rows,
+        "preferred_game_phantom_exposure": preferred_game_phantom_rows,
+        "version_allocation_check": version_allocation_rows,
+        "active_version_phantom_summary": _json_safe(summary_active_row),
+    }
+
+
 def _extract_slate_game_keys(
     *,
     pool_df: pd.DataFrame | None,
@@ -3763,6 +4159,7 @@ with tab_lineups:
                     st.session_state.pop("cbb_generated_lineups", None)
                     st.session_state.pop("cbb_generated_lineups_warnings", None)
                     st.session_state.pop("cbb_generated_upload_csv", None)
+                    st.session_state.pop("cbb_lineup_consistency_agent_output", None)
                     locked_ids = [label_to_id[x] for x in locked_labels]
                     excluded_ids = [label_to_id[x] for x in excluded_labels]
                     progress_text = st.empty()
@@ -4298,6 +4695,190 @@ with tab_lineups:
                         )
                 elif generate_lineups_clicked:
                     st.error("No lineups were generated. Adjust locks/exclusions/exposure settings and retry.")
+
+                st.markdown("---")
+                st.subheader("Lineup Consistency Agent")
+                st.caption(
+                    "Post-phantom audit for setting adherence, prior-agent alignment, and upside/gap detection."
+                )
+                phantom_df_state = st.session_state.get("cbb_phantom_review_df")
+                phantom_summary_state = st.session_state.get("cbb_phantom_summary_df")
+                phantom_meta = st.session_state.get("cbb_phantom_review_meta") or {}
+                consistency_phantom_df = (
+                    phantom_df_state.copy() if isinstance(phantom_df_state, pd.DataFrame) else pd.DataFrame()
+                )
+                consistency_phantom_summary_df = (
+                    phantom_summary_state.copy()
+                    if isinstance(phantom_summary_state, pd.DataFrame)
+                    else pd.DataFrame()
+                )
+
+                if not generated_versions:
+                    st.info("Generate or load a lineup run first.")
+                elif consistency_phantom_df.empty and consistency_phantom_summary_df.empty:
+                    st.info(
+                        "No phantom review results found. Run `Tournament Review` -> `Run Phantom Review`, then return here."
+                    )
+                else:
+                    consistency_version_key = str(st.session_state.get("cbb_active_version_key") or "").strip()
+                    if consistency_version_key not in generated_versions:
+                        consistency_version_key = next(iter(generated_versions.keys()), "")
+                    consistency_version = generated_versions.get(consistency_version_key) or {}
+
+                    consistency_packet = build_lineup_consistency_packet(
+                        run_bundle=run_bundle,
+                        active_version_key=consistency_version_key,
+                        active_version=consistency_version,
+                        phantom_df=consistency_phantom_df,
+                        phantom_summary_df=consistency_phantom_summary_df,
+                        phantom_meta=phantom_meta,
+                    )
+                    status_summary = consistency_packet.get("status_summary") or {}
+                    cs1, cs2, cs3, cs4 = st.columns(4)
+                    cs1.metric("Overall", str(status_summary.get("overall_status", "n/a")).upper())
+                    cs2.metric("Pass", _safe_int_value(status_summary.get("pass_checks"), default=0))
+                    cs3.metric("Warn", _safe_int_value(status_summary.get("warn_checks"), default=0))
+                    cs4.metric("Fail", _safe_int_value(status_summary.get("fail_checks"), default=0))
+
+                    checks_df = pd.DataFrame(consistency_packet.get("checks") or [])
+                    if checks_df.empty:
+                        st.info("No consistency checks were produced.")
+                    else:
+                        st.dataframe(checks_df, hide_index=True, use_container_width=True)
+
+                    gap_df = pd.DataFrame(consistency_packet.get("gap_candidates") or [])
+                    upside_df = pd.DataFrame(consistency_packet.get("upside_candidates") or [])
+                    stack_upside_df = pd.DataFrame(consistency_packet.get("stack_upside_candidates") or [])
+                    preferred_game_df = pd.DataFrame(consistency_packet.get("preferred_game_phantom_exposure") or [])
+                    version_alloc_df = pd.DataFrame(consistency_packet.get("version_allocation_check") or [])
+
+                    gg1, gg2 = st.columns(2)
+                    with gg1:
+                        st.caption("Gap Candidates")
+                        if gap_df.empty:
+                            st.info("No warning/fail gap candidates detected.")
+                        else:
+                            st.dataframe(gap_df.head(20), hide_index=True, use_container_width=True)
+                    with gg2:
+                        st.caption("Upside Candidates (Version-Level)")
+                        if upside_df.empty:
+                            st.info("No version-level upside candidates available.")
+                        else:
+                            st.dataframe(upside_df.head(20), hide_index=True, use_container_width=True)
+
+                    if not stack_upside_df.empty:
+                        st.caption("Upside Stack Signatures (Active Version Phantom)")
+                        st.dataframe(stack_upside_df.head(20), hide_index=True, use_container_width=True)
+                    if not preferred_game_df.empty:
+                        st.caption("Preferred-Game Phantom Exposure")
+                        st.dataframe(preferred_game_df.head(20), hide_index=True, use_container_width=True)
+                    if not version_alloc_df.empty:
+                        st.caption("Version Allocation Consistency")
+                        st.dataframe(version_alloc_df.head(20), hide_index=True, use_container_width=True)
+
+                    consistency_packet_json = json.dumps(_json_safe(consistency_packet), indent=2, ensure_ascii=True)
+                    consistency_prompt_system = (
+                        "You are a DFS lineup process auditor. Use only evidence in the JSON packet. "
+                        "Prioritize consistency checks, actionable gaps, and upside opportunities."
+                    )
+                    consistency_prompt_user = (
+                        "Review this lineup consistency packet and produce an actionable audit.\n\n"
+                        "Required sections:\n"
+                        "1) Consistency Verdict (pass/warn/fail with 3-6 bullets)\n"
+                        "2) Settings/Policy Violations (with exact metric evidence)\n"
+                        "3) Gaps and Missed Upside (players/stacks/construction)\n"
+                        "4) Recommended Next-Run Parameter Changes (max 8)\n"
+                        "5) Guardrails To Avoid Overfitting\n\n"
+                        "Constraints:\n"
+                        "- Use only evidence in the JSON packet.\n"
+                        "- Cite exact metric names and values.\n"
+                        "- If data is insufficient, state exactly what is missing.\n\n"
+                        "JSON packet:\n"
+                        f"{consistency_packet_json}\n"
+                    )
+                    dc1, dc2 = st.columns(2)
+                    dc1.download_button(
+                        "Download Consistency Packet JSON",
+                        data=consistency_packet_json,
+                        file_name=(
+                            f"lineup_consistency_packet_{lineup_slate_date.isoformat()}_"
+                            f"{consistency_version_key or 'version'}.json"
+                        ),
+                        mime="application/json",
+                        key="download_lineup_consistency_packet_json",
+                    )
+                    dc2.download_button(
+                        "Download Consistency Prompt",
+                        data=consistency_prompt_user,
+                        file_name=(
+                            f"lineup_consistency_prompt_{lineup_slate_date.isoformat()}_"
+                            f"{consistency_version_key or 'version'}.txt"
+                        ),
+                        mime="text/plain",
+                        key="download_lineup_consistency_prompt_txt",
+                    )
+
+                    openai_key = (os.getenv("OPENAI_API_KEY", "").strip() or (_secret("openai_api_key") or "").strip())
+                    lc1, lc2 = st.columns(2)
+                    consistency_model = lc1.text_input(
+                        "Consistency Model",
+                        value=str(st.session_state.get("ai_review_model", "gpt-5-mini")),
+                        key="lineup_consistency_model",
+                    ).strip()
+                    consistency_tokens = int(
+                        lc2.number_input(
+                            "Consistency Max Tokens",
+                            min_value=400,
+                            max_value=8000,
+                            value=1400,
+                            step=100,
+                            key="lineup_consistency_max_tokens",
+                        )
+                    )
+                    run_consistency_agent = st.button(
+                        "Run Lineup Consistency Agent",
+                        key="run_lineup_consistency_agent",
+                    )
+                    if run_consistency_agent:
+                        if not openai_key:
+                            st.error(
+                                "Set `OPENAI_API_KEY` (or `openai_api_key` in Streamlit secrets) "
+                                "to run the consistency agent."
+                            )
+                        else:
+                            try:
+                                with st.spinner("Running lineup consistency agent..."):
+                                    consistency_output = request_openai_review(
+                                        api_key=openai_key,
+                                        user_prompt=consistency_prompt_user,
+                                        system_prompt=consistency_prompt_system,
+                                        model=consistency_model or "gpt-5-mini",
+                                        max_output_tokens=consistency_tokens,
+                                    )
+                                    st.session_state["cbb_lineup_consistency_agent_output"] = consistency_output
+                            except Exception as exc:
+                                st.exception(exc)
+
+                    consistency_output = str(
+                        st.session_state.get("cbb_lineup_consistency_agent_output") or ""
+                    ).strip()
+                    if consistency_output:
+                        st.text_area(
+                            "Lineup Consistency Agent Output",
+                            value=consistency_output,
+                            height=320,
+                            key="lineup_consistency_agent_output_text",
+                        )
+                        st.download_button(
+                            "Download Consistency Output",
+                            data=consistency_output,
+                            file_name=(
+                                f"lineup_consistency_output_{lineup_slate_date.isoformat()}_"
+                                f"{consistency_version_key or 'version'}.txt"
+                            ),
+                            mime="text/plain",
+                            key="download_lineup_consistency_output_txt",
+                        )
 
                 st.markdown("---")
                 st.subheader("Saved Lineup Runs (GCS)")
