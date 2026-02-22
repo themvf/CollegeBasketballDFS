@@ -546,8 +546,9 @@ def build_lineup_consistency_packet(
             }
         )
 
+    has_phantom_data = bool((not phantom_active.empty) or summary_active_row)
     phantom_run_id = str(phantom_meta.get("run_id") or "").strip()
-    if run_id and phantom_run_id and run_id != phantom_run_id:
+    if has_phantom_data and run_id and phantom_run_id and run_id != phantom_run_id:
         add_check(
             area="Phantom Alignment",
             status="warn",
@@ -556,22 +557,122 @@ def build_lineup_consistency_packet(
             gap="run mismatch",
             note="Phantom review results are from a different run bundle.",
         )
-    elif phantom_active.empty and not summary_active_row:
+    elif has_phantom_data:
         add_check(
-            area="Phantom Alignment",
-            status="fail",
-            target="phantom results loaded for active version",
-            actual="no phantom rows",
-            gap="missing",
-            note="Run Phantom Review for this run/version before consistency validation.",
+            area="Review Mode",
+            status="pass",
+            target="pre-game checks + post-phantom diagnostics",
+            actual=f"phantom lineups={int(len(phantom_active))}",
+            note="Phantom metrics were included for the active version.",
         )
     else:
         add_check(
-            area="Phantom Alignment",
+            area="Review Mode",
             status="pass",
-            target="phantom results loaded for active version",
-            actual=f"lineups={int(len(phantom_active))}",
-            note="Phantom data is available for consistency checks.",
+            target="pre-game readiness checks",
+            actual="phantom metrics unavailable (optional)",
+            note="Core consistency checks run before lock without phantom results.",
+        )
+
+    lineup_player_ids: list[set[str]] = []
+    for lineup in generated_lineups:
+        ids: set[str] = set()
+        for player in (lineup.get("players") or []):
+            pid = _normalize_player_id(player.get("ID"))
+            if pid:
+                ids.add(pid)
+        if not ids:
+            for pid in (lineup.get("player_ids") or []):
+                normalized = _normalize_player_id(pid)
+                if normalized:
+                    ids.add(normalized)
+        lineup_player_ids.append(ids)
+
+    locked_ids = {_normalize_player_id(x) for x in (settings.get("locked_ids") or []) if _normalize_player_id(x)}
+    excluded_ids = {_normalize_player_id(x) for x in (settings.get("excluded_ids") or []) if _normalize_player_id(x)}
+    if total_generated > 0 and locked_ids:
+        missing_locks = int(sum(1 for ids in lineup_player_ids if not locked_ids.issubset(ids)))
+        status = "pass" if missing_locks == 0 else ("warn" if missing_locks <= 1 else "fail")
+        add_check(
+            area="Lock Adherence",
+            status=status,
+            target=f"all lineups include locked IDs ({len(locked_ids)})",
+            actual=f"{total_generated - missing_locks}/{total_generated} lineups",
+            gap=f"{missing_locks} violations",
+            note="Ensures lock settings were respected.",
+        )
+    if total_generated > 0 and excluded_ids:
+        violated = int(sum(1 for ids in lineup_player_ids if bool(ids & excluded_ids)))
+        status = "pass" if violated == 0 else ("warn" if violated <= 1 else "fail")
+        add_check(
+            area="Exclusion Adherence",
+            status=status,
+            target=f"no lineups include excluded IDs ({len(excluded_ids)})",
+            actual=f"{violated} violating lineups",
+            gap=f"{violated}",
+            note="Ensures exclusion settings were respected.",
+        )
+
+    if total_generated > 0:
+        global_cap_pct = max(0.0, min(100.0, _safe_float_value(settings.get("global_max_exposure_pct"), default=100.0)))
+        global_cap_count = int(math.floor((global_cap_pct / 100.0) * float(total_generated)))
+        exposure_counts: dict[str, int] = {}
+        for ids in lineup_player_ids:
+            for pid in ids:
+                exposure_counts[pid] = exposure_counts.get(pid, 0) + 1
+        if exposure_counts and global_cap_pct < 100.0:
+            non_lock_counts = [count for pid, count in exposure_counts.items() if pid not in locked_ids]
+            max_count = max(non_lock_counts) if non_lock_counts else 0
+            worst_over = max(0, int(max_count - global_cap_count))
+            status = "pass" if worst_over <= 0 else ("warn" if worst_over <= 1 else "fail")
+            add_check(
+                area="Global Exposure Cap",
+                status=status,
+                target=f"max exposure <= {global_cap_count}/{total_generated} ({global_cap_pct:.1f}%)",
+                actual=f"worst player appears {max_count}/{total_generated}",
+                gap=f"{worst_over}",
+                note="Checks global player exposure cap enforcement.",
+            )
+
+        per_player_caps = settings.get("exposure_caps_pct") if isinstance(settings.get("exposure_caps_pct"), dict) else {}
+        if per_player_caps:
+            per_cap_violations = 0
+            for pid_raw, pct_raw in per_player_caps.items():
+                pid = _normalize_player_id(pid_raw)
+                if not pid:
+                    continue
+                if pid in locked_ids:
+                    continue
+                cap_pct = max(0.0, min(100.0, _safe_float_value(pct_raw, default=100.0)))
+                cap_count = int(math.floor((cap_pct / 100.0) * float(total_generated)))
+                actual_count = int(exposure_counts.get(pid, 0))
+                if actual_count > cap_count:
+                    per_cap_violations += 1
+            status = "pass" if per_cap_violations == 0 else ("warn" if per_cap_violations <= 2 else "fail")
+            add_check(
+                area="Per-Player Exposure Caps",
+                status=status,
+                target="all configured player caps satisfied",
+                actual=f"{per_cap_violations} players over cap",
+                gap=f"{per_cap_violations}",
+                note="Checks player-specific exposure cap settings.",
+            )
+
+    if total_generated > 0 and settings.get("max_salary_left") is not None:
+        max_salary_left_setting = _safe_int_value(settings.get("max_salary_left"), default=50000)
+        salary_left_vals = pd.to_numeric(
+            pd.Series([lineup.get("salary_left") for lineup in generated_lineups]),
+            errors="coerce",
+        ).fillna(0)
+        over_limit = int((salary_left_vals > max_salary_left_setting).sum())
+        status = "pass" if over_limit == 0 else ("warn" if over_limit <= 1 else "fail")
+        add_check(
+            area="Max Salary Left Constraint",
+            status=status,
+            target=f"salary_left <= {max_salary_left_setting}",
+            actual=f"{over_limit}/{total_generated} lineups exceed",
+            gap=f"{over_limit}",
+            note="Checks hard salary-left constraint adherence.",
         )
 
     target_low_own_pct = _safe_float_value(settings.get("low_own_bucket_exposure_pct"), default=0.0)
@@ -783,6 +884,17 @@ def build_lineup_consistency_packet(
                 .head(5)
             )
             upside_rows.extend(top_versions.to_dict(orient="records"))
+    if not upside_rows and generated_lineups:
+        generated_frame = pd.DataFrame(generated_lineups)
+        if not generated_frame.empty:
+            if "projected_points" in generated_frame.columns:
+                top_proj = (
+                    generated_frame.copy()
+                    .sort_values("projected_points", ascending=False)
+                    .head(5)
+                )
+                top_proj_cols = [c for c in ["lineup_number", "projected_points", "salary_left", "lineup_strategy", "low_own_upside_count", "ceiling_boost_active"] if c in top_proj.columns]
+                upside_rows.extend(top_proj[top_proj_cols].to_dict(orient="records"))
 
     stack_upside_rows: list[dict[str, Any]] = []
     if not phantom_active.empty and "stack_signature" in phantom_active.columns:
@@ -801,6 +913,24 @@ def build_lineup_consistency_packet(
                 .head(10)
             )
             stack_upside_rows = stack_summary.to_dict(orient="records")
+    if not stack_upside_rows and generated_lineups:
+        generated_frame = pd.DataFrame(generated_lineups)
+        if not generated_frame.empty and "stack_signature" in generated_frame.columns:
+            stack_work = generated_frame.copy()
+            stack_work["stack_signature"] = stack_work["stack_signature"].astype(str).str.strip()
+            stack_work = stack_work.loc[(stack_work["stack_signature"] != "") & (stack_work["stack_signature"].str.lower() != "nan")]
+            if not stack_work.empty and "projected_points" in stack_work.columns:
+                stack_summary = (
+                    stack_work.groupby("stack_signature", as_index=False)
+                    .agg(
+                        lineups=("stack_signature", "count"),
+                        avg_projected_points=("projected_points", lambda s: float(pd.to_numeric(s, errors="coerce").mean())),
+                        best_projected_points=("projected_points", lambda s: float(pd.to_numeric(s, errors="coerce").max())),
+                    )
+                    .sort_values(["avg_projected_points", "best_projected_points"], ascending=[False, False])
+                    .head(10)
+                )
+                stack_upside_rows = stack_summary.to_dict(orient="records")
 
     fail_count = int(sum(1 for row in checks if str(row.get("status")).lower() == "fail"))
     warn_count = int(sum(1 for row in checks if str(row.get("status")).lower() == "warn"))
@@ -831,6 +961,11 @@ def build_lineup_consistency_packet(
             "slate_key": str(run_data.get("slate_key") or ""),
             "active_version_key": str(active_version_key or ""),
             "active_version_label": str(version_data.get("version_label") or active_version_key or ""),
+        },
+        "data_availability": {
+            "phantom_available": bool(has_phantom_data),
+            "phantom_lineups": int(len(phantom_active)),
+            "generated_lineups": int(total_generated),
         },
         "status_summary": {
             "overall_status": overall_status,
@@ -4699,7 +4834,7 @@ with tab_lineups:
                 st.markdown("---")
                 st.subheader("Lineup Consistency Agent")
                 st.caption(
-                    "Post-phantom audit for setting adherence, prior-agent alignment, and upside/gap detection."
+                    "Pre-game readiness checks for settings and prior-agent alignment. Phantom diagnostics are optional."
                 )
                 phantom_df_state = st.session_state.get("cbb_phantom_review_df")
                 phantom_summary_state = st.session_state.get("cbb_phantom_summary_df")
@@ -4715,11 +4850,12 @@ with tab_lineups:
 
                 if not generated_versions:
                     st.info("Generate or load a lineup run first.")
-                elif consistency_phantom_df.empty and consistency_phantom_summary_df.empty:
-                    st.info(
-                        "No phantom review results found. Run `Tournament Review` -> `Run Phantom Review`, then return here."
-                    )
                 else:
+                    if consistency_phantom_df.empty and consistency_phantom_summary_df.empty:
+                        st.info(
+                            "Running in pre-game mode: phantom diagnostics are unavailable, "
+                            "so this audit focuses on lineup settings/policy adherence."
+                        )
                     consistency_version_key = str(st.session_state.get("cbb_active_version_key") or "").strip()
                     if consistency_version_key not in generated_versions:
                         consistency_version_key = next(iter(generated_versions.keys()), "")
@@ -4767,7 +4903,7 @@ with tab_lineups:
                             st.dataframe(upside_df.head(20), hide_index=True, use_container_width=True)
 
                     if not stack_upside_df.empty:
-                        st.caption("Upside Stack Signatures (Active Version Phantom)")
+                        st.caption("Upside Stack Signatures")
                         st.dataframe(stack_upside_df.head(20), hide_index=True, use_container_width=True)
                     if not preferred_game_df.empty:
                         st.caption("Preferred-Game Phantom Exposure")
@@ -4784,11 +4920,12 @@ with tab_lineups:
                     consistency_prompt_user = (
                         "Review this lineup consistency packet and produce an actionable audit.\n\n"
                         "Required sections:\n"
-                        "1) Consistency Verdict (pass/warn/fail with 3-6 bullets)\n"
+                        "1) Pre-Game Consistency Verdict (pass/warn/fail with 3-6 bullets)\n"
                         "2) Settings/Policy Violations (with exact metric evidence)\n"
                         "3) Gaps and Missed Upside (players/stacks/construction)\n"
                         "4) Recommended Next-Run Parameter Changes (max 8)\n"
-                        "5) Guardrails To Avoid Overfitting\n\n"
+                        "5) Optional Post-Phantom Follow-Ups (if phantom metrics exist)\n"
+                        "6) Guardrails To Avoid Overfitting\n\n"
                         "Constraints:\n"
                         "- Use only evidence in the JSON packet.\n"
                         "- Cite exact metric names and values.\n"
