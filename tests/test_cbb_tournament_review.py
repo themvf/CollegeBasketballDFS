@@ -477,3 +477,42 @@ def test_top10_winner_gap_analysis_detects_top3_combo_presence() -> None:
     hit_dist = packet["lineup_top3_hit_distribution_df"]
     assert not hit_dist.empty
     assert 3 in hit_dist["top3_hits"].tolist()
+
+
+def test_top10_winner_gap_analysis_uses_lineup_uid_for_distinct_rows() -> None:
+    entries, expanded = build_field_entries_and_players(_sample_standings(), _sample_slate())
+    proj_compare = pd.DataFrame(
+        [
+            {"Name": "Alpha One", "actual_dk_points": 50.0, "blended_projection": 30.0, "blend_error": 20.0},
+            {"Name": "Bravo Two", "actual_dk_points": 45.0, "blended_projection": 31.0, "blend_error": 14.0},
+            {"Name": "Charlie Three", "actual_dk_points": 40.0, "blended_projection": 28.0, "blend_error": 12.0},
+        ]
+    )
+    generated_lineups = [
+        {
+            "lineup_uid": "v1:1",
+            "lineup_number": 1,
+            "players": [{"Name": "Alpha One"}, {"Name": "Bravo Two"}, {"Name": "Charlie Three"}],
+        },
+        {
+            "lineup_uid": "v2:1",
+            "lineup_number": 1,
+            "players": [{"Name": "Alpha One"}, {"Name": "Bravo Two"}, {"Name": "Charlie Three"}],
+        },
+    ]
+
+    packet = build_top10_winner_gap_analysis(
+        entries_df=entries,
+        expanded_players_df=expanded,
+        projection_comparison_df=proj_compare,
+        generated_lineups=generated_lineups,
+        top_n_winners=10,
+        top_points_focus=5,
+    )
+    summary = packet["summary"]
+    assert int(summary["our_lineups_count"]) == 2
+    hit_dist = packet["lineup_top3_hit_distribution_df"]
+    assert not hit_dist.empty
+    row = hit_dist.loc[hit_dist["top3_hits"] == 3]
+    assert not row.empty
+    assert int(row.iloc[0]["lineups"]) == 2

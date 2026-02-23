@@ -5628,6 +5628,8 @@ with tab_tournament_review:
         st.session_state.pop("cbb_phantom_review_df", None)
         st.session_state.pop("cbb_phantom_summary_df", None)
         st.session_state.pop("cbb_phantom_review_meta", None)
+        st.session_state.pop("cbb_phantom_source_lineups", None)
+        st.session_state.pop("cbb_phantom_source_meta", None)
         st.session_state.pop("cbb_ai_review_packet", None)
         st.session_state.pop("cbb_ai_review_prompt_user", None)
         st.session_state.pop("cbb_ai_review_prompt_system", None)
@@ -6141,11 +6143,48 @@ with tab_tournament_review:
                         )
 
                     st.subheader("Top-10 Winner Gap Analysis")
+                    phantom_source_lineups = st.session_state.get("cbb_phantom_source_lineups", [])
+                    phantom_source_meta = st.session_state.get("cbb_phantom_source_meta") or {}
+                    if str(phantom_source_meta.get("date") or "") != tr_date.isoformat():
+                        phantom_source_lineups = []
+                    source_options: list[tuple[str, str]] = []
+                    if isinstance(our_generated_lineups, list) and bool(our_generated_lineups):
+                        source_options.append(("generated_session", "Current Session Lineups"))
+                    if isinstance(phantom_source_lineups, list) and bool(phantom_source_lineups):
+                        phantom_run_id = str(phantom_source_meta.get("run_id") or "").strip()
+                        phantom_source_label = (
+                            f"Phantom Run Lineups ({phantom_run_id})" if phantom_run_id else "Phantom Run Lineups"
+                        )
+                        source_options.append(("phantom_run", phantom_source_label))
+
+                    selected_source_key = ""
+                    selected_source_label = ""
+                    selected_gap_lineups: list[dict[str, Any]] = []
+                    if len(source_options) > 1:
+                        option_labels = [label for _, label in source_options]
+                        default_label = option_labels[0]
+                        selected_label = st.selectbox(
+                            "Comparison Lineup Source",
+                            options=option_labels,
+                            index=0,
+                            key="tournament_top10_gap_lineup_source",
+                            help="Choose whether to compare winners against current generated lineups or loaded phantom-run lineups.",
+                        )
+                        selected_source_key = next((k for k, lbl in source_options if lbl == selected_label), "")
+                        selected_source_label = selected_label
+                    elif len(source_options) == 1:
+                        selected_source_key, selected_source_label = source_options[0]
+
+                    if selected_source_key == "generated_session":
+                        selected_gap_lineups = list(our_generated_lineups)
+                    elif selected_source_key == "phantom_run":
+                        selected_gap_lineups = list(phantom_source_lineups)
+
                     top10_gap = build_top10_winner_gap_analysis(
                         entries_df=entries_df,
                         expanded_players_df=expanded_df,
                         projection_comparison_df=proj_compare_df,
-                        generated_lineups=our_generated_lineups if isinstance(our_generated_lineups, list) else [],
+                        generated_lineups=selected_gap_lineups,
                         top_n_winners=10,
                         top_points_focus=10,
                     )
@@ -6158,6 +6197,8 @@ with tab_tournament_review:
                     tg1.metric("Top-10 Winners", int(top10_gap_summary.get("top10_entries_count") or 0))
                     tg2.metric("Top-10 Unique Players", int(top10_gap_summary.get("top10_unique_players") or 0))
                     if bool(top10_gap_summary.get("our_lineups_available")):
+                        if selected_source_label:
+                            st.caption(f"Lineup source: `{selected_source_label}`")
                         top_scorer_flag = pd.to_numeric(top10_gap_summary.get("top_scorer_in_our_lineups"), errors="coerce")
                         top3_together_flag = pd.to_numeric(top10_gap_summary.get("top3_all_in_single_lineup"), errors="coerce")
                         tg3.metric(
@@ -6187,8 +6228,8 @@ with tab_tournament_review:
                         tg4.metric("Top-3 Covered", "n/a")
                         tg5.metric("Top-3 Together", "n/a")
                         st.info(
-                            "No generated lineups are loaded in this session, so lineup-coverage checks are unavailable. "
-                            "Generate lineups first to compare your builds against top winners."
+                            "No lineup source is loaded for comparison. Generate lineups in this session "
+                            "or run Phantom Review (Saved Runs) to compare against those lineups."
                         )
 
                     top_scorer_name = str(top10_gap_summary.get("top_scorer_name") or "").strip()
@@ -6222,7 +6263,7 @@ with tab_tournament_review:
                         and not top10_missing_df.empty
                     ):
                         st.caption(
-                            "High-impact players from top winners that did not appear in any of our generated lineups."
+                            "High-impact players from top winners that did not appear in any lineups from the selected source."
                         )
                         miss_cols = [
                             "Name",
@@ -6238,7 +6279,7 @@ with tab_tournament_review:
 
                     if bool(top10_gap_summary.get("our_lineups_available")) and isinstance(top10_hits_df, pd.DataFrame):
                         if not top10_hits_df.empty:
-                            st.caption("Distribution of how many top-3 scorers appeared together in each generated lineup.")
+                            st.caption("Distribution of how many top-3 scorers appeared together in each lineup from the selected source.")
                             st.dataframe(top10_hits_df, hide_index=True, use_container_width=True)
 
                     st.subheader("User Strategy Summary")
@@ -6306,6 +6347,8 @@ with tab_tournament_review:
                 load_saved_lineup_run_manifests.clear()
                 load_saved_lineup_version_payload.clear()
                 load_actual_results_frame_for_date.clear()
+                st.session_state.pop("cbb_phantom_source_lineups", None)
+                st.session_state.pop("cbb_phantom_source_meta", None)
 
             phantom_manifests = load_saved_lineup_run_manifests(
                 bucket_name=bucket_name,
@@ -6368,6 +6411,8 @@ with tab_tournament_review:
 
                     run_phantom_clicked = st.button("Run Phantom Review", key="run_phantom_review")
                     if run_phantom_clicked:
+                        st.session_state.pop("cbb_phantom_source_lineups", None)
+                        st.session_state.pop("cbb_phantom_source_meta", None)
                         if not selected_versions:
                             st.error("Choose at least one run version to score.")
                         else:
@@ -6379,6 +6424,7 @@ with tab_tournament_review:
                                 )
                             else:
                                 phantom_parts: list[pd.DataFrame] = []
+                                phantom_source_lineups: list[dict[str, Any]] = []
                                 skipped_versions: list[str] = []
                                 for version_key in selected_versions:
                                     payload = load_saved_lineup_version_payload(
@@ -6400,6 +6446,21 @@ with tab_tournament_review:
                                         or version_meta_map.get(version_key, {}).get("version_label")
                                         or version_key
                                     )
+                                    for idx, lineup in enumerate(lineups):
+                                        if not isinstance(lineup, dict):
+                                            continue
+                                        lineup_copy = dict(lineup)
+                                        lineup_uid = (
+                                            f"{version_key}:"
+                                            + (
+                                                str(lineup.get("lineup_number") or "").strip()
+                                                or f"{idx + 1}"
+                                            )
+                                        )
+                                        lineup_copy["lineup_uid"] = lineup_uid
+                                        lineup_copy.setdefault("version_key", version_key)
+                                        lineup_copy.setdefault("version_label", version_label)
+                                        phantom_source_lineups.append(lineup_copy)
                                     scored_df = score_generated_lineups_against_actuals(
                                         generated_lineups=lineups,
                                         actual_results_df=actual_df,
@@ -6427,6 +6488,13 @@ with tab_tournament_review:
                                         "contest_id": tr_contest_id,
                                         "versions": list(selected_versions),
                                         "compared_to_field": bool(compare_to_field and not field_entries_df.empty),
+                                    }
+                                    st.session_state["cbb_phantom_source_lineups"] = phantom_source_lineups
+                                    st.session_state["cbb_phantom_source_meta"] = {
+                                        "date": tr_date.isoformat(),
+                                        "run_id": selected_run_id,
+                                        "versions": list(selected_versions),
+                                        "lineup_count": int(len(phantom_source_lineups)),
                                     }
                                     if skipped_versions:
                                         st.warning(

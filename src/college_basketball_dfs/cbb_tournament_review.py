@@ -1067,7 +1067,11 @@ def build_top10_winner_gap_analysis(
     if our_lineups_available:
         our_rows: list[dict[str, Any]] = []
         for idx, lineup in enumerate(generated_lineups or []):
-            lineup_uid = str(lineup.get("lineup_number") or "").strip() or f"lineup_{idx + 1}"
+            lineup_uid = (
+                str(lineup.get("lineup_uid") or "").strip()
+                or str(lineup.get("lineup_number") or "").strip()
+                or f"lineup_{idx + 1}"
+            )
             players = lineup.get("players") or []
             for p in players:
                 player_name = str(p.get("Name") or "").strip()
@@ -1197,7 +1201,11 @@ def build_top10_winner_gap_analysis(
             top_targets = top3_df[["name_key", "name_key_loose", "Name"]].copy()
             hit_rows: list[dict[str, Any]] = []
             for idx, lineup in enumerate(generated_lineups or []):
-                lineup_uid = str(lineup.get("lineup_number") or "").strip() or f"lineup_{idx + 1}"
+                lineup_uid = (
+                    str(lineup.get("lineup_uid") or "").strip()
+                    or str(lineup.get("lineup_number") or "").strip()
+                    or f"lineup_{idx + 1}"
+                )
                 players = lineup.get("players") or []
                 lineup_key_set: set[str] = set()
                 lineup_loose_set: set[str] = set()
