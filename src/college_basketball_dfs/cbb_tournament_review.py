@@ -884,6 +884,388 @@ def summarize_generated_lineups(generated_lineups: list[dict[str, Any]]) -> pd.D
     return pd.DataFrame(rows)
 
 
+def build_top10_winner_gap_analysis(
+    entries_df: pd.DataFrame | None,
+    expanded_players_df: pd.DataFrame | None,
+    projection_comparison_df: pd.DataFrame | None,
+    generated_lineups: list[dict[str, Any]] | None = None,
+    top_n_winners: int = 10,
+    top_points_focus: int = 10,
+) -> dict[str, Any]:
+    base_summary: dict[str, Any] = {
+        "top10_entries_count": 0,
+        "top10_unique_players": 0,
+        "our_lineups_available": False,
+        "our_lineups_count": 0,
+        "top_scorer_name": "",
+        "top_scorer_actual_points": pd.NA,
+        "top_scorer_in_our_lineups": pd.NA,
+        "top3_covered_count": pd.NA,
+        "top3_target_count": 0,
+        "top3_all_in_single_lineup": pd.NA,
+        "top3_missing_names": [],
+        "top5_covered_count": pd.NA,
+        "top5_target_count": 0,
+        "top5_missing_names": [],
+    }
+    empty_top_df = pd.DataFrame(
+        columns=[
+            "Name",
+            "TeamAbbrev",
+            "actual_dk_points",
+            "blended_projection",
+            "our_dk_projection",
+            "vegas_dk_projection",
+            "blend_error",
+            "top10_entries_with_player",
+            "top10_entry_rate_pct",
+            "our_lineups_with_player",
+            "our_lineup_rate_pct",
+            "missed_by_our_lineups",
+            "actual_rank",
+        ]
+    )
+    empty_hits_df = pd.DataFrame(columns=["top3_hits", "lineups", "lineup_rate_pct"])
+    out = {
+        "summary": base_summary,
+        "top10_entries_df": pd.DataFrame(),
+        "top_players_df": empty_top_df.copy(),
+        "focus_players_df": empty_top_df.copy(),
+        "missing_focus_players_df": empty_top_df.copy(),
+        "lineup_top3_hit_distribution_df": empty_hits_df.copy(),
+    }
+
+    if entries_df is None or entries_df.empty or expanded_players_df is None or expanded_players_df.empty:
+        return out
+    if "EntryId" not in entries_df.columns or "EntryId" not in expanded_players_df.columns:
+        return out
+
+    n_winners = max(1, int(top_n_winners or 10))
+    n_focus = max(1, int(top_points_focus or 10))
+
+    entries = entries_df.copy()
+    entries["EntryId"] = entries["EntryId"].astype(str).str.strip()
+    entries = entries.loc[entries["EntryId"] != ""].copy()
+    if entries.empty:
+        return out
+
+    if "Rank" in entries.columns:
+        entries["_rank_num"] = pd.to_numeric(entries["Rank"], errors="coerce")
+        entries = entries.sort_values(["_rank_num"], ascending=[True], na_position="last")
+    top10_entries = entries.drop_duplicates("EntryId").head(n_winners).copy()
+    top10_entry_ids = set(top10_entries["EntryId"].astype(str).str.strip().tolist())
+    if not top10_entry_ids:
+        return out
+
+    expanded = expanded_players_df.copy()
+    expanded["EntryId"] = expanded["EntryId"].astype(str).str.strip()
+    expanded = expanded.loc[expanded["EntryId"].isin(top10_entry_ids)].copy()
+    if expanded.empty:
+        out["top10_entries_df"] = top10_entries.reset_index(drop=True)
+        out["summary"]["top10_entries_count"] = int(len(top10_entries))
+        return out
+
+    if "resolved_name" not in expanded.columns:
+        expanded["resolved_name"] = expanded.get("player_name", "")
+    expanded["resolved_name"] = expanded["resolved_name"].astype(str).str.strip()
+    expanded["resolved_name"] = expanded["resolved_name"].replace({"nan": "", "none": "", "null": ""})
+    if "TeamAbbrev" not in expanded.columns:
+        expanded["TeamAbbrev"] = ""
+    expanded["TeamAbbrev"] = expanded["TeamAbbrev"].astype(str).str.strip().str.upper()
+    expanded["name_key"] = expanded["resolved_name"].map(_norm)
+    expanded["name_key_loose"] = expanded["resolved_name"].map(_norm_loose)
+    expanded = expanded.loc[(expanded["resolved_name"] != "") & (expanded["name_key"] != "")].copy()
+    if expanded.empty:
+        out["top10_entries_df"] = top10_entries.reset_index(drop=True)
+        out["summary"]["top10_entries_count"] = int(len(top10_entries))
+        return out
+
+    player_entry_rows = expanded.drop_duplicates(["EntryId", "name_key"])
+    player_counts = (
+        player_entry_rows.groupby("name_key", as_index=False)
+        .agg(
+            top10_entries_with_player=("EntryId", "nunique"),
+            name_key_loose=("name_key_loose", "first"),
+            Name=("resolved_name", lambda s: s.mode().iloc[0] if not s.mode().empty else str(s.iloc[0])),
+            TeamAbbrev=("TeamAbbrev", lambda s: s.mode().iloc[0] if not s.mode().empty else ""),
+        )
+        .reset_index(drop=True)
+    )
+    player_counts["top10_entry_rate_pct"] = (
+        100.0
+        * pd.to_numeric(player_counts["top10_entries_with_player"], errors="coerce").fillna(0.0)
+        / float(max(1, len(top10_entries)))
+    )
+
+    if projection_comparison_df is not None and not projection_comparison_df.empty:
+        proj = projection_comparison_df.copy()
+        if "Name" not in proj.columns:
+            proj["Name"] = ""
+        proj["Name"] = proj["Name"].astype(str).str.strip()
+        proj["name_key"] = proj["Name"].map(_norm)
+        proj["name_key_loose"] = proj["Name"].map(_norm_loose)
+        proj["_actual_sort"] = pd.to_numeric(proj.get("actual_dk_points"), errors="coerce").fillna(-1e9)
+        proj = proj.sort_values("_actual_sort", ascending=False)
+        proj_by_key = proj.loc[proj["name_key"] != ""].drop_duplicates("name_key")
+        proj_by_loose = proj.loc[proj["name_key_loose"] != ""].drop_duplicates("name_key_loose")
+        map_cols = [
+            "actual_dk_points",
+            "blended_projection",
+            "our_dk_projection",
+            "vegas_dk_projection",
+            "blend_error",
+            "our_error",
+            "vegas_error",
+            "Salary",
+            "Position",
+        ]
+        for col in map_cols:
+            if col not in player_counts.columns:
+                player_counts[col] = pd.NA
+            key_map = (
+                proj_by_key.set_index("name_key")[col].to_dict() if (col in proj_by_key.columns and not proj_by_key.empty) else {}
+            )
+            loose_map = (
+                proj_by_loose.set_index("name_key_loose")[col].to_dict()
+                if (col in proj_by_loose.columns and not proj_by_loose.empty)
+                else {}
+            )
+            player_counts[col] = player_counts["name_key"].map(key_map)
+            missing = player_counts[col].isna()
+            if missing.any():
+                player_counts.loc[missing, col] = player_counts.loc[missing, "name_key_loose"].map(loose_map)
+    else:
+        for col in [
+            "actual_dk_points",
+            "blended_projection",
+            "our_dk_projection",
+            "vegas_dk_projection",
+            "blend_error",
+            "our_error",
+            "vegas_error",
+            "Salary",
+            "Position",
+        ]:
+            player_counts[col] = pd.NA
+
+    for col in [
+        "actual_dk_points",
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "blend_error",
+        "our_error",
+        "vegas_error",
+        "Salary",
+    ]:
+        if col in player_counts.columns:
+            player_counts[col] = pd.to_numeric(player_counts[col], errors="coerce")
+
+    our_lineups_available = bool(generated_lineups)
+    our_lineups_count = 0
+    lineup_top3_hit_distribution_df = empty_hits_df.copy()
+    if our_lineups_available:
+        our_rows: list[dict[str, Any]] = []
+        for idx, lineup in enumerate(generated_lineups or []):
+            lineup_uid = str(lineup.get("lineup_number") or "").strip() or f"lineup_{idx + 1}"
+            players = lineup.get("players") or []
+            for p in players:
+                player_name = str(p.get("Name") or "").strip()
+                if not player_name:
+                    continue
+                our_rows.append(
+                    {
+                        "lineup_uid": lineup_uid,
+                        "name_key": _norm(player_name),
+                        "name_key_loose": _norm_loose(player_name),
+                    }
+                )
+        our_players_df = pd.DataFrame(our_rows)
+        if not our_players_df.empty:
+            our_players_df = our_players_df.loc[our_players_df["name_key"] != ""].copy()
+            our_players_df = our_players_df.drop_duplicates(["lineup_uid", "name_key"])
+            our_lineups_count = int(our_players_df["lineup_uid"].nunique())
+            if our_lineups_count > 0:
+                our_key_counts = (
+                    our_players_df.groupby("name_key", as_index=False)
+                    .agg(our_lineups_with_player=("lineup_uid", "nunique"))
+                    .set_index("name_key")["our_lineups_with_player"]
+                    .to_dict()
+                )
+                our_loose_counts = (
+                    our_players_df.groupby("name_key_loose", as_index=False)
+                    .agg(our_lineups_with_player=("lineup_uid", "nunique"))
+                    .set_index("name_key_loose")["our_lineups_with_player"]
+                    .to_dict()
+                )
+                player_counts["our_lineups_with_player"] = pd.to_numeric(
+                    player_counts["name_key"].map(our_key_counts), errors="coerce"
+                )
+                missing_our = player_counts["our_lineups_with_player"].isna()
+                if missing_our.any():
+                    player_counts.loc[missing_our, "our_lineups_with_player"] = pd.to_numeric(
+                        player_counts.loc[missing_our, "name_key_loose"].map(our_loose_counts),
+                        errors="coerce",
+                    )
+                player_counts["our_lineups_with_player"] = (
+                    pd.to_numeric(player_counts["our_lineups_with_player"], errors="coerce").fillna(0).astype(int)
+                )
+                player_counts["our_lineup_rate_pct"] = (
+                    100.0
+                    * pd.to_numeric(player_counts["our_lineups_with_player"], errors="coerce").fillna(0.0)
+                    / float(max(1, our_lineups_count))
+                )
+                player_counts["missed_by_our_lineups"] = pd.to_numeric(
+                    player_counts["our_lineups_with_player"], errors="coerce"
+                ).fillna(0) <= 0
+            else:
+                our_lineups_available = False
+                player_counts["our_lineups_with_player"] = pd.NA
+                player_counts["our_lineup_rate_pct"] = pd.NA
+                player_counts["missed_by_our_lineups"] = pd.NA
+        else:
+            our_lineups_available = False
+            player_counts["our_lineups_with_player"] = pd.NA
+            player_counts["our_lineup_rate_pct"] = pd.NA
+            player_counts["missed_by_our_lineups"] = pd.NA
+    else:
+        player_counts["our_lineups_with_player"] = pd.NA
+        player_counts["our_lineup_rate_pct"] = pd.NA
+        player_counts["missed_by_our_lineups"] = pd.NA
+
+    player_counts["actual_rank"] = pd.to_numeric(player_counts["actual_dk_points"], errors="coerce").rank(
+        method="min", ascending=False
+    )
+    player_counts = player_counts.sort_values(
+        ["actual_dk_points", "top10_entries_with_player"],
+        ascending=[False, False],
+        na_position="last",
+    ).reset_index(drop=True)
+
+    focus_df = player_counts.loc[pd.to_numeric(player_counts["actual_dk_points"], errors="coerce").notna()].head(n_focus).copy()
+    if focus_df.empty:
+        focus_df = player_counts.head(n_focus).copy()
+
+    missing_focus_df = empty_top_df.copy()
+    top3_missing_names: list[str] = []
+    top5_missing_names: list[str] = []
+    top_scorer_in_our_lineups: bool | Any = pd.NA
+    top3_covered_count: int | Any = pd.NA
+    top5_covered_count: int | Any = pd.NA
+    top3_all_in_single_lineup: bool | Any = pd.NA
+    top_scorer_name = ""
+    top_scorer_actual_points: Any = pd.NA
+
+    top_by_points = player_counts.loc[pd.to_numeric(player_counts["actual_dk_points"], errors="coerce").notna()].copy()
+    top3_df = top_by_points.head(3).copy()
+    top5_df = top_by_points.head(5).copy()
+    if not top_by_points.empty:
+        top_scorer_name = str(top_by_points.iloc[0].get("Name") or "")
+        top_scorer_actual_points = pd.to_numeric(top_by_points.iloc[0].get("actual_dk_points"), errors="coerce")
+
+    if our_lineups_available:
+        if "our_lineups_with_player" not in focus_df.columns:
+            focus_df["our_lineups_with_player"] = 0
+        missing_focus_df = focus_df.loc[
+            pd.to_numeric(focus_df["our_lineups_with_player"], errors="coerce").fillna(0) <= 0
+        ].copy()
+
+        if not top_by_points.empty:
+            top_scorer_in_our_lineups = bool(
+                pd.to_numeric(top_by_points.iloc[0].get("our_lineups_with_player"), errors="coerce") > 0
+            )
+        if not top3_df.empty:
+            top3_covered_count = int(
+                (pd.to_numeric(top3_df["our_lineups_with_player"], errors="coerce").fillna(0) > 0).sum()
+            )
+            top3_missing_names = (
+                top3_df.loc[pd.to_numeric(top3_df["our_lineups_with_player"], errors="coerce").fillna(0) <= 0, "Name"]
+                .astype(str)
+                .tolist()
+            )
+        if not top5_df.empty:
+            top5_covered_count = int(
+                (pd.to_numeric(top5_df["our_lineups_with_player"], errors="coerce").fillna(0) > 0).sum()
+            )
+            top5_missing_names = (
+                top5_df.loc[pd.to_numeric(top5_df["our_lineups_with_player"], errors="coerce").fillna(0) <= 0, "Name"]
+                .astype(str)
+                .tolist()
+            )
+
+        if generated_lineups and not top3_df.empty:
+            top_targets = top3_df[["name_key", "name_key_loose", "Name"]].copy()
+            hit_rows: list[dict[str, Any]] = []
+            for idx, lineup in enumerate(generated_lineups or []):
+                lineup_uid = str(lineup.get("lineup_number") or "").strip() or f"lineup_{idx + 1}"
+                players = lineup.get("players") or []
+                lineup_key_set: set[str] = set()
+                lineup_loose_set: set[str] = set()
+                for p in players:
+                    player_name = str(p.get("Name") or "").strip()
+                    if not player_name:
+                        continue
+                    name_key = _norm(player_name)
+                    name_key_loose = _norm_loose(player_name)
+                    if name_key:
+                        lineup_key_set.add(name_key)
+                    if name_key_loose:
+                        lineup_loose_set.add(name_key_loose)
+                hit_count = 0
+                for _, target in top_targets.iterrows():
+                    target_key = str(target.get("name_key") or "").strip()
+                    target_loose = str(target.get("name_key_loose") or "").strip()
+                    if (target_key and target_key in lineup_key_set) or (target_loose and target_loose in lineup_loose_set):
+                        hit_count += 1
+                hit_rows.append({"lineup_uid": lineup_uid, "top3_hits": int(hit_count)})
+
+            lineup_hits_df = pd.DataFrame(hit_rows)
+            if not lineup_hits_df.empty:
+                lineup_top3_hit_distribution_df = (
+                    lineup_hits_df.groupby("top3_hits", as_index=False)
+                    .agg(lineups=("lineup_uid", "count"))
+                    .sort_values("top3_hits", ascending=False)
+                    .reset_index(drop=True)
+                )
+                lineup_top3_hit_distribution_df["lineup_rate_pct"] = (
+                    100.0
+                    * pd.to_numeric(lineup_top3_hit_distribution_df["lineups"], errors="coerce").fillna(0.0)
+                    / float(max(1, our_lineups_count))
+                )
+                required_hits = int(len(top_targets))
+                top3_all_in_single_lineup = bool(
+                    (pd.to_numeric(lineup_hits_df["top3_hits"], errors="coerce").fillna(0).astype(int) >= required_hits).any()
+                )
+
+    base_summary.update(
+        {
+            "top10_entries_count": int(len(top10_entries)),
+            "top10_unique_players": int(player_counts["name_key"].nunique()),
+            "our_lineups_available": bool(our_lineups_available),
+            "our_lineups_count": int(our_lineups_count),
+            "top_scorer_name": top_scorer_name,
+            "top_scorer_actual_points": top_scorer_actual_points,
+            "top_scorer_in_our_lineups": top_scorer_in_our_lineups,
+            "top3_covered_count": top3_covered_count,
+            "top3_target_count": int(len(top3_df)),
+            "top3_all_in_single_lineup": top3_all_in_single_lineup,
+            "top3_missing_names": top3_missing_names,
+            "top5_covered_count": top5_covered_count,
+            "top5_target_count": int(len(top5_df)),
+            "top5_missing_names": top5_missing_names,
+        }
+    )
+
+    drop_cols = ["name_key", "name_key_loose"]
+    out["summary"] = base_summary
+    out["top10_entries_df"] = top10_entries.reset_index(drop=True)
+    out["top_players_df"] = player_counts.drop(columns=drop_cols, errors="ignore")
+    out["focus_players_df"] = focus_df.drop(columns=drop_cols, errors="ignore")
+    out["missing_focus_players_df"] = missing_focus_df.drop(columns=drop_cols, errors="ignore")
+    out["lineup_top3_hit_distribution_df"] = lineup_top3_hit_distribution_df
+    return out
+
+
 def score_generated_lineups_against_actuals(
     generated_lineups: list[dict[str, Any]],
     actual_results_df: pd.DataFrame | None,

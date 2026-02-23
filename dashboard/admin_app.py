@@ -51,6 +51,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_player_exposure_comparison,
     build_projection_actual_comparison,
     build_projection_adjustment_factors,
+    build_top10_winner_gap_analysis,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
     score_generated_lineups_against_actuals,
@@ -3952,7 +3953,7 @@ with tab_lineups:
         index=0,
         help=(
             "All Versions generates and saves all lineup models: "
-            "standard_v1, spike_v1_legacy, spike_v2_tail, cluster_v1_experimental."
+            "standard_v1, spike_v1_legacy, spike_v2_tail, cluster_v1_experimental, standout_v1_capture."
         ),
     )
     run_mode_key = "all" if run_mode_label == "All Versions" else "single"
@@ -3966,6 +3967,7 @@ with tab_lineups:
                 "Spike v1 (Legacy A/B)",
                 "Spike v2 (Tail A/B)",
                 "Cluster v1 (Experimental)",
+                "Standout v1 (Missed-Capture)",
             ],
             index=0,
             help=(
@@ -3984,13 +3986,20 @@ with tab_lineups:
             selected_model_key = "spike_v1_legacy"
             lineup_strategy = "spike"
             include_tail_signals = False
+        elif lineup_model_label == "Standout v1 (Missed-Capture)":
+            selected_model_key = "standout_v1_capture"
+            lineup_strategy = "standard"
+            include_tail_signals = True
         else:
             selected_model_key = "standard_v1"
             lineup_strategy = "standard"
             include_tail_signals = False
     else:
         c5.caption("Lineup Models")
-        c5.write("All Versions: `standard_v1`, `spike_v1_legacy`, `spike_v2_tail`, `cluster_v1_experimental`")
+        c5.write(
+            "All Versions: `standard_v1`, `spike_v1_legacy`, `spike_v2_tail`, "
+            "`cluster_v1_experimental`, `standout_v1_capture`"
+        )
         selected_model_key = "standard_v1"
         lineup_strategy = "standard"
         include_tail_signals = False
@@ -4605,6 +4614,14 @@ with tab_lineups:
                                 "cluster_target_count": 15,
                                 "cluster_variants_per_cluster": 10,
                             },
+                            {
+                                "version_key": "standout_v1_capture",
+                                "version_label": "Standout v1 (Missed-Capture)",
+                                "lineup_strategy": "standard",
+                                "include_tail_signals": True,
+                                "model_profile": "standout_capture_v1",
+                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                            },
                         ]
                     else:
                         if selected_model_key == "spike_v2_tail":
@@ -4639,6 +4656,17 @@ with tab_lineups:
                                     "lineup_strategy": "spike",
                                     "include_tail_signals": False,
                                     "model_profile": "legacy_spike_pairs",
+                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                }
+                            ]
+                        elif selected_model_key == "standout_v1_capture":
+                            version_plan = [
+                                {
+                                    "version_key": "standout_v1_capture",
+                                    "version_label": "Standout v1 (Missed-Capture)",
+                                    "lineup_strategy": "standard",
+                                    "include_tail_signals": True,
+                                    "model_profile": "standout_capture_v1",
                                     "spike_max_pair_overlap": spike_max_pair_overlap,
                                 }
                             ]
@@ -4753,6 +4781,7 @@ with tab_lineups:
                             objective_score_adjustments=objective_score_adjustments,
                             salary_left_target=salary_left_target,
                             random_seed=lineup_seed + version_idx,
+                            model_profile=str(version_cfg.get("model_profile") or "legacy_baseline"),
                             progress_callback=_lineup_progress,
                         )
                         generated_versions[str(version_cfg["version_key"])] = {
@@ -5854,9 +5883,10 @@ with tab_tournament_review:
                             "Uploaded contest values are kept in `points_from_file` and `rank_from_file` for reference."
                         )
 
-                    our_generated = st.session_state.get("cbb_generated_lineups", [])
-                    if our_generated:
-                        our_df = summarize_generated_lineups(our_generated)
+                    our_generated_lineups = st.session_state.get("cbb_generated_lineups", [])
+                    our_df = pd.DataFrame()
+                    if our_generated_lineups:
+                        our_df = summarize_generated_lineups(our_generated_lineups)
                         if not our_df.empty:
                             st.subheader("Our Generated Lineups vs Field")
                             c1, c2, c3, c4 = st.columns(4)
@@ -6109,6 +6139,107 @@ with tab_tournament_review:
                             mime="text/csv",
                             key="download_tournament_adjusted_projection_preview_csv",
                         )
+
+                    st.subheader("Top-10 Winner Gap Analysis")
+                    top10_gap = build_top10_winner_gap_analysis(
+                        entries_df=entries_df,
+                        expanded_players_df=expanded_df,
+                        projection_comparison_df=proj_compare_df,
+                        generated_lineups=our_generated_lineups if isinstance(our_generated_lineups, list) else [],
+                        top_n_winners=10,
+                        top_points_focus=10,
+                    )
+                    top10_gap_summary = top10_gap.get("summary") or {}
+                    top10_focus_df = top10_gap.get("focus_players_df")
+                    top10_missing_df = top10_gap.get("missing_focus_players_df")
+                    top10_hits_df = top10_gap.get("lineup_top3_hit_distribution_df")
+
+                    tg1, tg2, tg3, tg4, tg5 = st.columns(5)
+                    tg1.metric("Top-10 Winners", int(top10_gap_summary.get("top10_entries_count") or 0))
+                    tg2.metric("Top-10 Unique Players", int(top10_gap_summary.get("top10_unique_players") or 0))
+                    if bool(top10_gap_summary.get("our_lineups_available")):
+                        top_scorer_flag = pd.to_numeric(top10_gap_summary.get("top_scorer_in_our_lineups"), errors="coerce")
+                        top3_together_flag = pd.to_numeric(top10_gap_summary.get("top3_all_in_single_lineup"), errors="coerce")
+                        tg3.metric(
+                            "Top Scorer In Our Lineups",
+                            (
+                                "n/a"
+                                if pd.isna(top_scorer_flag)
+                                else ("Yes" if bool(int(top_scorer_flag)) else "No")
+                            ),
+                        )
+                        top3_target_count = int(top10_gap_summary.get("top3_target_count") or 0)
+                        top3_covered_count = int(top10_gap_summary.get("top3_covered_count") or 0)
+                        tg4.metric(
+                            "Top-3 Covered",
+                            ("n/a" if top3_target_count <= 0 else f"{top3_covered_count}/{top3_target_count}"),
+                        )
+                        tg5.metric(
+                            "Top-3 Together",
+                            (
+                                "n/a"
+                                if pd.isna(top3_together_flag)
+                                else ("Yes" if bool(int(top3_together_flag)) else "No")
+                            ),
+                        )
+                    else:
+                        tg3.metric("Top Scorer In Our Lineups", "n/a")
+                        tg4.metric("Top-3 Covered", "n/a")
+                        tg5.metric("Top-3 Together", "n/a")
+                        st.info(
+                            "No generated lineups are loaded in this session, so lineup-coverage checks are unavailable. "
+                            "Generate lineups first to compare your builds against top winners."
+                        )
+
+                    top_scorer_name = str(top10_gap_summary.get("top_scorer_name") or "").strip()
+                    top_scorer_points = pd.to_numeric(top10_gap_summary.get("top_scorer_actual_points"), errors="coerce")
+                    if top_scorer_name and pd.notna(top_scorer_points):
+                        st.caption(f"Top scorer in winning lineups: `{top_scorer_name}` ({float(top_scorer_points):.2f} DK points).")
+
+                    if isinstance(top10_focus_df, pd.DataFrame) and not top10_focus_df.empty:
+                        focus_cols = [
+                            "Name",
+                            "TeamAbbrev",
+                            "actual_dk_points",
+                            "blended_projection",
+                            "blend_error",
+                            "top10_entries_with_player",
+                            "top10_entry_rate_pct",
+                            "our_lineups_with_player",
+                            "our_lineup_rate_pct",
+                            "missed_by_our_lineups",
+                        ]
+                        focus_use_cols = [c for c in focus_cols if c in top10_focus_df.columns]
+                        st.dataframe(top10_focus_df[focus_use_cols], hide_index=True, use_container_width=True)
+                    else:
+                        st.info(
+                            "Top-10 winner player comparison needs parsed top-10 entries plus projection-vs-actual rows."
+                        )
+
+                    if (
+                        bool(top10_gap_summary.get("our_lineups_available"))
+                        and isinstance(top10_missing_df, pd.DataFrame)
+                        and not top10_missing_df.empty
+                    ):
+                        st.caption(
+                            "High-impact players from top winners that did not appear in any of our generated lineups."
+                        )
+                        miss_cols = [
+                            "Name",
+                            "TeamAbbrev",
+                            "actual_dk_points",
+                            "blended_projection",
+                            "blend_error",
+                            "top10_entries_with_player",
+                            "top10_entry_rate_pct",
+                        ]
+                        miss_use_cols = [c for c in miss_cols if c in top10_missing_df.columns]
+                        st.dataframe(top10_missing_df[miss_use_cols], hide_index=True, use_container_width=True)
+
+                    if bool(top10_gap_summary.get("our_lineups_available")) and isinstance(top10_hits_df, pd.DataFrame):
+                        if not top10_hits_df.empty:
+                            st.caption("Distribution of how many top-3 scorers appeared together in each generated lineup.")
+                            st.dataframe(top10_hits_df, hide_index=True, use_container_width=True)
 
                     st.subheader("User Strategy Summary")
                     if user_summary_df.empty:

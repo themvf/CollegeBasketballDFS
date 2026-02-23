@@ -3,6 +3,7 @@ from collections import Counter
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
+    apply_model_profile_adjustments,
     apply_projection_uncertainty_adjustment,
     apply_projection_calibration,
     apply_ownership_surprise_guardrails,
@@ -622,6 +623,47 @@ def test_apply_ownership_surprise_guardrails_raises_triggered_rows() -> None:
     assert bool(adjusted.loc[0, "ownership_guardrail_flag"]) is True
     assert float(adjusted.loc[0, "projected_ownership"]) > 6.0
     assert float(adjusted.loc[0, "ownership_guardrail_delta"]) > 0.0
+
+
+def test_apply_model_profile_adjustments_standout_capture_boosts_focus_candidates() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    scored = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
+    scored["projected_ownership"] = 18.0
+    scored["ownership_chalk_surge_score"] = 50.0
+    scored["our_minutes_recent"] = pd.to_numeric(scored.get("our_minutes_last7"), errors="coerce").fillna(24.0)
+    scored["our_points_recent"] = pd.to_numeric(scored.get("our_points_avg"), errors="coerce").fillna(18.0)
+    scored["projection_uncertainty_score"] = 0.10
+    scored["dnp_risk_score"] = 0.10
+
+    # Candidate profile: under-owned, strong surge, good form.
+    scored.loc[0, "projected_ownership"] = 9.0
+    scored.loc[0, "ownership_chalk_surge_score"] = 93.0
+    scored.loc[0, "our_minutes_recent"] = float(scored.loc[0, "our_minutes_recent"]) + 4.0
+    scored.loc[0, "our_points_recent"] = float(scored.loc[0, "our_points_recent"]) + 6.0
+    scored.loc[0, "projection_uncertainty_score"] = 0.05
+    scored.loc[0, "dnp_risk_score"] = 0.05
+
+    adjusted = apply_model_profile_adjustments(scored, model_profile="standout_capture_v1")
+    assert "model_profile_bonus" in adjusted.columns
+    assert "model_profile_focus_flag" in adjusted.columns
+    assert float(adjusted.loc[0, "model_profile_bonus"]) > 0.0
+    assert bool(adjusted.loc[0, "model_profile_focus_flag"]) is True
+    assert float(adjusted.loc[0, "objective_score"]) > float(scored.loc[0, "objective_score"])
+
+
+def test_generate_lineups_records_model_profile_in_payload() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=6,
+        contest_type="Large GPP",
+        include_tail_signals=True,
+        model_profile="standout_capture_v1",
+        random_seed=13,
+    )
+    assert warnings == []
+    assert len(lineups) == 6
+    assert all(str(lineup.get("model_profile")) == "standout_capture_v1" for lineup in lineups)
 
 
 def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:

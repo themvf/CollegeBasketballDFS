@@ -993,6 +993,74 @@ def apply_contest_objective(
     return out
 
 
+def apply_model_profile_adjustments(
+    pool_df: pd.DataFrame,
+    model_profile: str = "legacy_baseline",
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    profile_key = str(model_profile or "legacy_baseline").strip().lower()
+    out["model_profile"] = str(model_profile or "legacy_baseline")
+    out["model_profile_bonus"] = 0.0
+    out["model_profile_focus_flag"] = False
+
+    if out.empty:
+        return out
+    if profile_key != "standout_capture_v1":
+        return out
+
+    objective = pd.to_numeric(out.get("objective_score"), errors="coerce").fillna(0.0)
+    projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce").fillna(0.0)
+    ownership = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    surge = (
+        pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce")
+        .fillna(0.0)
+        .clip(lower=0.0, upper=100.0)
+    )
+    tail_score = pd.to_numeric(out.get("game_tail_score"), errors="coerce").fillna(0.0)
+    mins_recent = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    mins_recent = mins_recent.where(mins_recent.notna(), pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"))
+    mins_recent = mins_recent.where(mins_recent.notna(), pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"))
+    mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
+    mins_avg = mins_avg.where(mins_avg.notna(), mins_recent)
+    points_recent = pd.to_numeric(out.get("our_points_recent"), errors="coerce")
+    points_recent = points_recent.where(points_recent.notna(), pd.to_numeric(out.get("our_points_avg"), errors="coerce"))
+    points_recent = points_recent.where(points_recent.notna(), pd.to_numeric(out.get("AvgPointsPerGame"), errors="coerce"))
+    uncertainty = pd.to_numeric(out.get("projection_uncertainty_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    dnp_risk = pd.to_numeric(out.get("dnp_risk_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+
+    proj_pct = _rank_pct_series(projection)
+    tail_pct = _rank_pct_series(tail_score)
+    surge_pct = _rank_pct_series(surge)
+    recent_pts_pct = _rank_pct_series(points_recent)
+    minute_trend = ((mins_recent - mins_avg) / mins_avg.replace(0.0, pd.NA)).fillna(0.0).clip(lower=-0.35, upper=0.60)
+    minute_riser = minute_trend.clip(lower=0.0)
+    low_own_edge = ((14.0 - ownership).clip(lower=0.0) / 14.0).clip(0.0, 1.0)
+
+    chalk_shock_score = (((surge - 55.0).clip(lower=0.0) / 45.0).clip(0.0, 1.0) * ((20.0 - ownership).clip(lower=0.0) / 20.0).clip(0.0, 1.0))
+    standout_signal = (
+        (0.40 * proj_pct)
+        + (0.18 * tail_pct)
+        + (0.16 * recent_pts_pct)
+        + (0.12 * minute_riser)
+        + (0.08 * low_own_edge)
+        + (0.06 * surge_pct)
+    ).clip(0.0, 1.0)
+    risk_penalty = ((0.60 * dnp_risk) + (0.40 * uncertainty)).clip(0.0, 1.0)
+
+    profile_bonus = (
+        (4.2 * standout_signal)
+        + (3.0 * chalk_shock_score)
+        - (2.0 * risk_penalty)
+    ).clip(lower=-1.5, upper=6.5)
+
+    out["objective_score"] = (objective + profile_bonus).clip(lower=0.01)
+    out["model_profile_bonus"] = profile_bonus.round(4)
+    out["model_profile_focus_flag"] = (
+        ((chalk_shock_score >= 0.35) | (standout_signal >= 0.60)) & (risk_penalty <= 0.70)
+    ).astype(bool)
+    return out
+
+
 def apply_projection_calibration(
     pool_df: pd.DataFrame,
     projection_scale: float = 1.0,
@@ -1419,6 +1487,7 @@ def generate_lineups(
     salary_left_penalty_divisor: float = 75.0,
     random_seed: int = 7,
     max_attempts_per_lineup: int = 1200,
+    model_profile: str = "legacy_baseline",
     progress_callback: Callable[[int, int, str], None] | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if pool_df.empty:
@@ -1453,6 +1522,7 @@ def generate_lineups(
             min_multiplier=uncertainty_min_multiplier,
         )
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
+    scored = apply_model_profile_adjustments(scored, model_profile=model_profile)
     scored = scored.loc[scored["Salary"] > 0].copy()
     if objective_score_adjustments:
         objective_bonus = scored["ID"].astype(str).map(
@@ -1621,7 +1691,10 @@ def generate_lineups(
         "ownership_guardrail_delta",
         "low_own_upside_flag",
         "preferred_game_flag",
+        "model_profile_bonus",
+        "model_profile_focus_flag",
     ]
+    model_profile_value = str(model_profile or "legacy_baseline")
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
     cluster_mode = strategy_norm in {
@@ -1659,6 +1732,7 @@ def generate_lineups(
             ceiling_boost_indices=ceiling_boost_indices,
             ceiling_boost_stack_bonus=max(0.0, float(ceiling_boost_stack_bonus)),
             ceiling_boost_salary_left_target=ceiling_salary_target,
+            model_profile=model_profile_value,
         )
 
     for lineup_idx in range(num_lineups):
@@ -1835,6 +1909,7 @@ def generate_lineups(
                 "projected_points": round(lineup_proj, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
                 "lineup_strategy": "spike" if spike_mode else "standard",
+                "model_profile": model_profile_value,
                 "pair_id": pair_id,
                 "pair_role": pair_role,
                 "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_candidate_ids)),
@@ -1873,6 +1948,7 @@ def _generate_lineups_cluster_mode(
     ceiling_boost_indices: set[int] | None = None,
     ceiling_boost_stack_bonus: float = 0.0,
     ceiling_boost_salary_left_target: int | None = None,
+    model_profile: str = "legacy_baseline",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not players:
         return [], ["No players available for cluster generation."]
@@ -2121,7 +2197,10 @@ def _generate_lineups_cluster_mode(
                     selected_score += 0.35 * float(len(value_players))
                     if value_players:
                         value_minutes = [
-                            _safe_num(p.get("our_minutes_last7"), _safe_num(p.get("our_minutes_avg"), 0.0))
+                            _safe_num(
+                                p.get("our_minutes_recent"),
+                                _safe_num(p.get("our_minutes_last7"), _safe_num(p.get("our_minutes_avg"), 0.0)),
+                            )
                             for p in value_players
                         ]
                         selected_score += (sum(value_minutes) / max(1.0, float(len(value_minutes)))) / 25.0
@@ -2163,6 +2242,7 @@ def _generate_lineups_cluster_mode(
                 "projected_points": round(lineup_proj, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
                 "lineup_strategy": "cluster",
+                "model_profile": str(model_profile or "legacy_baseline"),
                 "pair_id": None,
                 "pair_role": None,
                 "cluster_id": cluster_id,
@@ -2212,6 +2292,8 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
             row["Strategy"] = str(lineup.get("lineup_strategy"))
+        if lineup.get("model_profile"):
+            row["Model Profile"] = str(lineup.get("model_profile"))
         if lineup.get("cluster_id"):
             row["Cluster"] = str(lineup.get("cluster_id"))
         if lineup.get("mutation_type"):
@@ -2252,6 +2334,8 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
             row["Strategy"] = str(lineup.get("lineup_strategy"))
+        if lineup.get("model_profile"):
+            row["Model Profile"] = str(lineup.get("model_profile"))
         if lineup.get("cluster_id"):
             row["Cluster"] = str(lineup.get("cluster_id"))
         if lineup.get("mutation_type"):

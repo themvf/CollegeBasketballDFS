@@ -4,6 +4,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_player_exposure_comparison,
+    build_top10_winner_gap_analysis,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
     detect_contest_standings_upload,
@@ -378,3 +379,101 @@ def test_score_generated_lineups_against_actuals_and_field_compare() -> None:
     assert float(summary.iloc[0]["winner_points"]) == 190.0
     assert round(float(summary.iloc[0]["winner_gap"]), 2) == 6.0
     assert round(float(summary.iloc[0]["pct_of_winner"]), 2) == round((184.0 / 190.0) * 100.0, 2)
+
+
+def test_top10_winner_gap_analysis_identifies_missing_top_scorer() -> None:
+    entries, expanded = build_field_entries_and_players(_sample_standings(), _sample_slate())
+    proj_compare = pd.DataFrame(
+        [
+            {"Name": "Alpha One", "TeamAbbrev": "AAA", "actual_dk_points": 50.0, "blended_projection": 30.0, "blend_error": 20.0},
+            {"Name": "Bravo Two", "TeamAbbrev": "BBB", "actual_dk_points": 45.0, "blended_projection": 31.0, "blend_error": 14.0},
+            {"Name": "Charlie Three", "TeamAbbrev": "CCC", "actual_dk_points": 40.0, "blended_projection": 28.0, "blend_error": 12.0},
+            {"Name": "Delta Four", "TeamAbbrev": "DDD", "actual_dk_points": 38.0, "blended_projection": 26.0, "blend_error": 12.0},
+            {"Name": "Echo Five", "TeamAbbrev": "AAA", "actual_dk_points": 36.0, "blended_projection": 24.0, "blend_error": 12.0},
+            {"Name": "Foxtrot Six", "TeamAbbrev": "CCC", "actual_dk_points": 34.0, "blended_projection": 22.0, "blend_error": 12.0},
+            {"Name": "Gamma Seven", "TeamAbbrev": "DDD", "actual_dk_points": 32.0, "blended_projection": 21.0, "blend_error": 11.0},
+            {"Name": "Hotel Eight", "TeamAbbrev": "AAA", "actual_dk_points": 30.0, "blended_projection": 20.0, "blend_error": 10.0},
+        ]
+    )
+    generated_lineups = [
+        {
+            "lineup_number": 1,
+            "players": [
+                {"Name": "Bravo Two"},
+                {"Name": "Charlie Three"},
+                {"Name": "Delta Four"},
+                {"Name": "Echo Five"},
+                {"Name": "Foxtrot Six"},
+                {"Name": "Gamma Seven"},
+                {"Name": "Hotel Eight"},
+                {"Name": "Bench Name"},
+            ],
+        }
+    ]
+
+    packet = build_top10_winner_gap_analysis(
+        entries_df=entries,
+        expanded_players_df=expanded,
+        projection_comparison_df=proj_compare,
+        generated_lineups=generated_lineups,
+        top_n_winners=10,
+        top_points_focus=5,
+    )
+    summary = packet["summary"]
+    assert int(summary["top10_entries_count"]) == 2
+    assert bool(summary["our_lineups_available"]) is True
+    assert int(summary["our_lineups_count"]) == 1
+    assert str(summary["top_scorer_name"]) == "Alpha One"
+    assert bool(summary["top_scorer_in_our_lineups"]) is False
+    assert int(summary["top3_target_count"]) == 3
+    assert int(summary["top3_covered_count"]) == 2
+    assert bool(summary["top3_all_in_single_lineup"]) is False
+    assert "Alpha One" in list(summary["top3_missing_names"])
+
+    missing_focus = packet["missing_focus_players_df"]
+    assert not missing_focus.empty
+    assert "Alpha One" in missing_focus["Name"].tolist()
+
+
+def test_top10_winner_gap_analysis_detects_top3_combo_presence() -> None:
+    entries, expanded = build_field_entries_and_players(_sample_standings(), _sample_slate())
+    proj_compare = pd.DataFrame(
+        [
+            {"Name": "Alpha One", "actual_dk_points": 50.0, "blended_projection": 30.0, "blend_error": 20.0},
+            {"Name": "Bravo Two", "actual_dk_points": 45.0, "blended_projection": 31.0, "blend_error": 14.0},
+            {"Name": "Charlie Three", "actual_dk_points": 40.0, "blended_projection": 28.0, "blend_error": 12.0},
+            {"Name": "Delta Four", "actual_dk_points": 38.0, "blended_projection": 26.0, "blend_error": 12.0},
+        ]
+    )
+    generated_lineups = [
+        {
+            "lineup_number": 11,
+            "players": [
+                {"Name": "Alpha One"},
+                {"Name": "Bravo Two"},
+                {"Name": "Charlie Three"},
+                {"Name": "Delta Four"},
+                {"Name": "Echo Five"},
+                {"Name": "Foxtrot Six"},
+                {"Name": "Gamma Seven"},
+                {"Name": "Hotel Eight"},
+            ],
+        }
+    ]
+
+    packet = build_top10_winner_gap_analysis(
+        entries_df=entries,
+        expanded_players_df=expanded,
+        projection_comparison_df=proj_compare,
+        generated_lineups=generated_lineups,
+        top_n_winners=10,
+        top_points_focus=5,
+    )
+    summary = packet["summary"]
+    assert bool(summary["top_scorer_in_our_lineups"]) is True
+    assert int(summary["top3_covered_count"]) == 3
+    assert bool(summary["top3_all_in_single_lineup"]) is True
+
+    hit_dist = packet["lineup_top3_hit_distribution_df"]
+    assert not hit_dist.empty
+    assert 3 in hit_dist["top3_hits"].tolist()

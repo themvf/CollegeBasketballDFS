@@ -79,8 +79,9 @@ Hard constraints in optimizer:
 | `spike_v1_legacy` | Spike v1 (Legacy A/B) | `spike` | false | `legacy_spike_pairs` |
 | `spike_v2_tail` | Spike v2 (Tail A/B) | `spike` | true | `tail_spike_pairs` |
 | `cluster_v1_experimental` | Cluster v1 (Experimental) | `cluster` | false | `cluster_seed_mutation_v1` |
+| `standout_v1_capture` | Standout v1 (Missed-Capture) | `standard` | true | `standout_capture_v1` |
 
-`All Versions` mode includes all four profiles.
+`All Versions` mode includes all five profiles.
 
 ### 4.3 Stack Bias and Salary Controls
 
