@@ -1215,6 +1215,224 @@ def apply_projection_uncertainty_adjustment(
     return out
 
 
+def apply_minutes_shock_override(
+    pool_df: pd.DataFrame,
+    max_boost_pct: float = 0.18,
+    boost_per_minute: float = 0.025,
+    expected_rotation_bonus_minutes: float = 2.0,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    boost_cap = max(0.0, min(0.30, _safe_num(max_boost_pct, 0.18)))
+    per_minute = max(0.0, min(0.05, _safe_num(boost_per_minute, 0.025)))
+    rotation_bonus = max(0.0, min(4.0, _safe_num(expected_rotation_bonus_minutes, 2.0)))
+
+    mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
+    mins_last7 = pd.to_numeric(out.get("our_minutes_last7"), errors="coerce")
+    mins_recent = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    mins_recent = mins_recent.where(mins_recent.notna(), mins_last7)
+    mins_recent = mins_recent.where(mins_recent.notna(), mins_avg)
+    mins_avg = mins_avg.where(mins_avg.notna(), mins_last7)
+    mins_avg = mins_avg.where(mins_avg.notna(), mins_recent)
+    mins_avg = mins_avg.fillna(0.0)
+
+    uncertainty = pd.to_numeric(out.get("projection_uncertainty_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    dnp_risk = pd.to_numeric(out.get("dnp_risk_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    surge = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+
+    minutes_drop = pd.to_numeric(out.get("minutes_drop_ratio"), errors="coerce")
+    if minutes_drop.isna().all():
+        minutes_drop = ((mins_avg - mins_recent).clip(lower=0.0) / mins_avg.replace(0.0, pd.NA)).fillna(0.0)
+    minutes_drop = minutes_drop.clip(lower=0.0, upper=1.0)
+
+    expected_rotation_flag = (
+        (mins_recent >= 22.0)
+        & (dnp_risk <= 0.42)
+        & ((minutes_drop <= 0.25) | (surge >= 68.0))
+    )
+    expected_rotation_minutes = mins_avg + (expected_rotation_flag.astype(float) * rotation_bonus)
+
+    minutes_anchor = pd.concat([mins_recent, mins_last7, expected_rotation_minutes], axis=1).max(axis=1, skipna=True)
+    minutes_anchor = minutes_anchor.fillna(mins_avg)
+    minutes_delta = (minutes_anchor - mins_avg).clip(lower=0.0, upper=10.0)
+    raw_boost = (minutes_delta * per_minute).clip(lower=0.0, upper=boost_cap)
+    reliability = (1.0 - (0.55 * dnp_risk) - (0.35 * uncertainty)).clip(lower=0.35, upper=1.0)
+    minutes_boost = (raw_boost * reliability).clip(lower=0.0, upper=boost_cap)
+    multiplier = (1.0 + minutes_boost).clip(lower=1.0, upper=1.0 + boost_cap)
+
+    for col in ["projected_dk_points", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce") * multiplier
+
+    if "Salary" in out.columns and "projected_dk_points" in out.columns:
+        salary = pd.to_numeric(out["Salary"], errors="coerce")
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce")
+        out["projection_per_dollar"] = proj / salary.replace(0, pd.NA)
+        out["value_per_1k"] = out["projection_per_dollar"] * 1000.0
+
+    if "projected_dk_points" in out.columns and "projected_ownership" in out.columns:
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
+        own = pd.to_numeric(out["projected_ownership"], errors="coerce").fillna(0.0)
+        out["leverage_score"] = (proj - (0.15 * own)).round(3)
+
+    out["expected_rotation_flag"] = expected_rotation_flag.astype(bool)
+    out["minutes_shock_delta"] = minutes_delta.round(3)
+    out["minutes_shock_boost_pct"] = (minutes_boost * 100.0).round(3)
+    out["minutes_shock_multiplier"] = multiplier.round(4)
+    return out
+
+
+def apply_chalk_ceiling_guardrail(
+    pool_df: pd.DataFrame,
+    max_players: int = 3,
+    min_floor: float = 18.0,
+    max_floor: float = 24.0,
+    blend_weight: float = 0.45,
+    score_threshold: float = 0.58,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    projected_ownership = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce")
+    salary = pd.to_numeric(out.get("Salary"), errors="coerce")
+    surge = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    value = pd.to_numeric(out.get("value_per_1k"), errors="coerce")
+    field_own = pd.to_numeric(
+        out.get("field_ownership_pct", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
+    minutes_boost = pd.to_numeric(out.get("minutes_shock_boost_pct"), errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    proj_pct = _rank_pct_series(projection)
+    value_pct = _rank_pct_series(value)
+    field_pct = _rank_pct_series(field_own)
+    surge_norm = (surge / 100.0).clip(lower=0.0, upper=1.0)
+    if float(minutes_boost.max()) > 0.0:
+        minutes_norm = (minutes_boost / float(minutes_boost.max())).clip(lower=0.0, upper=1.0)
+    else:
+        minutes_norm = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    mid_salary_score = (1.0 - ((salary - 6500.0).abs() / 4000.0)).clip(lower=0.0, upper=1.0).fillna(0.0)
+
+    archetype_score = (
+        (0.34 * proj_pct)
+        + (0.20 * value_pct)
+        + (0.16 * surge_norm)
+        + (0.14 * minutes_norm)
+        + (0.10 * mid_salary_score)
+        + (0.06 * field_pct)
+    ).clip(lower=0.0, upper=1.0)
+
+    floor_min = max(0.0, float(min_floor))
+    floor_max = max(floor_min, float(max_floor))
+    blend = max(0.0, min(1.0, float(blend_weight)))
+    threshold = max(0.0, min(1.0, float(score_threshold)))
+    projected_floor = (floor_min + ((floor_max - floor_min) * archetype_score)).clip(lower=floor_min, upper=floor_max)
+    projection_cut = float(projection.quantile(0.55)) if projection.notna().any() else 0.0
+
+    candidate_mask = (
+        (projected_ownership < projected_floor)
+        & (archetype_score >= threshold)
+        & (projection.fillna(0.0) >= projection_cut)
+    )
+    limit = max(0, min(int(max_players), len(out)))
+    selected_mask = pd.Series(False, index=out.index, dtype="bool")
+    if limit > 0:
+        candidate_df = pd.DataFrame(
+            {
+                "score": archetype_score,
+            },
+            index=out.index,
+        )
+        chosen_idx = (
+            candidate_df.loc[candidate_mask]
+            .sort_values("score", ascending=False)
+            .head(limit)
+            .index
+        )
+        selected_mask.loc[chosen_idx] = True
+
+    ownership_delta = (projected_floor - projected_ownership).clip(lower=0.0)
+    adjusted_ownership = projected_ownership.copy()
+    adjusted_ownership.loc[selected_mask] = (
+        projected_ownership.loc[selected_mask]
+        + (blend * ownership_delta.loc[selected_mask])
+    ).clip(lower=0.0, upper=100.0)
+
+    out["chalk_ceiling_guardrail_flag"] = selected_mask.astype(bool)
+    out["chalk_ceiling_guardrail_target"] = projected_floor.round(3)
+    out["chalk_ceiling_guardrail_delta"] = (adjusted_ownership - projected_ownership).round(3)
+    out["projected_ownership"] = adjusted_ownership.round(2)
+
+    if "projected_dk_points" in out.columns:
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
+        out["leverage_score"] = (proj - (0.15 * out["projected_ownership"])).round(3)
+    return out
+
+
+def apply_stack_anchor_bias(
+    pool_df: pd.DataFrame,
+    top_game_count: int = 2,
+    objective_bonus: float = 0.85,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    if "objective_score" not in out.columns:
+        out["stack_anchor_focus_flag"] = False
+        return out
+
+    game_key = out.get("game_key")
+    if game_key is None:
+        out["stack_anchor_focus_flag"] = False
+        return out
+
+    game_norm = game_key.map(lambda x: str(x or "").strip().upper())
+    totals = pd.to_numeric(
+        out.get("game_total_line", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
+    tail = pd.to_numeric(
+        out.get("game_tail_score", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    ).fillna(0.0)
+    if totals.notna().any():
+        game_metric = totals.groupby(game_norm).median()
+    elif tail.notna().any():
+        game_metric = tail.groupby(game_norm).mean()
+    else:
+        out["stack_anchor_focus_flag"] = False
+        return out
+
+    game_metric = game_metric.loc[game_metric.index != ""].sort_values(ascending=False)
+    if game_metric.empty:
+        out["stack_anchor_focus_flag"] = False
+        return out
+
+    top_n = max(1, min(int(top_game_count), len(game_metric)))
+    focus_games = set(game_metric.head(top_n).index.tolist())
+    focus_mask = game_norm.isin(focus_games)
+    if not bool(focus_mask.any()):
+        out["stack_anchor_focus_flag"] = False
+        return out
+
+    bonus_base = max(0.0, float(objective_bonus))
+    tail_bonus = (tail / 100.0).clip(lower=0.0, upper=1.0) * 0.30
+    bonus = focus_mask.map(lambda x: bonus_base if bool(x) else 0.0).astype(float) + (
+        focus_mask.astype(float) * tail_bonus
+    )
+    out["objective_score"] = (
+        pd.to_numeric(out.get("objective_score"), errors="coerce").fillna(0.0)
+        + bonus
+    ).clip(lower=0.01)
+    out["stack_anchor_focus_flag"] = focus_mask.astype(bool)
+    return out
+
+
 def _is_feasible_partial(
     selected: list[dict[str, Any]],
     cap: int,
@@ -1284,6 +1502,49 @@ def _stack_bonus_from_counts(game_counts: Counter[str]) -> float:
     if not game_counts:
         return 0.0
     return float(sum(max(0, n - 1) for n in game_counts.values()))
+
+
+def _distributed_lineup_indices(
+    total_lineups: int,
+    target_count: int,
+    rng: random.Random,
+    buckets: int = 10,
+) -> set[int]:
+    total = max(0, int(total_lineups))
+    target = max(0, min(total, int(target_count)))
+    if total <= 0 or target <= 0:
+        return set()
+    bucket_count = max(1, min(int(buckets), total))
+    bucket_size = float(total) / float(bucket_count)
+    bucket_slices: list[list[int]] = []
+    for bucket_idx in range(bucket_count):
+        start = int(math.floor(bucket_idx * bucket_size))
+        end = int(math.floor((bucket_idx + 1) * bucket_size))
+        if bucket_idx == (bucket_count - 1):
+            end = total
+        if end <= start:
+            end = min(total, start + 1)
+        indices = list(range(start, end))
+        if indices:
+            bucket_slices.append(indices)
+
+    selected: set[int] = set()
+    passes = max(1, int(math.ceil(float(target) / max(1, len(bucket_slices)))))
+    for _ in range(passes):
+        for bucket in bucket_slices:
+            if len(selected) >= target:
+                break
+            choices = [idx for idx in bucket if idx not in selected]
+            if choices:
+                selected.add(rng.choice(choices))
+        if len(selected) >= target:
+            break
+
+    if len(selected) < target:
+        remaining = [idx for idx in range(total) if idx not in selected]
+        if remaining:
+            selected.update(rng.sample(remaining, k=min(len(remaining), target - len(selected))))
+    return selected
 
 
 def _salary_texture_bucket(salary_left: int) -> str:
@@ -1504,6 +1765,15 @@ def generate_lineups(
         projection_salary_bucket_scales=projection_salary_bucket_scales,
         projection_role_bucket_scales=projection_role_bucket_scales,
     )
+    calibrated = apply_minutes_shock_override(calibrated)
+    if apply_uncertainty_shrink:
+        calibrated = apply_projection_uncertainty_adjustment(
+            calibrated,
+            uncertainty_weight=uncertainty_weight,
+            high_risk_extra_shrink=high_risk_extra_shrink,
+            dnp_risk_threshold=dnp_risk_threshold,
+            min_multiplier=uncertainty_min_multiplier,
+        )
     if apply_ownership_guardrails:
         calibrated = apply_ownership_surprise_guardrails(
             calibrated,
@@ -1513,15 +1783,9 @@ def generate_lineups(
             ownership_floor_base=ownership_guardrail_floor_base,
             ownership_floor_cap=ownership_guardrail_floor_cap,
         )
-    if apply_uncertainty_shrink:
-        calibrated = apply_projection_uncertainty_adjustment(
-            calibrated,
-            uncertainty_weight=uncertainty_weight,
-            high_risk_extra_shrink=high_risk_extra_shrink,
-            dnp_risk_threshold=dnp_risk_threshold,
-            min_multiplier=uncertainty_min_multiplier,
-        )
+    calibrated = apply_chalk_ceiling_guardrail(calibrated)
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
+    scored = apply_stack_anchor_bias(scored)
     scored = apply_model_profile_adjustments(scored, model_profile=model_profile)
     scored = scored.loc[scored["Salary"] > 0].copy()
     if objective_score_adjustments:
@@ -1554,30 +1818,65 @@ def generate_lineups(
     low_own_candidate_ids: set[str] = set()
     low_own_exposure = max(0.0, min(100.0, float(low_own_bucket_exposure_pct)))
     low_own_min_required = max(0, min(ROSTER_SIZE, int(low_own_bucket_min_per_lineup)))
-    low_own_ownership_cap = max(0.0, float(low_own_bucket_max_projected_ownership))
-    low_own_projection_floor = max(0.0, float(low_own_bucket_min_projection))
-    low_own_tail_floor = max(0.0, float(low_own_bucket_min_tail_score))
+    low_own_ownership_cap_input = max(0.0, float(low_own_bucket_max_projected_ownership))
+    low_own_projection_floor_input = max(0.0, float(low_own_bucket_min_projection))
+    low_own_tail_floor_input = max(0.0, float(low_own_bucket_min_tail_score))
     low_own_bonus = max(0.0, float(low_own_bucket_objective_bonus))
     if low_own_exposure > 0.0:
         proj = pd.to_numeric(scored.get("projected_dk_points"), errors="coerce").fillna(0.0)
         own = pd.to_numeric(scored.get("projected_ownership"), errors="coerce").fillna(100.0)
         leverage = pd.to_numeric(scored.get("leverage_score"), errors="coerce")
         tail = pd.to_numeric(scored.get("game_tail_score"), errors="coerce").fillna(0.0)
+        minutes_boost = pd.to_numeric(scored.get("minutes_shock_boost_pct"), errors="coerce").fillna(0.0).clip(lower=0.0)
         leverage_rank = leverage.rank(method="average", pct=True).fillna(0.0)
-        low_own_mask = (
-            (own <= low_own_ownership_cap)
-            & (proj >= low_own_projection_floor)
-            & ((tail >= low_own_tail_floor) | (leverage_rank >= 0.65))
+        tail_rank = tail.rank(method="average", pct=True).fillna(0.0)
+        minutes_rank = minutes_boost.rank(method="average", pct=True).fillna(0.0)
+        low_own_upside_score = (
+            (0.46 * tail_rank)
+            + (0.34 * leverage_rank)
+            + (0.20 * minutes_rank)
+        ).clip(lower=0.0, upper=1.0)
+        dynamic_projection_floor = float(proj.quantile(0.42)) if proj.notna().any() else low_own_projection_floor_input
+        effective_projection_floor = max(
+            8.0,
+            min(low_own_projection_floor_input, dynamic_projection_floor if dynamic_projection_floor > 0.0 else low_own_projection_floor_input),
         )
+        effective_ownership_cap = max(low_own_ownership_cap_input, 14.0)
+        effective_tail_floor = min(low_own_tail_floor_input, 50.0)
+        low_own_mask = (
+            (own <= effective_ownership_cap)
+            & (
+                (proj >= effective_projection_floor)
+                | (low_own_upside_score >= 0.70)
+            )
+            & (
+                (tail >= effective_tail_floor)
+                | (leverage_rank >= 0.62)
+                | (minutes_boost >= 6.0)
+            )
+        )
+        scored["low_own_upside_v2_score"] = low_own_upside_score.round(4)
         scored["low_own_upside_flag"] = low_own_mask.map(lambda x: bool(x))
         low_own_candidate_ids = set(scored.loc[low_own_mask, "ID"].astype(str).tolist())
         if low_own_bonus > 0.0 and low_own_candidate_ids:
+            low_own_score_by_id = (
+                scored.loc[scored["ID"].astype(str).isin(low_own_candidate_ids), ["ID", "low_own_upside_v2_score"]]
+                .drop_duplicates(subset=["ID"], keep="first")
+                .set_index("ID")["low_own_upside_v2_score"]
+                .to_dict()
+            )
+            candidate_bonus = scored["ID"].astype(str).map(
+                lambda pid: low_own_bonus * (0.75 + float(low_own_score_by_id.get(pid, 0.0)))
+                if pid in low_own_candidate_ids
+                else 0.0
+            )
             scored["objective_score"] = (
                 pd.to_numeric(scored.get("objective_score"), errors="coerce").fillna(0.0)
-                + scored["ID"].astype(str).map(lambda pid: low_own_bonus if pid in low_own_candidate_ids else 0.0)
+                + pd.to_numeric(candidate_bonus, errors="coerce").fillna(0.0)
             ).clip(lower=0.01)
     else:
         scored["low_own_upside_flag"] = False
+        scored["low_own_upside_v2_score"] = 0.0
 
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
     salary_target = None if salary_left_target is None else max(0, min(SALARY_CAP, int(salary_left_target)))
@@ -1646,7 +1945,12 @@ def generate_lineups(
     target_low_own_lineups = max(0, min(num_lineups, target_low_own_lineups))
     low_own_required_indices: set[int] = set()
     if target_low_own_lineups > 0 and low_own_min_required > 0 and low_own_candidate_ids:
-        low_own_required_indices = set(rng.sample(list(range(num_lineups)), k=target_low_own_lineups))
+        low_own_required_indices = _distributed_lineup_indices(
+            total_lineups=num_lineups,
+            target_count=target_low_own_lineups,
+            rng=rng,
+            buckets=10,
+        )
 
     ceiling_pct = max(0.0, min(100.0, float(ceiling_boost_lineup_pct)))
     target_ceiling_lineups = int(round((ceiling_pct / 100.0) * float(num_lineups)))
@@ -1689,8 +1993,17 @@ def generate_lineups(
         "ownership_guardrail_flag",
         "ownership_guardrail_floor",
         "ownership_guardrail_delta",
+        "chalk_ceiling_guardrail_flag",
+        "chalk_ceiling_guardrail_target",
+        "chalk_ceiling_guardrail_delta",
         "low_own_upside_flag",
+        "low_own_upside_v2_score",
         "preferred_game_flag",
+        "stack_anchor_focus_flag",
+        "expected_rotation_flag",
+        "minutes_shock_delta",
+        "minutes_shock_boost_pct",
+        "minutes_shock_multiplier",
         "model_profile_bonus",
         "model_profile_focus_flag",
     ]

@@ -6,6 +6,8 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     apply_model_profile_adjustments,
     apply_projection_uncertainty_adjustment,
     apply_projection_calibration,
+    apply_minutes_shock_override,
+    apply_chalk_ceiling_guardrail,
     apply_ownership_surprise_guardrails,
     apply_contest_objective,
     build_dk_upload_csv,
@@ -581,6 +583,52 @@ def test_apply_projection_uncertainty_adjustment_shrinks_high_risk_rows() -> Non
     assert abs(float(after.iloc[0]) - (float(before.iloc[0]) * float(mult.iloc[0]))) < 1e-3
     # Low-risk rows should remain effectively unchanged.
     assert abs(float(mult.iloc[1]) - 1.0) < 1e-6
+
+
+def test_apply_minutes_shock_override_boosts_positive_minute_deltas() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["our_minutes_avg"] = 20.0
+    pool["our_minutes_last7"] = 20.0
+    pool["our_minutes_recent"] = 20.0
+    pool["projection_uncertainty_score"] = 0.05
+    pool["dnp_risk_score"] = 0.05
+    pool["ownership_chalk_surge_score"] = 70.0
+
+    # First row has a clear positive minutes shock signal.
+    pool.loc[0, "our_minutes_last7"] = 28.0
+    pool.loc[0, "our_minutes_recent"] = 29.0
+    before = pd.to_numeric(pool["projected_dk_points"], errors="coerce")
+    adjusted = apply_minutes_shock_override(pool)
+    after = pd.to_numeric(adjusted["projected_dk_points"], errors="coerce")
+
+    assert "minutes_shock_boost_pct" in adjusted.columns
+    assert float(adjusted.loc[0, "minutes_shock_boost_pct"]) > 0.0
+    assert float(after.iloc[0]) > float(before.iloc[0])
+    assert float(adjusted.loc[1, "minutes_shock_boost_pct"]) <= float(adjusted.loc[0, "minutes_shock_boost_pct"])
+
+
+def test_apply_chalk_ceiling_guardrail_softly_lifts_top_candidates() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["projected_ownership"] = 10.0
+    pool["ownership_chalk_surge_score"] = 45.0
+    pool["value_per_1k"] = pd.to_numeric(pool["value_per_1k"], errors="coerce").fillna(0.0)
+    pool["minutes_shock_boost_pct"] = 0.0
+
+    # Two strong chalk-ceiling candidates with low projected ownership.
+    pool.loc[0, "projected_ownership"] = 8.0
+    pool.loc[0, "ownership_chalk_surge_score"] = 92.0
+    pool.loc[0, "minutes_shock_boost_pct"] = 12.0
+    pool.loc[1, "projected_ownership"] = 7.0
+    pool.loc[1, "ownership_chalk_surge_score"] = 90.0
+    pool.loc[1, "minutes_shock_boost_pct"] = 10.0
+
+    adjusted = apply_chalk_ceiling_guardrail(pool, max_players=2, min_floor=18.0, max_floor=24.0, blend_weight=0.5)
+    lifted = adjusted.loc[adjusted["chalk_ceiling_guardrail_flag"] == True]  # noqa: E712
+
+    assert "chalk_ceiling_guardrail_flag" in adjusted.columns
+    assert len(lifted) <= 2
+    assert len(lifted) >= 1
+    assert float(adjusted.loc[0, "projected_ownership"]) > 8.0
 
 
 def test_build_player_pool_ownership_surge_columns_present() -> None:
