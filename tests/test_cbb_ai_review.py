@@ -647,6 +647,26 @@ def test_build_market_correlation_prompt_mentions_projection_to_ownership_curve(
     assert "ownership_reverse_engineering.overall_metrics" in prompt
 
 
+def test_build_market_correlation_packet_handles_nonfinite_slate_game_counts() -> None:
+    rows = _sample_market_review_rows().copy()
+    rows["slate_game_count"] = pd.NA
+    rows.loc[0, "slate_game_count"] = "nan"
+    rows.loc[1, "slate_game_count"] = "inf"
+    rows.loc[2, "slate_game_count"] = "-inf"
+    rows.loc[3, "slate_game_count"] = ""
+    rows.loc[4, "slate_game_count"] = None
+
+    packet = build_market_correlation_ai_review_packet(
+        review_rows_df=rows,
+        focus_limit=10,
+        min_bucket_samples=2,
+    )
+    ownership_re = packet.get("ownership_reverse_engineering") or {}
+    assert ownership_re.get("overall_metrics") is not None
+    assert isinstance(ownership_re.get("slate_size_summary"), list)
+    assert isinstance(ownership_re.get("curve_table"), list)
+
+
 def test_build_game_slate_ai_review_packet_and_prompt() -> None:
     packet = build_game_slate_ai_review_packet(
         review_date="2026-02-20",

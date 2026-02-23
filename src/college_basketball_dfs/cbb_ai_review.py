@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import re
 import time
 from datetime import datetime, timezone
@@ -59,16 +60,22 @@ def _to_float(value: Any) -> float | None:
     if not text:
         return None
     try:
-        return float(text)
+        as_float = float(text)
     except ValueError:
         return None
+    if not math.isfinite(as_float):
+        return None
+    return as_float
 
 
 def _to_int(value: Any, default: int = 0) -> int:
     as_float = _to_float(value)
     if as_float is None:
         return int(default)
-    return int(as_float)
+    try:
+        return int(as_float)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
 
 
 def _norm_name(value: Any) -> str:
