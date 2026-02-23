@@ -4183,7 +4183,7 @@ with tab_lineups:
             "Uncertainty Shrink %",
             min_value=0,
             max_value=35,
-            value=18,
+            value=15,
             step=1,
             help="Base shrink applied proportionally to projection uncertainty score.",
         )
@@ -4193,7 +4193,7 @@ with tab_lineups:
             "DNP Risk Threshold %",
             min_value=10,
             max_value=60,
-            value=30,
+            value=35,
             step=1,
             help="Extra shrink applies above this DNP-risk level.",
         )
@@ -4203,7 +4203,7 @@ with tab_lineups:
             "High-Risk Extra Shrink %",
             min_value=0,
             max_value=30,
-            value=10,
+            value=8,
             step=1,
             help="Additional shrink for players above the DNP-risk threshold.",
         )
@@ -4221,7 +4221,7 @@ with tab_lineups:
             "Guardrail Projected Own <= %",
             min_value=3,
             max_value=20,
-            value=10,
+            value=8,
             step=1,
             disabled=not apply_ownership_guardrails,
         )
@@ -4231,7 +4231,7 @@ with tab_lineups:
             "Guardrail Surge Score >= ",
             min_value=40,
             max_value=95,
-            value=72,
+            value=78,
             step=1,
             disabled=not apply_ownership_guardrails,
         )
@@ -4241,7 +4241,7 @@ with tab_lineups:
             "Guardrail Ownership Cap %",
             min_value=12,
             max_value=35,
-            value=24,
+            value=22,
             step=1,
             disabled=not apply_ownership_guardrails,
         )
@@ -4252,7 +4252,7 @@ with tab_lineups:
             "Low-Own Bucket Exposure %",
             min_value=0,
             max_value=80,
-            value=30,
+            value=24,
             step=1,
             help="Portion of lineups that must include at least one low-owned upside candidate.",
         )
@@ -4272,7 +4272,7 @@ with tab_lineups:
             "Low-Own Max Projected Own %",
             min_value=3,
             max_value=20,
-            value=10,
+            value=14,
             step=1,
             disabled=low_own_bucket_exposure_pct <= 0.0,
         )
@@ -4282,7 +4282,7 @@ with tab_lineups:
             "Low-Own Min Projection",
             min_value=10,
             max_value=40,
-            value=24,
+            value=20,
             step=1,
             disabled=low_own_bucket_exposure_pct <= 0.0,
         )
