@@ -3934,7 +3934,7 @@ with tab_lineups:
             "Recent Points Weight %",
             min_value=0,
             max_value=100,
-            value=int(st.session_state.get("slate_vegas_recent_points_weight_pct", 35)),
+            value=int(st.session_state.get("slate_vegas_recent_points_weight_pct", 30)),
             step=1,
             help=(
                 "Blends season points with recent-form points before DK scoring. "
@@ -3945,7 +3945,7 @@ with tab_lineups:
     recent_points_weight = recent_points_weight_pct / 100.0
     c1, c2, c3, c4 = st.columns(4)
     lineup_count = int(c1.slider("Lineups", min_value=1, max_value=150, value=20, step=1))
-    contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=1)
+    contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=2)
     lineup_seed = int(c3.number_input("Random Seed", min_value=1, max_value=999999, value=7, step=1))
     run_mode_label = c4.selectbox(
         "Run Mode",
@@ -3969,7 +3969,7 @@ with tab_lineups:
                 "Cluster v1 (Experimental)",
                 "Standout v1 (Missed-Capture)",
             ],
-            index=0,
+            index=4,
             help=(
                 "Run one lineup model. Use All Versions to save all models in a single run."
             ),
@@ -4058,7 +4058,7 @@ with tab_lineups:
             "Max Salary Left Per Lineup",
             min_value=0,
             max_value=10000,
-            value=500,
+            value=400,
             step=50,
             help="Lineups must use at least 50000 - this value in salary.",
         )
@@ -4068,7 +4068,7 @@ with tab_lineups:
             "Global Max Player Exposure %",
             min_value=0,
             max_value=100,
-            value=60,
+            value=50,
             step=1,
             help="Caps every player's max lineup rate across the run (locks override this cap).",
         )
@@ -4086,7 +4086,7 @@ with tab_lineups:
             "Salary Left Target",
             min_value=0,
             max_value=500,
-            value=250,
+            value=200,
             step=10,
             help="Scoring penalty targets this salary-left value.",
         )
