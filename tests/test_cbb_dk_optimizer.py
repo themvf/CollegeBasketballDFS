@@ -13,6 +13,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     build_dk_upload_csv,
     build_player_pool,
     generate_lineups,
+    lineups_summary_frame,
     normalize_injuries_frame,
     projection_salary_bucket_key,
     remove_injured_players,
@@ -237,6 +238,32 @@ def test_generate_lineups_respects_locks_and_excludes() -> None:
     assert upload_csv.startswith("G,G,G,F,F,F,UTIL,UTIL")
 
 
+def test_lineup_minutes_summary_columns_present() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy()
+    pool["our_minutes_avg"] = 28.0
+    pool["our_minutes_last7"] = 29.0
+    pool["our_minutes_last3"] = 30.0
+    pool["our_minutes_recent"] = 31.0
+
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=3,
+        contest_type="Small GPP",
+        random_seed=13,
+    )
+
+    assert warnings == []
+    assert len(lineups) == 3
+    assert all(abs(float(lineup["expected_minutes_sum"]) - 248.0) < 1e-6 for lineup in lineups)
+    assert all(abs(float(lineup["avg_minutes_last3"]) - 30.0) < 1e-6 for lineup in lineups)
+
+    summary_df = lineups_summary_frame(lineups)
+    assert "Expected Minutes Sum" in summary_df.columns
+    assert "Avg Minutes (Past 3 Games)" in summary_df.columns
+    assert abs(float(pd.to_numeric(summary_df["Expected Minutes Sum"], errors="coerce").iloc[0]) - 248.0) < 1e-6
+    assert abs(float(pd.to_numeric(summary_df["Avg Minutes (Past 3 Games)"], errors="coerce").iloc[0]) - 30.0) < 1e-6
+
+
 def test_generate_lineups_respects_max_salary_left() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     lineups, warnings = generate_lineups(
@@ -415,6 +442,7 @@ def test_build_player_pool_recent_form_window_and_points_blend() -> None:
     g1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
     assert abs(float(g1["our_minutes_last7"]) - 28.0) < 1e-6
     assert abs(float(g1["our_minutes_recent"]) - 32.0) < 1e-6
+    assert abs(float(g1["our_minutes_last3"]) - 32.0) < 1e-6
     assert abs(float(g1["our_points_recent"]) - 30.0) < 1e-6
     # our_points_avg=20.0 blended 50/50 with recent=30.0
     assert abs(float(g1["our_points_proj"]) - 25.0) < 1e-6

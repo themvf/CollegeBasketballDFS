@@ -56,6 +56,38 @@ def _safe_num(value: Any, default: float = 0.0) -> float:
     return float(num)
 
 
+def _player_expected_minutes(player: dict[str, Any]) -> float:
+    return max(
+        0.0,
+        _safe_num(
+            player.get("our_minutes_recent"),
+            _safe_num(
+                player.get("our_minutes_last7"),
+                _safe_num(player.get("our_minutes_last3"), _safe_num(player.get("our_minutes_avg"), 0.0)),
+            ),
+        ),
+    )
+
+
+def _lineup_minutes_metrics(players: list[dict[str, Any]]) -> tuple[float, float]:
+    if not players:
+        return 0.0, 0.0
+
+    expected_minutes_values: list[float] = []
+    last3_minutes_values: list[float] = []
+    for player in players:
+        expected_minutes = _player_expected_minutes(player)
+        last3_minutes = max(0.0, _safe_num(player.get("our_minutes_last3"), expected_minutes))
+        expected_minutes_values.append(expected_minutes)
+        last3_minutes_values.append(last3_minutes)
+
+    expected_minutes_sum = float(sum(expected_minutes_values))
+    avg_minutes_last3 = 0.0 if not last3_minutes_values else (
+        float(sum(last3_minutes_values)) / float(len(last3_minutes_values))
+    )
+    return round(expected_minutes_sum, 2), round(avg_minutes_last3, 2)
+
+
 def _position_base(value: Any) -> str:
     raw = str(value or "").strip().upper()
     if not raw:
@@ -513,6 +545,20 @@ def build_player_pool(
             window=7,
             suffix="last7_name",
         )
+        recent_last3_team = _recent_rollup(
+            s,
+            group_cols=["_name_norm", "_team_norm"],
+            sort_cols=["_name_norm", "_team_norm", "game_date"],
+            window=3,
+            suffix="last3_team",
+        )
+        recent_last3_name = _recent_rollup(
+            s,
+            group_cols=["_name_norm"],
+            sort_cols=["_name_norm", "game_date"],
+            window=3,
+            suffix="last3_name",
+        )
         recent_dynamic_team = _recent_rollup(
             s,
             group_cols=["_name_norm", "_team_norm"],
@@ -532,6 +578,8 @@ def build_player_pool(
         out = out.merge(agg_name, on=["_name_norm"], how="left")
         out = out.merge(recent_last7_team, on=["_name_norm", "_team_norm"], how="left")
         out = out.merge(recent_last7_name, on=["_name_norm"], how="left")
+        out = out.merge(recent_last3_team, on=["_name_norm", "_team_norm"], how="left")
+        out = out.merge(recent_last3_name, on=["_name_norm"], how="left")
         out = out.merge(recent_dynamic_team, on=["_name_norm", "_team_norm"], how="left")
         out = out.merge(recent_dynamic_name, on=["_name_norm"], how="left")
 
@@ -570,6 +618,23 @@ def build_player_pool(
         out["our_minutes_recent"] = out["our_minutes_recent"].where(
             out["our_minutes_recent"].notna(),
             pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"),
+        )
+        out["our_minutes_last3"] = pd.to_numeric(out.get("our_minutes_last3_team"), errors="coerce")
+        out["our_minutes_last3"] = out["our_minutes_last3"].where(
+            out["our_minutes_last3"].notna(),
+            pd.to_numeric(out.get("our_minutes_last3_name"), errors="coerce"),
+        )
+        out["our_minutes_last3"] = out["our_minutes_last3"].where(
+            out["our_minutes_last3"].notna(),
+            pd.to_numeric(out.get("our_minutes_recent"), errors="coerce"),
+        )
+        out["our_minutes_last3"] = out["our_minutes_last3"].where(
+            out["our_minutes_last3"].notna(),
+            pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"),
+        )
+        out["our_minutes_last3"] = out["our_minutes_last3"].where(
+            out["our_minutes_last3"].notna(),
+            pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"),
         )
         out["our_points_recent"] = pd.to_numeric(out.get("our_points_recent_team"), errors="coerce")
         out["our_points_recent"] = out["our_points_recent"].where(
@@ -613,6 +678,7 @@ def build_player_pool(
             "our_fta_avg",
             "our_dk_fpts_avg",
             "our_minutes_last7",
+            "our_minutes_last3",
             "our_minutes_recent",
             "our_points_recent",
             "our_dk_fpts_recent",
@@ -957,10 +1023,16 @@ def build_player_pool(
         "our_dk_fpts_recent_name",
         "our_minutes_last7_team",
         "our_minutes_last7_name",
+        "our_minutes_last3_team",
+        "our_minutes_last3_name",
         "our_points_last7_team",
         "our_points_last7_name",
+        "our_points_last3_team",
+        "our_points_last3_name",
         "our_dk_fpts_last7_team",
         "our_dk_fpts_last7_name",
+        "our_dk_fpts_last3_team",
+        "our_dk_fpts_last3_name",
     ]
     existing_drop = [c for c in drop_cols if c in out.columns]
     return out.drop(columns=existing_drop)
@@ -1971,6 +2043,10 @@ def generate_lineups(
         "objective_score",
         "projected_dk_points",
         "projected_ownership",
+        "our_minutes_avg",
+        "our_minutes_last7",
+        "our_minutes_last3",
+        "our_minutes_recent",
         "game_tail_event_id",
         "game_tail_match_score",
         "game_p_plus_8",
@@ -2209,6 +2285,7 @@ def generate_lineups(
         lineup_salary = int(sum(int(p["Salary"]) for p in best_lineup))
         lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
         lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
+        expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
         pair_id = ((lineup_idx // 2) + 1) if spike_mode else None
         pair_role = ("A" if (lineup_idx % 2 == 0) else "B") if spike_mode else None
 
@@ -2221,6 +2298,8 @@ def generate_lineups(
                 "salary_left": SALARY_CAP - lineup_salary,
                 "projected_points": round(lineup_proj, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
+                "expected_minutes_sum": expected_minutes_sum,
+                "avg_minutes_last3": avg_minutes_last3,
                 "lineup_strategy": "spike" if spike_mode else "standard",
                 "model_profile": model_profile_value,
                 "pair_id": pair_id,
@@ -2538,6 +2617,7 @@ def _generate_lineups_cluster_mode(
             lineup_salary = int(sum(int(p["Salary"]) for p in best_lineup))
             lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
             lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
+            expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
             lineup_number = len(lineups) + 1
             if seed_lineup_id is None:
                 seed_lineup_id = lineup_number
@@ -2554,6 +2634,8 @@ def _generate_lineups_cluster_mode(
                 "salary_left": SALARY_CAP - lineup_salary,
                 "projected_points": round(lineup_proj, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
+                "expected_minutes_sum": expected_minutes_sum,
+                "avg_minutes_last3": avg_minutes_last3,
                 "lineup_strategy": "cluster",
                 "model_profile": str(model_profile or "legacy_baseline"),
                 "pair_id": None,
@@ -2594,11 +2676,20 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for lineup in lineups:
         players = lineup["players"]
+        expected_minutes_sum_calc, avg_minutes_last3_calc = _lineup_minutes_metrics(players)
+        expected_minutes_sum_value = _safe_float(lineup.get("expected_minutes_sum"))
+        avg_minutes_last3_value = _safe_float(lineup.get("avg_minutes_last3"))
+        if expected_minutes_sum_value is None or math.isnan(expected_minutes_sum_value):
+            expected_minutes_sum_value = expected_minutes_sum_calc
+        if avg_minutes_last3_value is None or math.isnan(avg_minutes_last3_value):
+            avg_minutes_last3_value = avg_minutes_last3_calc
         row = {
             "Lineup": lineup["lineup_number"],
             "Salary": lineup["salary"],
             "Projected Points": lineup["projected_points"],
             "Projected Ownership Sum": lineup["projected_ownership_sum"],
+            "Expected Minutes Sum": round(float(expected_minutes_sum_value), 2),
+            "Avg Minutes (Past 3 Games)": round(float(avg_minutes_last3_value), 2),
             "Players": " | ".join(str(p.get("Name + ID") or p.get("Name")) for p in players),
         }
         if lineup.get("pair_id") is not None and lineup.get("pair_role"):
@@ -2629,11 +2720,20 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
         slots = _assign_dk_slots(lineup["players"])
         if slots is None:
             continue
+        expected_minutes_sum_calc, avg_minutes_last3_calc = _lineup_minutes_metrics(lineup["players"])
+        expected_minutes_sum_value = _safe_float(lineup.get("expected_minutes_sum"))
+        avg_minutes_last3_value = _safe_float(lineup.get("avg_minutes_last3"))
+        if expected_minutes_sum_value is None or math.isnan(expected_minutes_sum_value):
+            expected_minutes_sum_value = expected_minutes_sum_calc
+        if avg_minutes_last3_value is None or math.isnan(avg_minutes_last3_value):
+            avg_minutes_last3_value = avg_minutes_last3_calc
         row = {
             "Lineup": lineup["lineup_number"],
             "Salary": lineup["salary"],
             "Projected Points": lineup["projected_points"],
             "Projected Ownership Sum": lineup["projected_ownership_sum"],
+            "Expected Minutes Sum": round(float(expected_minutes_sum_value), 2),
+            "Avg Minutes (Past 3 Games)": round(float(avg_minutes_last3_value), 2),
             "G1": slots[0].get("Name + ID") or slots[0].get("Name"),
             "G2": slots[1].get("Name + ID") or slots[1].get("Name"),
             "G3": slots[2].get("Name + ID") or slots[2].get("Name"),
