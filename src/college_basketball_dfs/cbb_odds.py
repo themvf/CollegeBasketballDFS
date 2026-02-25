@@ -5,6 +5,7 @@ import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Mapping
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import requests
 
@@ -13,10 +14,27 @@ class OddsApiError(RuntimeError):
     """Raised for The Odds API failures."""
 
 
+try:
+    # Slate date semantics are ET-local in DK workflow; convert ET bounds to UTC for API filters.
+    _SLATE_LOCAL_TZ = ZoneInfo("America/New_York")
+except ZoneInfoNotFoundError:
+    _SLATE_LOCAL_TZ = timezone.utc
+
+
 def _day_window_utc(game_date: date) -> tuple[str, str]:
-    start = datetime(game_date.year, game_date.month, game_date.day, tzinfo=timezone.utc)
-    end = start + timedelta(days=1)
-    return start.isoformat().replace("+00:00", "Z"), end.isoformat().replace("+00:00", "Z")
+    start_local = datetime(game_date.year, game_date.month, game_date.day, tzinfo=_SLATE_LOCAL_TZ)
+    end_local = start_local + timedelta(days=1)
+    start_utc = start_local.astimezone(timezone.utc)
+    end_utc = end_local.astimezone(timezone.utc)
+    return start_utc.isoformat().replace("+00:00", "Z"), end_utc.isoformat().replace("+00:00", "Z")
+
+
+def _historical_snapshot_default(game_date: date) -> str:
+    # Use end-of-local-day (ET) snapshot, expressed in UTC.
+    _, end_utc_iso = _day_window_utc(game_date)
+    end_utc = datetime.fromisoformat(end_utc_iso.replace("Z", "+00:00"))
+    snapshot = end_utc - timedelta(seconds=1)
+    return snapshot.replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
 def _to_float(value: Any) -> float | None:
@@ -162,7 +180,7 @@ class OddsApiClient:
             common_params["bookmakers"] = bookmakers
 
         if historical:
-            snapshot_time = historical_snapshot_time or f"{game_date.isoformat()}T23:59:59Z"
+            snapshot_time = historical_snapshot_time or _historical_snapshot_default(game_date)
             payload = self.get(
                 path=f"/historical/sports/{sport_key}/odds",
                 params={
