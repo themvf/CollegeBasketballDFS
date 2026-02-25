@@ -135,7 +135,11 @@ def _safe_corr(series_x: pd.Series, series_y: pd.Series, method: str) -> float |
     valid = pd.DataFrame({"x": series_x, "y": series_y}).dropna()
     if len(valid) < 2:
         return None
-    value = valid["x"].corr(valid["y"], method=method)
+    if str(method).strip().lower() == "spearman":
+        # Avoid pandas' scipy dependency for spearman by ranking then using pearson.
+        value = valid["x"].rank(method="average").corr(valid["y"].rank(method="average"))
+    else:
+        value = valid["x"].corr(valid["y"])
     if pd.isna(value):
         return None
     return float(value)
