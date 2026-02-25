@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import sys
 from datetime import date
@@ -85,6 +86,106 @@ def load_vegas_review_dataset(
     return games_df, meta
 
 
+@st.cache_data(ttl=900, show_spinner=False)
+def load_projection_player_totals_dataset(
+    bucket_name: str,
+    start_date: date,
+    end_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+
+    frames: list[pd.DataFrame] = []
+    dates = iter_dates(start_date, end_date)
+    projection_days = 0
+
+    for d in dates:
+        csv_text = store.read_projections_csv(d)
+        if not csv_text or not csv_text.strip():
+            continue
+        try:
+            df = pd.read_csv(io.StringIO(csv_text))
+        except Exception:
+            continue
+        if df.empty:
+            continue
+        projection_days += 1
+        df = df.copy()
+        df["review_date"] = d.isoformat()
+        frames.append(df)
+
+    if not frames:
+        return pd.DataFrame(), {"projection_days_found": 0, "projection_rows": 0}
+
+    out = pd.concat(frames, ignore_index=True)
+    return out, {
+        "projection_days_found": int(projection_days),
+        "projection_rows": int(len(out)),
+    }
+
+
+def _safe_corr(series_x: pd.Series, series_y: pd.Series, method: str) -> float | None:
+    valid = pd.DataFrame({"x": series_x, "y": series_y}).dropna()
+    if len(valid) < 2:
+        return None
+    value = valid["x"].corr(valid["y"], method=method)
+    if pd.isna(value):
+        return None
+    return float(value)
+
+
+def build_game_total_player_total_correlation_frame(player_df: pd.DataFrame) -> pd.DataFrame:
+    columns = ["metric", "x_col", "y_col", "samples", "pearson", "spearman"]
+    if player_df is None or player_df.empty:
+        return pd.DataFrame(columns=columns)
+
+    work = player_df.copy()
+    specs = [
+        ("game_total_line", "vegas_points_line", "game_total_line_vs_vegas_points_line"),
+        ("game_total_line", "blend_points_proj", "game_total_line_vs_blend_points_proj"),
+        ("game_total_line", "our_points_proj", "game_total_line_vs_our_points_proj"),
+        ("game_total_line", "vegas_dk_projection", "game_total_line_vs_vegas_dk_projection"),
+        ("game_total_line", "blended_projection", "game_total_line_vs_blended_projection"),
+    ]
+
+    rows: list[dict[str, Any]] = []
+    for x_col, y_col, metric in specs:
+        if x_col not in work.columns or y_col not in work.columns:
+            rows.append(
+                {
+                    "metric": metric,
+                    "x_col": x_col,
+                    "y_col": y_col,
+                    "samples": 0,
+                    "pearson": None,
+                    "spearman": None,
+                }
+            )
+            continue
+        x = pd.to_numeric(work[x_col], errors="coerce")
+        y = pd.to_numeric(work[y_col], errors="coerce")
+        valid = pd.DataFrame({"x": x, "y": y}).dropna()
+        rows.append(
+            {
+                "metric": metric,
+                "x_col": x_col,
+                "y_col": y_col,
+                "samples": int(len(valid)),
+                "pearson": _safe_corr(x, y, method="pearson"),
+                "spearman": _safe_corr(x, y, method="spearman"),
+            }
+        )
+
+    return pd.DataFrame(rows, columns=columns)
+
+
 st.set_page_config(page_title="Vegas Review", layout="wide")
 st.title("Vegas Review")
 st.caption(
@@ -132,6 +233,14 @@ with st.spinner("Loading game and odds history from GCS..."):
         service_account_json=cred_json,
         service_account_json_b64=cred_json_b64,
     )
+    player_totals_df, player_totals_meta = load_projection_player_totals_dataset(
+        bucket_name=bucket_name.strip(),
+        start_date=start_date,
+        end_date=end_date,
+        gcp_project=gcp_project.strip() or None,
+        service_account_json=cred_json,
+        service_account_json_b64=cred_json_b64,
+    )
 
 if games_df.empty:
     st.warning("No merged game-level results found for the selected range.")
@@ -142,11 +251,13 @@ summary = summarize_vegas_accuracy(games_df)
 model_df = build_calibration_models_frame(games_df)
 total_bucket_df = build_total_buckets_frame(games_df)
 spread_bucket_df = build_spread_buckets_frame(games_df)
+player_total_corr_df = build_game_total_player_total_correlation_frame(player_totals_df)
 
-meta_col1, meta_col2, meta_col3 = st.columns(3)
+meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
 meta_col1.metric("Dates Scanned", int(meta["dates_scanned"]))
 meta_col2.metric("Raw Days Found", int(meta["raw_days_found"]))
 meta_col3.metric("Odds Days Found", int(meta["odds_days_found"]))
+meta_col4.metric("Projection Days Found", int(player_totals_meta.get("projection_days_found") or 0))
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Games (Final)", int(summary["total_games"]))
@@ -182,6 +293,36 @@ st.dataframe(total_bucket_df, hide_index=True, use_container_width=True)
 
 st.subheader("Spreads by Vegas Bucket")
 st.dataframe(spread_bucket_df, hide_index=True, use_container_width=True)
+
+st.subheader("Game Total -> Player Total Correlation")
+st.caption(
+    "Correlation between game total lines and player-level totals from saved `Slate + Vegas` snapshots "
+    "(higher positive values mean high-total games are associated with higher player totals)."
+)
+if player_total_corr_df.empty:
+    st.info("No projection snapshots found in this range, so player-total correlations are unavailable.")
+else:
+    primary = player_total_corr_df.loc[
+        player_total_corr_df["metric"] == "game_total_line_vs_vegas_points_line"
+    ]
+    primary_samples = int(primary["samples"].iloc[0]) if not primary.empty else 0
+    primary_spearman = (
+        float(primary["spearman"].iloc[0]) if (not primary.empty and pd.notna(primary["spearman"].iloc[0])) else None
+    )
+    primary_pearson = (
+        float(primary["pearson"].iloc[0]) if (not primary.empty and pd.notna(primary["pearson"].iloc[0])) else None
+    )
+    pc1, pc2, pc3 = st.columns(3)
+    pc1.metric("Samples (Points Line)", primary_samples)
+    pc2.metric(
+        "Spearman (Points Line)",
+        f"{primary_spearman:.3f}" if primary_spearman is not None else "n/a",
+    )
+    pc3.metric(
+        "Pearson (Points Line)",
+        f"{primary_pearson:.3f}" if primary_pearson is not None else "n/a",
+    )
+    st.dataframe(player_total_corr_df, hide_index=True, use_container_width=True)
 
 st.subheader("Game-Level Vegas Review")
 show_cols = [
