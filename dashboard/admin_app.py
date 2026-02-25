@@ -32,6 +32,7 @@ from college_basketball_dfs.cbb_team_lookup import rows_from_payloads
 from college_basketball_dfs.cbb_dk_optimizer import (
     build_dk_upload_csv,
     build_player_pool,
+    enrich_lineups_minutes_from_pool,
     generate_lineups,
     lineups_slots_frame,
     lineups_summary_frame,
@@ -4940,6 +4941,9 @@ with tab_lineups:
                     st.session_state["cbb_active_version_key"] = active_version_key
                     active_version = generated_versions.get(active_version_key) or {}
                     generated = active_version.get("lineups") or []
+                    generated = enrich_lineups_minutes_from_pool(generated, pool_sorted)
+                    active_version["lineups"] = generated
+                    generated_versions[active_version_key] = active_version
                     warnings = [str(x) for x in (active_version.get("warnings") or [])]
                     upload_csv = str(active_version.get("upload_csv") or "")
                     st.session_state["cbb_generated_lineups"] = generated

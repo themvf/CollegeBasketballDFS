@@ -2714,6 +2714,62 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
+def enrich_lineups_minutes_from_pool(
+    lineups: list[dict[str, Any]],
+    pool_df: pd.DataFrame | None,
+) -> list[dict[str, Any]]:
+    if not lineups:
+        return []
+
+    minute_cols = ["our_minutes_recent", "our_minutes_last7", "our_minutes_last3", "our_minutes_avg"]
+    minutes_by_id: dict[str, dict[str, float]] = {}
+    if isinstance(pool_df, pd.DataFrame) and (not pool_df.empty) and ("ID" in pool_df.columns):
+        pool_work = pool_df.copy()
+        pool_work["ID"] = pool_work["ID"].astype(str).str.strip()
+        for col in minute_cols:
+            if col not in pool_work.columns:
+                pool_work[col] = pd.NA
+            pool_work[col] = pd.to_numeric(pool_work[col], errors="coerce")
+        pool_work = pool_work.drop_duplicates(subset=["ID"], keep="first")
+        for row in pool_work.loc[:, ["ID"] + minute_cols].to_dict(orient="records"):
+            pid = str(row.get("ID") or "").strip()
+            if not pid:
+                continue
+            row_minutes: dict[str, float] = {}
+            for col in minute_cols:
+                val = _safe_float(row.get(col))
+                if val is None or math.isnan(val):
+                    continue
+                row_minutes[col] = float(val)
+            if row_minutes:
+                minutes_by_id[pid] = row_minutes
+
+    out: list[dict[str, Any]] = []
+    for lineup in lineups:
+        lineup_copy = dict(lineup)
+        players_in = lineup.get("players") or []
+        players_out: list[dict[str, Any]] = []
+        for player in players_in:
+            p = dict(player)
+            player_id = str(p.get("ID") or "").strip()
+            mapped = minutes_by_id.get(player_id) or {}
+            for col in minute_cols:
+                current_val = _safe_float(p.get(col))
+                if current_val is None or math.isnan(current_val):
+                    mapped_val = _safe_float(mapped.get(col))
+                    if mapped_val is not None and not math.isnan(mapped_val):
+                        p[col] = float(mapped_val)
+            players_out.append(p)
+
+        expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(players_out)
+        lineup_copy["players"] = players_out
+        lineup_copy["expected_minutes_sum"] = expected_minutes_sum
+        lineup_copy["avg_minutes_last3"] = avg_minutes_last3
+        out.append(lineup_copy)
+
+    return out
+
+
 def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
     for lineup in lineups:

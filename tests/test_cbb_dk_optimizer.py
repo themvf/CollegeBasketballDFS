@@ -12,6 +12,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     apply_contest_objective,
     build_dk_upload_csv,
     build_player_pool,
+    enrich_lineups_minutes_from_pool,
     generate_lineups,
     lineups_summary_frame,
     normalize_injuries_frame,
@@ -262,6 +263,35 @@ def test_lineup_minutes_summary_columns_present() -> None:
     assert "Avg Minutes (Past 3 Games)" in summary_df.columns
     assert abs(float(pd.to_numeric(summary_df["Expected Minutes Sum"], errors="coerce").iloc[0]) - 248.0) < 1e-6
     assert abs(float(pd.to_numeric(summary_df["Avg Minutes (Past 3 Games)"], errors="coerce").iloc[0]) - 30.0) < 1e-6
+
+
+def test_enrich_lineups_minutes_from_pool_backfills_legacy_lineups() -> None:
+    legacy_lineups = [
+        {
+            "lineup_number": 1,
+            "players": [
+                {"ID": "1001", "Name": "Guard 1"},
+                {"ID": "1002", "Name": "Guard 2"},
+            ],
+            "salary": 12000,
+            "projected_points": 40.0,
+            "projected_ownership_sum": 20.0,
+        }
+    ]
+    pool_df = pd.DataFrame(
+        [
+            {"ID": "1001", "our_minutes_recent": 31.0, "our_minutes_last7": 30.0, "our_minutes_last3": 32.0, "our_minutes_avg": 29.0},
+            {"ID": "1002", "our_minutes_recent": 29.0, "our_minutes_last7": 28.0, "our_minutes_last3": 27.0, "our_minutes_avg": 26.0},
+        ]
+    )
+
+    enriched = enrich_lineups_minutes_from_pool(legacy_lineups, pool_df)
+    assert len(enriched) == 1
+    lineup = enriched[0]
+    assert abs(float(lineup["expected_minutes_sum"]) - 60.0) < 1e-6
+    assert abs(float(lineup["avg_minutes_last3"]) - 29.5) < 1e-6
+    assert abs(float(enriched[0]["players"][0]["our_minutes_recent"]) - 31.0) < 1e-6
+    assert abs(float(enriched[0]["players"][1]["our_minutes_last3"]) - 27.0) < 1e-6
 
 
 def test_generate_lineups_respects_max_salary_left() -> None:
