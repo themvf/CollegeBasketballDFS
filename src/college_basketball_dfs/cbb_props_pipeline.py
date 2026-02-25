@@ -11,7 +11,7 @@ from typing import Any
 
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_ncaa import parse_iso_date, prior_day
-from college_basketball_dfs.cbb_odds import OddsApiClient, flatten_player_props_payload
+from college_basketball_dfs.cbb_odds import OddsApiClient, flatten_odds_payload, flatten_player_props_payload
 from college_basketball_dfs.cbb_transform import rows_to_csv_text
 
 
@@ -154,6 +154,8 @@ def run_cbb_props_pipeline(
 
     payload: dict[str, Any] | None = None
     props_cache_hit = False
+    odds_seed_cache_written = False
+    odds_seed_rows = 0
 
     if not force_refresh:
         payload = store.read_props_json(game_date)
@@ -168,18 +170,45 @@ def run_cbb_props_pipeline(
         try:
             cached_game_odds = store.read_odds_json(game_date)
             events_seed: list[dict[str, Any]] = []
+            cached_odds_has_totals = False
             if cached_game_odds and isinstance(cached_game_odds.get("events"), list):
                 events_seed = [x for x in cached_game_odds["events"] if isinstance(x, dict)]
-            else:
+                cached_rows = flatten_odds_payload(cached_game_odds)
+                cached_odds_has_totals = any(
+                    (
+                        row.get("total_points") is not None
+                        or row.get("spread_home") is not None
+                        or row.get("spread_away") is not None
+                    )
+                    for row in cached_rows
+                )
+
+            if not events_seed or not cached_odds_has_totals:
                 events_seed = client.fetch_game_odds(
                     game_date=game_date,
                     sport_key=sport_key,
                     regions=regions,
-                    markets="h2h",
+                    markets="h2h,spreads,totals",
                     bookmakers=bookmakers,
                     historical=historical_mode,
                     historical_snapshot_time=historical_snapshot_time,
                 )
+                odds_seed_payload = {
+                    "game_date": game_date.isoformat(),
+                    "sport_key": sport_key,
+                    "regions": regions,
+                    "markets": "h2h,spreads,totals",
+                    "bookmakers": bookmakers,
+                    "historical_mode": historical_mode,
+                    "historical_snapshot_time": historical_snapshot_time,
+                    "events": events_seed,
+                }
+                store.write_odds_json(game_date, odds_seed_payload)
+                odds_seed_rows_data = flatten_odds_payload(odds_seed_payload)
+                odds_seed_csv = rows_to_csv_text(odds_seed_rows_data)
+                store.write_odds_games_csv(game_date, odds_seed_csv)
+                odds_seed_cache_written = True
+                odds_seed_rows = int(len(odds_seed_rows_data))
 
             event_summaries = _extract_event_summaries(events_seed)
             event_payloads: list[dict[str, Any]] = []
@@ -245,6 +274,8 @@ def run_cbb_props_pipeline(
     return {
         "game_date": game_date.isoformat(),
         "props_cache_hit": props_cache_hit,
+        "odds_seed_cache_written": bool(odds_seed_cache_written),
+        "odds_seed_rows": int(odds_seed_rows),
         "historical_mode": historical_mode,
         "markets": markets,
         "bookmakers": bookmakers,

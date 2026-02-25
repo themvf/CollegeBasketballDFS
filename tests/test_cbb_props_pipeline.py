@@ -45,6 +45,8 @@ class FakeStore:
         self.cached_odds = cached_odds
         self.props_writes = []
         self.props_csv_writes = []
+        self.odds_writes = []
+        self.odds_games_writes = []
 
     def props_blob_name(self, game_date: date) -> str:
         return f"cbb/props/{game_date.isoformat()}.json"
@@ -65,6 +67,21 @@ class FakeStore:
     def write_props_lines_csv(self, game_date: date, csv_text: str) -> str:
         self.props_csv_writes.append((game_date, csv_text))
         return self.props_lines_blob_name(game_date)
+
+    def odds_blob_name(self, game_date: date) -> str:
+        return f"cbb/odds/{game_date.isoformat()}.json"
+
+    def odds_games_blob_name(self, game_date: date) -> str:
+        return f"cbb/odds_games/{game_date.isoformat()}_odds.csv"
+
+    def write_odds_json(self, game_date: date, payload: dict) -> str:
+        self.odds_writes.append((game_date, payload))
+        self.cached_odds = payload
+        return self.odds_blob_name(game_date)
+
+    def write_odds_games_csv(self, game_date: date, csv_text: str) -> str:
+        self.odds_games_writes.append((game_date, csv_text))
+        return self.odds_games_blob_name(game_date)
 
 
 def test_flatten_player_props_payload() -> None:
@@ -126,6 +143,10 @@ def test_props_pipeline_fetches_when_cache_missing(monkeypatch) -> None:
     assert summary["prop_rows"] == 1
     assert len(store.props_writes) == 1
     assert len(store.props_csv_writes) == 1
+    assert len(store.odds_writes) == 1
+    assert len(store.odds_games_writes) == 1
+    assert summary["odds_seed_cache_written"] is True
+    assert summary["odds_seed_rows"] >= 0
 
 
 def test_props_pipeline_historical_uses_pregame_snapshot(monkeypatch) -> None:
@@ -169,6 +190,8 @@ def test_props_pipeline_returns_diagnostics_fields() -> None:
     assert "total_bookmakers" in summary
     assert "total_requested_markets" in summary
     assert "total_outcomes" in summary
+    assert "odds_seed_cache_written" in summary
+    assert "odds_seed_rows" in summary
 
 
 def test_props_pipeline_applies_inter_event_sleep(monkeypatch) -> None:
