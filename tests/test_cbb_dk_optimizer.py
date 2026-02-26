@@ -16,6 +16,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     generate_lineups,
     lineups_summary_frame,
     normalize_injuries_frame,
+    ownership_salary_bucket_key,
     projection_salary_bucket_key,
     remove_injured_players,
 )
@@ -204,7 +205,7 @@ def test_build_player_pool_ownership_v2_has_slate_controls() -> None:
     assert "ownership_model" in pool.columns
     assert "ownership_temperature" in pool.columns
     assert "ownership_target_total" in pool.columns
-    assert set(pool["ownership_model"].astype(str).unique().tolist()) == {"v2_softmax"}
+    assert set(pool["ownership_model"].astype(str).unique().tolist()) == {"v3_tiered_softmax"}
     own = pd.to_numeric(pool["projected_ownership"], errors="coerce")
     assert own.notna().all()
     assert (own >= 0).all()
@@ -752,6 +753,67 @@ def test_apply_model_profile_adjustments_standout_capture_boosts_focus_candidate
     adjusted = apply_model_profile_adjustments(scored, model_profile="standout_capture_v1")
     assert "model_profile_bonus" in adjusted.columns
     assert "model_profile_focus_flag" in adjusted.columns
+    assert float(adjusted.loc[0, "model_profile_bonus"]) > 0.0
+    assert bool(adjusted.loc[0, "model_profile_focus_flag"]) is True
+    assert float(adjusted.loc[0, "objective_score"]) > float(scored.loc[0, "objective_score"])
+
+
+def test_apply_model_profile_adjustments_chalk_value_capture_boosts_value_chalk() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    scored = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
+    scored["projected_ownership"] = 14.0
+    scored["ownership_chalk_surge_score"] = 55.0
+    scored["team_stack_popularity_score"] = 52.0
+    scored["ownership_value_tier_z"] = 0.0
+    scored["projection_uncertainty_score"] = 0.12
+    scored["dnp_risk_score"] = 0.12
+    scored["our_minutes_recent"] = pd.to_numeric(scored.get("our_minutes_last7"), errors="coerce").fillna(24.0)
+    scored["value_per_1k"] = pd.to_numeric(scored.get("value_per_1k"), errors="coerce").fillna(4.0)
+    scored["ownership_salary_bucket"] = scored["Salary"].map(ownership_salary_bucket_key)
+
+    scored.loc[0, "Salary"] = 5000
+    scored.loc[0, "ownership_salary_bucket"] = "lt5500"
+    scored.loc[0, "projected_ownership"] = 21.0
+    scored.loc[0, "ownership_chalk_surge_score"] = 92.0
+    scored.loc[0, "team_stack_popularity_score"] = 91.0
+    scored.loc[0, "ownership_value_tier_z"] = 2.8
+    scored.loc[0, "value_per_1k"] = 6.9
+    scored.loc[0, "projection_uncertainty_score"] = 0.05
+    scored.loc[0, "dnp_risk_score"] = 0.05
+    scored.loc[0, "our_minutes_recent"] = float(scored.loc[0, "our_minutes_recent"]) + 5.0
+
+    adjusted = apply_model_profile_adjustments(scored, model_profile="chalk_value_capture_v1")
+    assert float(adjusted.loc[0, "model_profile_bonus"]) > 0.0
+    assert bool(adjusted.loc[0, "model_profile_focus_flag"]) is True
+    assert float(adjusted.loc[0, "objective_score"]) > float(scored.loc[0, "objective_score"])
+
+
+def test_apply_model_profile_adjustments_salary_efficiency_ceiling_boosts_ceiling_candidates() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    scored = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
+    scored["projected_ownership"] = 16.0
+    scored["game_tail_score"] = 45.0
+    scored["ownership_value_tier_z"] = 0.0
+    scored["minutes_shock_boost_pct"] = 2.0
+    scored["projection_uncertainty_score"] = 0.12
+    scored["dnp_risk_score"] = 0.12
+    scored["our_minutes_avg"] = pd.to_numeric(scored.get("our_minutes_avg"), errors="coerce").fillna(24.0)
+    scored["our_minutes_recent"] = pd.to_numeric(scored.get("our_minutes_recent"), errors="coerce")
+    scored["our_minutes_recent"] = scored["our_minutes_recent"].where(scored["our_minutes_recent"].notna(), scored["our_minutes_avg"])
+    scored["value_per_1k"] = pd.to_numeric(scored.get("value_per_1k"), errors="coerce").fillna(4.0)
+
+    scored.loc[0, "Salary"] = 6700
+    scored.loc[0, "projected_ownership"] = 11.0
+    scored.loc[0, "game_tail_score"] = 96.0
+    scored.loc[0, "ownership_value_tier_z"] = 2.4
+    scored.loc[0, "minutes_shock_boost_pct"] = 13.0
+    scored.loc[0, "value_per_1k"] = 6.8
+    scored.loc[0, "projection_uncertainty_score"] = 0.05
+    scored.loc[0, "dnp_risk_score"] = 0.04
+    scored.loc[0, "our_minutes_recent"] = float(scored.loc[0, "our_minutes_avg"]) + 4.0
+    scored.loc[0, "projected_dk_points"] = float(pd.to_numeric(scored["projected_dk_points"], errors="coerce").fillna(0.0).max()) + 8.0
+
+    adjusted = apply_model_profile_adjustments(scored, model_profile="salary_efficiency_ceiling_v1")
     assert float(adjusted.loc[0, "model_profile_bonus"]) > 0.0
     assert bool(adjusted.loc[0, "model_profile_focus_flag"]) is True
     assert float(adjusted.loc[0, "objective_score"]) > float(scored.loc[0, "objective_score"])

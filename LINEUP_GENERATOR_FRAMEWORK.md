@@ -76,10 +76,10 @@ Hard constraints in optimizer:
 | Version Key | Label | Strategy | Tail Signals | Profile |
 |---|---|---|---:|---|
 | `standard_v1` | Standard v1 | `standard` | false | `legacy_baseline` |
-| `spike_v1_legacy` | Spike v1 (Legacy A/B) | `spike` | false | `legacy_spike_pairs` |
 | `spike_v2_tail` | Spike v2 (Tail A/B) | `spike` | true | `tail_spike_pairs` |
-| `cluster_v1_experimental` | Cluster v1 (Experimental) | `cluster` | false | `cluster_seed_mutation_v1` |
 | `standout_v1_capture` | Standout v1 (Missed-Capture) | `standard` | true | `standout_capture_v1` |
+| `chalk_value_capture_v1` | Chalk-Value v1 (Tiered) | `standard` | true | `chalk_value_capture_v1` |
+| `salary_efficiency_ceiling_v1` | Salary-Efficiency v1 (Ceiling) | `standard` | true | `salary_efficiency_ceiling_v1` |
 
 `All Versions` mode includes all five profiles.
 
@@ -153,8 +153,8 @@ These are currently hardcoded in the generation call path:
 - `low_own_bucket_objective_bonus = 1.3`
 - `preferred_game_keys = applied_game_keys from Game Agent bias meta`
 - `preferred_game_bonus = 0.6`
-- `cluster_target_count = 15`
-- `cluster_variants_per_cluster = 10`
+- `cluster_target_count = 15` (legacy cluster profile only)
+- `cluster_variants_per_cluster = 10` (legacy cluster profile only)
 - `salary_left_penalty_divisor = 75.0` (engine default)
 - `max_attempts_per_lineup = 1200` (engine default)
 
@@ -220,21 +220,18 @@ Scoring penalties/bonuses include:
 - lineup B anchored against A with shared-player cap
 - discourages identical game story in pair
 
-### Cluster v1 Experimental
-- builds cluster specs from game-level metrics:
-  - high total
-  - tight spread
-  - tail leverage
-  - contrarian
-  - balanced
-- each cluster has seed + mutation variants:
-  - `same_role_swap`
-  - `bring_back_rotation`
-  - `stack_size_shift`
-  - `chalk_pivot`
-  - `value_risk_swap`
-  - `salary_texture_shift`
-- enforces anchor game presence for relevant cluster scripts
+### Chalk-Value v1 (Tiered)
+- prioritizes low- and mid-salary value plays when surge/team-stack signals imply field chalk concentration
+- uses salary-tier value z-score + stack popularity context to recover underprojected cheap chalk
+- targets ownership miss correction in the common value range
+
+### Salary-Efficiency v1 (Ceiling)
+- prioritizes projection + value-per-dollar + game-tail ceiling context
+- adds profile bonus to mid-salary players with strong per-dollar ceiling and manageable risk
+- positioned as a challenger profile for GPP top-end capture
+
+### Legacy Cluster v1 (Retired from Active Rotation)
+- cluster seed/mutation mode remains in engine for backward compatibility with historical runs
 
 ### 5.4 Generated Lineup Payload Fields
 

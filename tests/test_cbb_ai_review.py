@@ -434,6 +434,83 @@ def test_build_daily_ai_review_packet_splits_true_low_own_vs_ownership_surprise(
     assert bool(surprises[0]["ownership_surprise_smash_flag"]) is True
 
 
+def test_build_daily_ai_review_packet_builds_ownership_miss_tracker() -> None:
+    projection_df = pd.DataFrame(
+        [
+            {
+                "ID": "1",
+                "Name": "Cheap Chalk",
+                "TeamAbbrev": "AAA",
+                "Position": "G",
+                "Salary": 5000,
+                "blended_projection": 24.0,
+                "actual_dk_points": 33.0,
+                "blend_error": 9.0,
+                "our_error": 8.0,
+                "vegas_error": pd.NA,
+                "game_key": "AAA@BBB",
+                "game_total_line": 152.0,
+                "game_spread_line": -3.5,
+            },
+            {
+                "ID": "2",
+                "Name": "Mid Miss",
+                "TeamAbbrev": "BBB",
+                "Position": "F",
+                "Salary": 6400,
+                "blended_projection": 26.0,
+                "actual_dk_points": 24.0,
+                "blend_error": -2.0,
+                "our_error": -1.0,
+                "vegas_error": pd.NA,
+                "game_key": "AAA@BBB",
+                "game_total_line": 152.0,
+                "game_spread_line": -3.5,
+            },
+        ]
+    )
+    exposure_df = pd.DataFrame(
+        [
+            {
+                "Name": "Cheap Chalk",
+                "TeamAbbrev": "AAA",
+                "field_ownership_pct": 34.0,
+                "projected_ownership": 8.0,
+                "actual_ownership_from_file": 22.0,
+                "ownership_diff_vs_proj": 14.0,
+                "final_dk_points": 33.0,
+            },
+            {
+                "Name": "Mid Miss",
+                "TeamAbbrev": "BBB",
+                "field_ownership_pct": 11.0,
+                "projected_ownership": 14.0,
+                "actual_ownership_from_file": 9.0,
+                "ownership_diff_vs_proj": -5.0,
+                "final_dk_points": 24.0,
+            },
+        ]
+    )
+    packet = build_daily_ai_review_packet(
+        review_date="2026-02-18",
+        contest_id="abc123",
+        projection_comparison_df=projection_df,
+        entries_df=_sample_entries(),
+        exposure_df=exposure_df,
+        phantom_summary_df=pd.DataFrame(),
+        phantom_lineups_df=_sample_phantom(),
+        adjustment_factors_df=pd.DataFrame(),
+        focus_limit=10,
+    )
+    tracker = packet.get("ownership_miss_tracker") or []
+    assert len(tracker) == 1
+    row = tracker[0]
+    assert row["Name"] == "Cheap Chalk"
+    assert row["salary_tier"] == "lt5500"
+    assert row["game_environment_bucket"] == "high_total_competitive"
+    assert bool(row["chalk_consensus_flag"]) is True
+
+
 def test_build_ai_review_user_prompt_contains_json_packet() -> None:
     packet = build_daily_ai_review_packet(
         review_date="2026-02-18",
@@ -612,6 +689,8 @@ def test_build_global_ai_review_packet_aggregates_daily_packets() -> None:
     assert global_packet["window_summary"]["slate_count"] == 2
     assert len(global_packet["trend_by_date"]) == 2
     assert len(global_packet["recurring_focus_players"]) > 0
+    ownership_tracker = global_packet.get("ownership_bias_tracker") or {}
+    assert int(ownership_tracker.get("total_flagged_rows") or 0) > 0
 
     prompt = build_global_ai_review_user_prompt(global_packet)
     assert "Global Diagnostic Summary" in prompt

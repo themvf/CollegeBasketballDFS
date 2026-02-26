@@ -47,6 +47,7 @@ OPENAI_REVIEW_MODEL_FALLBACKS = (
     "gpt-4.1",
 )
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
+OWNERSHIP_MISS_TRACKER_THRESHOLD = 8.0
 
 
 class OpenAIReviewError(RuntimeError):
@@ -87,6 +88,35 @@ def _norm_name_loose(value: Any) -> str:
     text = re.sub(r"[^a-z0-9\s]", " ", text)
     tokens = [tok for tok in text.split() if tok and tok not in NAME_SUFFIX_TOKENS]
     return "".join(tokens)
+
+
+def _ownership_salary_tier_label(salary: Any) -> str:
+    sal = _to_float(salary)
+    if sal is None:
+        return "unknown"
+    if sal < 5500.0:
+        return "lt5500"
+    if sal < 7500.0:
+        return "5500_7499"
+    return "gte7500"
+
+
+def _game_environment_bucket(total_line: Any, abs_spread: Any) -> str:
+    total = _to_float(total_line)
+    spread = _to_float(abs_spread)
+    if total is None and spread is None:
+        return "unknown"
+    total_v = float(total) if total is not None else 0.0
+    spread_v = abs(float(spread)) if spread is not None else 0.0
+    if total_v >= 150.0 and spread_v <= 6.0:
+        return "high_total_competitive"
+    if total_v >= 150.0:
+        return "high_total_wide"
+    if total_v < 140.0 and spread_v >= 8.0:
+        return "low_total_wide"
+    if total_v < 140.0:
+        return "low_total"
+    return "neutral"
 
 
 def _to_num_series(df: pd.DataFrame, col: str) -> pd.Series:
@@ -383,12 +413,17 @@ def build_daily_ai_review_packet(
         if best_col.notna().any():
             lineup_best_actual = float(best_col.max())
 
+    vegas_error_clean = pd.to_numeric(vegas_error, errors="coerce")
+    vegas_matched_rows = int(vegas_error_clean.notna().sum())
+    vegas_mae = round(float(vegas_error_clean.abs().mean()), 4) if vegas_matched_rows > 0 else None
+
     projection_quality = {
         "matched_rows": int(actual_points.notna().sum()),
         "blend_mae": round(_safe_mean(blend_error.abs()), 4),
         "blend_rmse": round(_safe_rmse(blend_error), 4),
         "our_mae": round(_safe_mean(our_error.abs()), 4),
-        "vegas_mae": round(_safe_mean(vegas_error.abs()), 4),
+        "vegas_mae": vegas_mae,
+        "vegas_matched_rows": vegas_matched_rows,
         "blended_rank_spearman": _safe_spearman(blended_proj, actual_points),
     }
     ownership_quality = {
@@ -654,6 +689,109 @@ def build_daily_ai_review_packet(
         limit=focus_limit,
     )
 
+    ownership_tracker_df = projection_with_own.copy()
+    for col in [
+        "Name",
+        "TeamAbbrev",
+        "Position",
+        "Salary",
+        "game_key",
+        "game_total_line",
+        "game_spread_line",
+        "field_ownership_pct",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "ownership_diff_vs_proj",
+    ]:
+        if col not in ownership_tracker_df.columns:
+            ownership_tracker_df[col] = pd.NA
+    ownership_tracker_df["Salary"] = pd.to_numeric(ownership_tracker_df["Salary"], errors="coerce")
+    ownership_tracker_df["projected_ownership"] = pd.to_numeric(
+        ownership_tracker_df["projected_ownership"],
+        errors="coerce",
+    )
+    ownership_tracker_df["actual_ownership_from_file"] = pd.to_numeric(
+        ownership_tracker_df["actual_ownership_from_file"],
+        errors="coerce",
+    )
+    ownership_tracker_df["field_ownership_pct"] = pd.to_numeric(
+        ownership_tracker_df["field_ownership_pct"],
+        errors="coerce",
+    )
+    existing_own_diff = pd.to_numeric(ownership_tracker_df["ownership_diff_vs_proj"], errors="coerce")
+    derived_own_diff = (
+        pd.to_numeric(ownership_tracker_df["actual_ownership_from_file"], errors="coerce")
+        - pd.to_numeric(ownership_tracker_df["projected_ownership"], errors="coerce")
+    )
+    ownership_tracker_df["ownership_diff_vs_proj"] = existing_own_diff.where(existing_own_diff.notna(), derived_own_diff)
+    ownership_tracker_df["abs_ownership_error"] = pd.to_numeric(
+        ownership_tracker_df["ownership_diff_vs_proj"],
+        errors="coerce",
+    ).abs()
+    ownership_tracker_df["abs_game_spread"] = pd.to_numeric(
+        ownership_tracker_df["game_spread_line"],
+        errors="coerce",
+    ).abs()
+    ownership_tracker_df["salary_tier"] = ownership_tracker_df["Salary"].map(_ownership_salary_tier_label)
+    ownership_tracker_df["game_environment_bucket"] = ownership_tracker_df.apply(
+        lambda row: _game_environment_bucket(row.get("game_total_line"), row.get("abs_game_spread")),
+        axis=1,
+    )
+    ownership_tracker_df["chalk_consensus_flag"] = (
+        pd.to_numeric(ownership_tracker_df["field_ownership_pct"], errors="coerce").fillna(0.0) >= 15.0
+    )
+    ownership_tracker_df["projected_chalk_flag"] = (
+        pd.to_numeric(ownership_tracker_df["projected_ownership"], errors="coerce").fillna(0.0) >= 10.0
+    )
+    chalk_bucket = pd.cut(
+        pd.to_numeric(ownership_tracker_df["field_ownership_pct"], errors="coerce"),
+        bins=[float("-inf"), 8.0, 15.0, 25.0, float("inf")],
+        labels=["field_sub8", "field_8_1499", "field_15_2499", "field_25_plus"],
+        right=False,
+    )
+    ownership_tracker_df["chalk_consensus_bucket"] = chalk_bucket.astype(str)
+    ownership_tracker_df.loc[
+        pd.to_numeric(ownership_tracker_df["field_ownership_pct"], errors="coerce").isna(),
+        "chalk_consensus_bucket",
+    ] = "unknown"
+    ownership_tracker_df["ownership_miss_direction"] = ownership_tracker_df["ownership_diff_vs_proj"].map(
+        lambda x: "underprojected_chalk" if (_to_float(x) or 0.0) > 0.0 else "overprojected_chalk"
+    )
+    ownership_tracker_df["review_date"] = str(review_date)
+    ownership_miss_tracker_df = ownership_tracker_df.loc[
+        pd.to_numeric(ownership_tracker_df["projected_ownership"], errors="coerce").notna()
+        & pd.to_numeric(ownership_tracker_df["actual_ownership_from_file"], errors="coerce").notna()
+        & (pd.to_numeric(ownership_tracker_df["abs_ownership_error"], errors="coerce") >= float(OWNERSHIP_MISS_TRACKER_THRESHOLD))
+    ].copy()
+    ownership_miss_tracker_df = ownership_miss_tracker_df.sort_values(
+        ["abs_ownership_error", "field_ownership_pct"],
+        ascending=[False, False],
+    ).reset_index(drop=True)
+    ownership_miss_tracker_cols = [
+        "review_date",
+        "Name",
+        "TeamAbbrev",
+        "Position",
+        "Salary",
+        "salary_tier",
+        "game_key",
+        "game_environment_bucket",
+        "field_ownership_pct",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "ownership_diff_vs_proj",
+        "abs_ownership_error",
+        "ownership_miss_direction",
+        "chalk_consensus_flag",
+        "chalk_consensus_bucket",
+        "projected_chalk_flag",
+    ]
+    ownership_miss_tracker_use_cols = [c for c in ownership_miss_tracker_cols if c in ownership_miss_tracker_df.columns]
+    ownership_miss_tracker_records = ownership_miss_tracker_df[ownership_miss_tracker_use_cols].to_dict(orient="records")
+    ownership_miss_tracker_top = ownership_miss_tracker_df[ownership_miss_tracker_use_cols].head(
+        max(1, int(focus_limit))
+    ).to_dict(orient="records")
+
     packet = {
         "schema_version": AI_REVIEW_SCHEMA_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ"),
@@ -671,10 +809,12 @@ def build_daily_ai_review_packet(
             "attention_index_top": attention,
             "projection_miss_top": top_projection_misses,
             "ownership_miss_top": top_ownership_misses,
+            "ownership_miss_tracker_top": ownership_miss_tracker_top,
             "underprojected_ceiling_top": underprojected_ceiling_top,
             "low_own_smash_top": low_own_smash_top,
             "ownership_surprise_smash_top": ownership_surprise_smash_top,
         },
+        "ownership_miss_tracker": ownership_miss_tracker_records,
         "adjustment_factors": adjustment_factors_df.to_dict(orient="records") if not adjustment_factors_df.empty else [],
         "phantom_summary": phantom_summary_df.to_dict(orient="records") if not phantom_summary_df.empty else [],
         "notes_for_agent": [
@@ -717,6 +857,11 @@ def build_global_ai_review_packet(
     packets = [p for p in (daily_packets or []) if isinstance(p, dict)]
     trends: list[dict[str, Any]] = []
     attention_rollup: dict[str, dict[str, Any]] = {}
+    ownership_tracker_rows_total = 0
+    ownership_tier_rollup: dict[str, dict[str, Any]] = {}
+    ownership_env_rollup: dict[str, dict[str, Any]] = {}
+    ownership_chalk_rollup: dict[str, dict[str, Any]] = {}
+    ownership_player_rollup: dict[str, dict[str, Any]] = {}
 
     projection_weight = 0.0
     projection_blend_mae_sum = 0.0
@@ -815,6 +960,69 @@ def build_global_ai_review_packet(
                 existing["last_ownership_diff"] = _to_float(row.get("ownership_diff_vs_proj"))
             attention_rollup[key] = existing
 
+        tracker_rows = packet.get("ownership_miss_tracker")
+        if not isinstance(tracker_rows, list):
+            tracker_rows = ((packet.get("focus_tables") or {}).get("ownership_miss_tracker_top")) or []
+        for row in tracker_rows:
+            if not isinstance(row, dict):
+                continue
+            abs_error = _to_float(row.get("abs_ownership_error"))
+            if abs_error is None:
+                continue
+            signed_error = float(_to_float(row.get("ownership_diff_vs_proj")) or 0.0)
+            direction = str(row.get("ownership_miss_direction") or "").strip().lower()
+            is_underprojected = direction == "underprojected_chalk"
+            ownership_tracker_rows_total += 1
+
+            def _update_rollup(store: dict[str, dict[str, Any]], key: str) -> None:
+                key_norm = str(key or "unknown").strip() or "unknown"
+                item = store.get(
+                    key_norm,
+                    {
+                        "key": key_norm,
+                        "samples": 0,
+                        "abs_error_sum": 0.0,
+                        "signed_error_sum": 0.0,
+                        "underprojected_count": 0,
+                    },
+                )
+                item["samples"] = int(item["samples"]) + 1
+                item["abs_error_sum"] = float(item["abs_error_sum"]) + float(abs_error)
+                item["signed_error_sum"] = float(item["signed_error_sum"]) + float(signed_error)
+                if is_underprojected:
+                    item["underprojected_count"] = int(item["underprojected_count"]) + 1
+                store[key_norm] = item
+
+            _update_rollup(ownership_tier_rollup, str(row.get("salary_tier") or "unknown"))
+            _update_rollup(ownership_env_rollup, str(row.get("game_environment_bucket") or "unknown"))
+            _update_rollup(ownership_chalk_rollup, str(row.get("chalk_consensus_bucket") or "unknown"))
+
+            player_name = str(row.get("Name") or "").strip()
+            team = str(row.get("TeamAbbrev") or "").strip().upper()
+            if player_name:
+                player_key = f"{player_name}|{team}"
+                player_item = ownership_player_rollup.get(
+                    player_key,
+                    {
+                        "Name": player_name,
+                        "TeamAbbrev": team,
+                        "samples": 0,
+                        "abs_error_sum": 0.0,
+                        "signed_error_sum": 0.0,
+                        "underprojected_count": 0,
+                        "latest_date": "",
+                    },
+                )
+                player_item["samples"] = int(player_item["samples"]) + 1
+                player_item["abs_error_sum"] = float(player_item["abs_error_sum"]) + float(abs_error)
+                player_item["signed_error_sum"] = float(player_item["signed_error_sum"]) + float(signed_error)
+                if is_underprojected:
+                    player_item["underprojected_count"] = int(player_item["underprojected_count"]) + 1
+                row_review_date = str(row.get("review_date") or review_date or "")
+                if row_review_date and row_review_date >= str(player_item.get("latest_date") or ""):
+                    player_item["latest_date"] = row_review_date
+                ownership_player_rollup[player_key] = player_item
+
     trends = sorted(
         [t for t in trends if str(t.get("review_date") or "").strip()],
         key=lambda x: str(x.get("review_date") or ""),
@@ -829,6 +1037,62 @@ def build_global_ai_review_packet(
         key=lambda x: (int(x.get("appearances") or 0), float(x.get("attention_avg") or 0.0)),
         reverse=True,
     )[: max(1, int(focus_limit))]
+
+    def _finalize_rollup_rows(
+        rollup: dict[str, dict[str, Any]],
+        key_col: str,
+    ) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        for item in rollup.values():
+            samples = max(1, int(item.get("samples") or 0))
+            under_count = int(item.get("underprojected_count") or 0)
+            rows.append(
+                {
+                    key_col: str(item.get("key") or "unknown"),
+                    "samples": int(item.get("samples") or 0),
+                    "avg_abs_ownership_error": round(float(item.get("abs_error_sum") or 0.0) / float(samples), 4),
+                    "avg_signed_ownership_error": round(float(item.get("signed_error_sum") or 0.0) / float(samples), 4),
+                    "underprojected_chalk_pct": round((100.0 * float(under_count)) / float(samples), 2),
+                    "overprojected_chalk_pct": round((100.0 * float(max(0, samples - under_count))) / float(samples), 2),
+                }
+            )
+        return sorted(
+            rows,
+            key=lambda x: (int(x.get("samples") or 0), float(x.get("avg_abs_ownership_error") or 0.0)),
+            reverse=True,
+        )[: max(1, int(focus_limit))]
+
+    ownership_tier_rows = _finalize_rollup_rows(ownership_tier_rollup, "salary_tier")
+    ownership_env_rows = _finalize_rollup_rows(ownership_env_rollup, "game_environment_bucket")
+    ownership_chalk_rows = _finalize_rollup_rows(ownership_chalk_rollup, "chalk_consensus_bucket")
+    ownership_recurring_players: list[dict[str, Any]] = []
+    for item in ownership_player_rollup.values():
+        samples = max(1, int(item.get("samples") or 0))
+        under_count = int(item.get("underprojected_count") or 0)
+        ownership_recurring_players.append(
+            {
+                "Name": str(item.get("Name") or ""),
+                "TeamAbbrev": str(item.get("TeamAbbrev") or ""),
+                "samples": int(item.get("samples") or 0),
+                "avg_abs_ownership_error": round(float(item.get("abs_error_sum") or 0.0) / float(samples), 4),
+                "avg_signed_ownership_error": round(float(item.get("signed_error_sum") or 0.0) / float(samples), 4),
+                "underprojected_chalk_pct": round((100.0 * float(under_count)) / float(samples), 2),
+                "latest_date": str(item.get("latest_date") or ""),
+            }
+        )
+    ownership_recurring_players = sorted(
+        ownership_recurring_players,
+        key=lambda x: (int(x.get("samples") or 0), float(x.get("avg_abs_ownership_error") or 0.0)),
+        reverse=True,
+    )[: max(1, int(focus_limit))]
+    ownership_bias_tracker = {
+        "threshold_abs_error": float(OWNERSHIP_MISS_TRACKER_THRESHOLD),
+        "total_flagged_rows": int(ownership_tracker_rows_total),
+        "by_salary_tier": ownership_tier_rows,
+        "by_game_environment": ownership_env_rows,
+        "by_chalk_bucket": ownership_chalk_rows,
+        "recurring_players": ownership_recurring_players,
+    }
 
     projection_summary = {
         "total_matched_rows": int(projection_weight),
@@ -866,6 +1130,7 @@ def build_global_ai_review_packet(
         },
         "trend_by_date": trends,
         "recurring_focus_players": recurring_focus,
+        "ownership_bias_tracker": ownership_bias_tracker,
         "daily_packets": packets,
     }
 

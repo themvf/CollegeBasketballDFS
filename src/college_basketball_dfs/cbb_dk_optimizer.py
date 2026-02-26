@@ -19,6 +19,7 @@ MIN_F = 3
 INJURY_STATUSES_REMOVE_DEFAULT = ("out", "doubtful")
 PROJECTION_SALARY_BUCKETS = ("lt4500", "4500_6999", "7000_9999", "gte10000")
 PROJECTION_ROLE_BUCKETS = ("guard", "forward", "center", "other")
+OWNERSHIP_SALARY_BUCKETS = ("lt5500", "5500_7499", "gte7500")
 
 
 def _normalize_text(value: Any) -> str:
@@ -130,6 +131,17 @@ def projection_role_bucket_key(position: Any) -> str:
     if pos.startswith("C"):
         return "center"
     return "other"
+
+
+def ownership_salary_bucket_key(salary: Any) -> str:
+    sal = _safe_float(salary)
+    if sal is None or math.isnan(sal):
+        return "5500_7499"
+    if sal < 5500:
+        return "lt5500"
+    if sal < 7500:
+        return "5500_7499"
+    return "gte7500"
 
 
 def _normalize_col_name(value: Any) -> str:
@@ -821,7 +833,24 @@ def build_player_pool(
 
     proj_pct = _rank_pct_series(out["projected_dk_points"])
     sal_pct = _rank_pct_series(out["Salary"])
-    val_pct = _rank_pct_series(out["value_per_1k"])
+    salary_num = pd.to_numeric(out.get("Salary"), errors="coerce")
+    value_per_1k = pd.to_numeric(out["value_per_1k"], errors="coerce")
+    val_pct = _rank_pct_series(value_per_1k)
+    ownership_salary_bucket = salary_num.map(ownership_salary_bucket_key)
+    out["ownership_salary_bucket"] = ownership_salary_bucket
+    value_tier_median = value_per_1k.groupby(ownership_salary_bucket).transform("median")
+    value_tier_std = value_per_1k.groupby(ownership_salary_bucket).transform("std").replace(0.0, pd.NA)
+    value_tier_z = ((value_per_1k - value_tier_median) / value_tier_std)
+    value_tier_z = value_tier_z.replace([float("inf"), float("-inf")], pd.NA).fillna(0.0).clip(lower=-3.5, upper=3.5)
+    value_shock = (value_tier_z.clip(lower=0.0) / 2.5).clip(lower=0.0, upper=1.0)
+    tier_value_signal = ((0.55 * val_pct) + (0.45 * value_shock)).clip(lower=0.0, upper=1.0)
+    salary_tier_bias = ownership_salary_bucket.map(
+        {
+            "lt5500": 0.06,
+            "5500_7499": 0.02,
+            "gte7500": -0.04,
+        }
+    ).fillna(0.0)
     mins_signal = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
     mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"))
     mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"))
@@ -902,21 +931,96 @@ def build_player_pool(
     ).clip(lower=0.0, upper=1.0)
     surge_flag = ((surge_score >= 0.78) | (game_surge >= 0.72)).astype(float)
 
+    if "TeamAbbrev" in out.columns:
+        team_key = out["TeamAbbrev"].astype(str).str.strip().str.upper()
+    else:
+        team_key = pd.Series(["UNKNOWN"] * len(out), index=out.index, dtype="object")
+    team_key = team_key.where(team_key != "", "UNKNOWN")
+    cheap_salary_flag = (salary_num < 5500.0).astype(float)
+    team_value_mean = value_per_1k.groupby(team_key).transform("mean")
+    team_projection_mass = pd.to_numeric(out["projected_dk_points"], errors="coerce").groupby(team_key).transform("sum")
+    team_cheap_value_rate = cheap_salary_flag.groupby(team_key).transform("mean").fillna(0.0)
+    team_game_surge = game_surge.groupby(team_key).transform("mean").fillna(game_surge)
+    team_value_rank = _rank_pct_series(team_value_mean)
+    team_projection_mass_rank = _rank_pct_series(team_projection_mass)
+    team_stack_popularity = (
+        (0.32 * team_value_rank)
+        + (0.26 * team_cheap_value_rate)
+        + (0.24 * team_projection_mass_rank)
+        + (0.18 * team_game_surge)
+    ).clip(lower=0.0, upper=1.0)
+    out["ownership_value_tier_z"] = value_tier_z.round(4)
+    out["ownership_tier_value_signal"] = tier_value_signal.round(4)
+    out["ownership_salary_tier_bias"] = salary_tier_bias.round(4)
+    out["team_stack_popularity_score"] = team_stack_popularity.round(4)
+
     # Keep legacy ownership estimate for diagnostics.
     out["projected_ownership_v1"] = (2.0 + 38.0 * ((0.5 * proj_pct) + (0.3 * sal_pct) + (0.2 * val_pct))).round(2)
 
-    # V2 ownership model: slate-size-aware softmax normalized to 8 roster slots (=800% total ownership mass).
-    own_score = (
-        (0.45 * proj_pct)
-        + (0.18 * sal_pct)
-        + (0.12 * val_pct)
-        + (0.15 * mins_pct)
-        + (0.10 * vegas_pts_pct)
-        + (0.12 * attention_pct)
-        + (0.09 * field_own_pct)
-        + (0.08 * game_surge)
-        + (0.06 * surge_flag)
-    )
+    # V3 ownership model: salary-tier specific softmax normalized to 8 roster slots (=800% total ownership mass).
+    tier_coefficients: dict[str, dict[str, float]] = {
+        "lt5500": {
+            "proj": 0.33,
+            "sal": 0.05,
+            "val": 0.18,
+            "mins": 0.12,
+            "vegas": 0.04,
+            "attention": 0.10,
+            "field": 0.07,
+            "game": 0.07,
+            "surge": 0.05,
+            "tier_value": 0.24,
+            "team_stack": 0.22,
+            "tier_bias": 1.00,
+        },
+        "5500_7499": {
+            "proj": 0.43,
+            "sal": 0.10,
+            "val": 0.14,
+            "mins": 0.13,
+            "vegas": 0.08,
+            "attention": 0.11,
+            "field": 0.09,
+            "game": 0.08,
+            "surge": 0.06,
+            "tier_value": 0.12,
+            "team_stack": 0.14,
+            "tier_bias": 1.00,
+        },
+        "gte7500": {
+            "proj": 0.55,
+            "sal": 0.08,
+            "val": 0.08,
+            "mins": 0.15,
+            "vegas": 0.11,
+            "attention": 0.10,
+            "field": 0.10,
+            "game": 0.08,
+            "surge": 0.06,
+            "tier_value": 0.05,
+            "team_stack": 0.08,
+            "tier_bias": 1.00,
+        },
+    }
+    own_score = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    for tier_key, weights in tier_coefficients.items():
+        tier_mask = ownership_salary_bucket == tier_key
+        if not bool(tier_mask.any()):
+            continue
+        own_score.loc[tier_mask] = (
+            (weights["proj"] * proj_pct.loc[tier_mask])
+            + (weights["sal"] * sal_pct.loc[tier_mask])
+            + (weights["val"] * val_pct.loc[tier_mask])
+            + (weights["mins"] * mins_pct.loc[tier_mask])
+            + (weights["vegas"] * vegas_pts_pct.loc[tier_mask])
+            + (weights["attention"] * attention_pct.loc[tier_mask])
+            + (weights["field"] * field_own_pct.loc[tier_mask])
+            + (weights["game"] * game_surge.loc[tier_mask])
+            + (weights["surge"] * surge_flag.loc[tier_mask])
+            + (weights["tier_value"] * tier_value_signal.loc[tier_mask])
+            + (weights["team_stack"] * team_stack_popularity.loc[tier_mask])
+            + (weights["tier_bias"] * salary_tier_bias.loc[tier_mask])
+        )
     unique_game_keys = {
         str(x or "").strip().upper()
         for x in out.get("game_key", pd.Series(dtype=str)).tolist()
@@ -949,7 +1053,7 @@ def build_player_pool(
         )
     else:
         leverage_shrink = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
-    out["ownership_model"] = "v2_softmax"
+    out["ownership_model"] = "v3_tiered_softmax"
     out["ownership_temperature"] = ownership_temperature
     out["ownership_target_total"] = ownership_target_total
     out["ownership_total_projected"] = float(ownership_alloc.sum())
@@ -1077,59 +1181,158 @@ def apply_model_profile_adjustments(
 
     if out.empty:
         return out
-    if profile_key != "standout_capture_v1":
-        return out
 
-    objective = pd.to_numeric(out.get("objective_score"), errors="coerce").fillna(0.0)
-    projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce").fillna(0.0)
-    ownership = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    def _numeric_col(col_name: str) -> pd.Series:
+        raw = out.get(col_name, pd.Series([pd.NA] * len(out), index=out.index))
+        series = pd.to_numeric(raw, errors="coerce")
+        if isinstance(series, pd.Series):
+            return series
+        return pd.Series([series] * len(out), index=out.index, dtype="float64")
+
+    objective = _numeric_col("objective_score").fillna(0.0)
+    projection = _numeric_col("projected_dk_points").fillna(0.0)
+    ownership = _numeric_col("projected_ownership").fillna(0.0).clip(lower=0.0)
+    salary = _numeric_col("Salary")
+    value = _numeric_col("value_per_1k")
     surge = (
-        pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce")
+        _numeric_col("ownership_chalk_surge_score")
         .fillna(0.0)
         .clip(lower=0.0, upper=100.0)
     )
-    tail_score = pd.to_numeric(out.get("game_tail_score"), errors="coerce").fillna(0.0)
-    mins_recent = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
-    mins_recent = mins_recent.where(mins_recent.notna(), pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"))
-    mins_recent = mins_recent.where(mins_recent.notna(), pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"))
-    mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
+    tail_score = _numeric_col("game_tail_score").fillna(0.0)
+    team_stack_popularity = _numeric_col("team_stack_popularity_score").fillna(0.0).clip(0.0, 100.0)
+    tier_value_z = _numeric_col("ownership_value_tier_z").fillna(0.0).clip(-3.5, 3.5)
+    minutes_boost = _numeric_col("minutes_shock_boost_pct").fillna(0.0).clip(lower=0.0)
+    mins_recent = _numeric_col("our_minutes_recent")
+    mins_recent = mins_recent.where(mins_recent.notna(), _numeric_col("our_minutes_last7"))
+    mins_recent = mins_recent.where(mins_recent.notna(), _numeric_col("our_minutes_avg"))
+    mins_avg = _numeric_col("our_minutes_avg")
     mins_avg = mins_avg.where(mins_avg.notna(), mins_recent)
-    points_recent = pd.to_numeric(out.get("our_points_recent"), errors="coerce")
-    points_recent = points_recent.where(points_recent.notna(), pd.to_numeric(out.get("our_points_avg"), errors="coerce"))
-    points_recent = points_recent.where(points_recent.notna(), pd.to_numeric(out.get("AvgPointsPerGame"), errors="coerce"))
-    uncertainty = pd.to_numeric(out.get("projection_uncertainty_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
-    dnp_risk = pd.to_numeric(out.get("dnp_risk_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    points_recent = _numeric_col("our_points_recent")
+    points_recent = points_recent.where(points_recent.notna(), _numeric_col("our_points_avg"))
+    points_recent = points_recent.where(points_recent.notna(), _numeric_col("AvgPointsPerGame"))
+    uncertainty = _numeric_col("projection_uncertainty_score").fillna(0.0).clip(0.0, 1.0)
+    dnp_risk = _numeric_col("dnp_risk_score").fillna(0.0).clip(0.0, 1.0)
 
     proj_pct = _rank_pct_series(projection)
+    value_pct = _rank_pct_series(value)
     tail_pct = _rank_pct_series(tail_score)
     surge_pct = _rank_pct_series(surge)
     recent_pts_pct = _rank_pct_series(points_recent)
+    minutes_recent_pct = _rank_pct_series(mins_recent)
+    minutes_boost_pct = _rank_pct_series(minutes_boost)
+
     minute_trend = ((mins_recent - mins_avg) / mins_avg.replace(0.0, pd.NA)).fillna(0.0).clip(lower=-0.35, upper=0.60)
     minute_riser = minute_trend.clip(lower=0.0)
     low_own_edge = ((14.0 - ownership).clip(lower=0.0) / 14.0).clip(0.0, 1.0)
-
-    chalk_shock_score = (((surge - 55.0).clip(lower=0.0) / 45.0).clip(0.0, 1.0) * ((20.0 - ownership).clip(lower=0.0) / 20.0).clip(0.0, 1.0))
-    standout_signal = (
-        (0.40 * proj_pct)
-        + (0.18 * tail_pct)
-        + (0.16 * recent_pts_pct)
-        + (0.12 * minute_riser)
-        + (0.08 * low_own_edge)
-        + (0.06 * surge_pct)
-    ).clip(0.0, 1.0)
     risk_penalty = ((0.60 * dnp_risk) + (0.40 * uncertainty)).clip(0.0, 1.0)
 
-    profile_bonus = (
-        (4.2 * standout_signal)
-        + (3.0 * chalk_shock_score)
-        - (2.0 * risk_penalty)
-    ).clip(lower=-1.5, upper=6.5)
+    salary_bucket = out.get("ownership_salary_bucket")
+    if not isinstance(salary_bucket, pd.Series):
+        salary_bucket = salary.map(ownership_salary_bucket_key)
+    salary_bucket = salary_bucket.astype(str)
 
-    out["objective_score"] = (objective + profile_bonus).clip(lower=0.01)
-    out["model_profile_bonus"] = profile_bonus.round(4)
-    out["model_profile_focus_flag"] = (
-        ((chalk_shock_score >= 0.35) | (standout_signal >= 0.60)) & (risk_penalty <= 0.70)
-    ).astype(bool)
+    if profile_key == "standout_capture_v1":
+        chalk_shock_score = (
+            (((surge - 55.0).clip(lower=0.0) / 45.0).clip(0.0, 1.0))
+            * (((20.0 - ownership).clip(lower=0.0) / 20.0).clip(0.0, 1.0))
+        )
+        standout_signal = (
+            (0.40 * proj_pct)
+            + (0.18 * tail_pct)
+            + (0.16 * recent_pts_pct)
+            + (0.12 * minute_riser)
+            + (0.08 * low_own_edge)
+            + (0.06 * surge_pct)
+        ).clip(0.0, 1.0)
+        profile_bonus = (
+            (4.2 * standout_signal)
+            + (3.0 * chalk_shock_score)
+            - (2.0 * risk_penalty)
+        ).clip(lower=-1.5, upper=6.5)
+        focus_mask = (
+            ((chalk_shock_score >= 0.35) | (standout_signal >= 0.60))
+            & (risk_penalty <= 0.70)
+        )
+        out["objective_score"] = (objective + profile_bonus).clip(lower=0.01)
+        out["model_profile_bonus"] = profile_bonus.round(4)
+        out["model_profile_focus_flag"] = focus_mask.astype(bool)
+        return out
+
+    if profile_key == "chalk_value_capture_v1":
+        stack_pop_norm = (team_stack_popularity / 100.0).clip(0.0, 1.0)
+        tier_value_norm = ((tier_value_z + 3.5) / 7.0).clip(0.0, 1.0)
+        value_spike = ((tier_value_z - 0.15).clip(lower=0.0) / 2.85).clip(0.0, 1.0)
+        cheap_bias = salary_bucket.map(
+            {
+                "lt5500": 1.0,
+                "5500_7499": 0.58,
+                "gte7500": 0.18,
+            }
+        ).fillna(0.45)
+        ownership_chalk_norm = ((ownership - 8.0).clip(lower=0.0, upper=25.0) / 25.0).clip(0.0, 1.0)
+        chalk_alignment = (
+            (0.50 * (surge / 100.0))
+            + (0.30 * stack_pop_norm)
+            + (0.20 * ownership_chalk_norm)
+        ).clip(0.0, 1.0)
+        chalk_value_signal = (
+            (0.30 * value_pct)
+            + (0.18 * value_spike)
+            + (0.14 * cheap_bias)
+            + (0.14 * chalk_alignment)
+            + (0.10 * proj_pct)
+            + (0.08 * minutes_recent_pct)
+            + (0.06 * tier_value_norm)
+        ).clip(0.0, 1.0)
+        profile_bonus = (
+            (3.8 * chalk_value_signal)
+            + (2.4 * (cheap_bias * chalk_alignment))
+            - (2.1 * risk_penalty)
+        ).clip(lower=-1.5, upper=6.0)
+        focus_mask = (
+            (cheap_bias >= 0.55)
+            & (value_spike >= 0.45)
+            & (chalk_alignment >= 0.48)
+            & (risk_penalty <= 0.72)
+        )
+        out["objective_score"] = (objective + profile_bonus).clip(lower=0.01)
+        out["model_profile_bonus"] = profile_bonus.round(4)
+        out["model_profile_focus_flag"] = focus_mask.astype(bool)
+        return out
+
+    if profile_key == "salary_efficiency_ceiling_v1":
+        tail_norm = (tail_score / 100.0).clip(0.0, 1.0)
+        tier_value_norm = ((tier_value_z + 3.5) / 7.0).clip(0.0, 1.0)
+        mid_salary_bias = (1.0 - ((salary - 6700.0).abs() / 4200.0)).clip(lower=0.0, upper=1.0).fillna(0.0)
+        contrarian_edge = ((20.0 - ownership).clip(lower=0.0) / 20.0).clip(0.0, 1.0)
+        ceiling_signal = (
+            (0.30 * proj_pct)
+            + (0.24 * value_pct)
+            + (0.17 * tail_pct)
+            + (0.10 * minutes_boost_pct)
+            + (0.09 * tier_value_norm)
+            + (0.10 * mid_salary_bias)
+        ).clip(0.0, 1.0)
+        upside_signal = (
+            (0.55 * tail_norm)
+            + (0.25 * contrarian_edge)
+            + (0.20 * minute_riser)
+        ).clip(0.0, 1.0)
+        profile_bonus = (
+            (4.1 * ceiling_signal)
+            + (2.4 * upside_signal)
+            - (2.2 * risk_penalty)
+        ).clip(lower=-1.5, upper=6.2)
+        focus_mask = (
+            ((ceiling_signal >= 0.62) | ((tail_norm >= 0.72) & (value_pct >= 0.65)))
+            & (risk_penalty <= 0.72)
+        )
+        out["objective_score"] = (objective + profile_bonus).clip(lower=0.01)
+        out["model_profile_bonus"] = profile_bonus.round(4)
+        out["model_profile_focus_flag"] = focus_mask.astype(bool)
+        return out
+
     return out
 
 

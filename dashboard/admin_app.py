@@ -131,6 +131,73 @@ PROJECTION_ROLE_BUCKET_LABELS = {
     "other": "Other",
 }
 SLATE_PRESET_OPTIONS = ["Main", "Afternoon", "Full Day", "Night", "Custom"]
+LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
+    {
+        "label": "Standard v1",
+        "version_key": "standard_v1",
+        "lineup_strategy": "standard",
+        "include_tail_signals": False,
+        "model_profile": "legacy_baseline",
+        "all_versions_weight": 0.50,
+    },
+    {
+        "label": "Spike v2 (Tail A/B)",
+        "version_key": "spike_v2_tail",
+        "lineup_strategy": "spike",
+        "include_tail_signals": True,
+        "model_profile": "tail_spike_pairs",
+        "all_versions_weight": 0.20,
+    },
+    {
+        "label": "Standout v1 (Missed-Capture)",
+        "version_key": "standout_v1_capture",
+        "lineup_strategy": "standard",
+        "include_tail_signals": True,
+        "model_profile": "standout_capture_v1",
+        "all_versions_weight": 0.10,
+    },
+    {
+        "label": "Chalk-Value v1 (Tiered)",
+        "version_key": "chalk_value_capture_v1",
+        "lineup_strategy": "standard",
+        "include_tail_signals": True,
+        "model_profile": "chalk_value_capture_v1",
+        "all_versions_weight": 0.10,
+    },
+    {
+        "label": "Salary-Efficiency v1 (Ceiling)",
+        "version_key": "salary_efficiency_ceiling_v1",
+        "lineup_strategy": "standard",
+        "include_tail_signals": True,
+        "model_profile": "salary_efficiency_ceiling_v1",
+        "all_versions_weight": 0.10,
+    },
+)
+LINEUP_MODEL_BY_KEY = {str(cfg["version_key"]): cfg for cfg in LINEUP_MODEL_REGISTRY}
+LINEUP_MODEL_BY_LABEL = {str(cfg["label"]): str(cfg["version_key"]) for cfg in LINEUP_MODEL_REGISTRY}
+DEFAULT_ALL_VERSION_WEIGHTS = {
+    str(cfg["version_key"]): float(cfg.get("all_versions_weight", 1.0)) for cfg in LINEUP_MODEL_REGISTRY
+}
+ALL_VERSIONS_KEYS_TEXT = ", ".join(str(cfg["version_key"]) for cfg in LINEUP_MODEL_REGISTRY)
+ALL_VERSIONS_WEIGHT_TEXT = ", ".join(
+    f"{str(cfg['version_key'])}={int(round(float(cfg.get('all_versions_weight', 1.0)) * 100.0))}%"
+    for cfg in LINEUP_MODEL_REGISTRY
+)
+
+
+def _lineup_model_config(version_key: str, spike_max_pair_overlap: int) -> dict[str, Any]:
+    cfg = LINEUP_MODEL_BY_KEY.get(
+        str(version_key or "").strip(),
+        LINEUP_MODEL_BY_KEY.get("standard_v1", {}),
+    )
+    return {
+        "version_key": str(cfg.get("version_key") or "standard_v1"),
+        "version_label": str(cfg.get("label") or "Standard v1"),
+        "lineup_strategy": str(cfg.get("lineup_strategy") or "standard"),
+        "include_tail_signals": bool(cfg.get("include_tail_signals", False)),
+        "model_profile": str(cfg.get("model_profile") or "legacy_baseline"),
+        "spike_max_pair_overlap": int(spike_max_pair_overlap),
+    }
 
 
 def _csv_values(text: str | None) -> list[str]:
@@ -3954,7 +4021,7 @@ with tab_lineups:
         index=0,
         help=(
             "All Versions generates and saves all lineup models: "
-            "standard_v1, spike_v1_legacy, spike_v2_tail, cluster_v1_experimental, standout_v1_capture."
+            f"{ALL_VERSIONS_KEYS_TEXT}."
         ),
     )
     run_mode_key = "all" if run_mode_label == "All Versions" else "single"
@@ -3963,52 +4030,29 @@ with tab_lineups:
     if run_mode_key == "single":
         lineup_model_label = c5.selectbox(
             "Lineup Model",
-            options=[
-                "Standard v1",
-                "Spike v1 (Legacy A/B)",
-                "Spike v2 (Tail A/B)",
-                "Cluster v1 (Experimental)",
-                "Standout v1 (Missed-Capture)",
-            ],
-            index=4,
+            options=[str(cfg["label"]) for cfg in LINEUP_MODEL_REGISTRY],
+            index=2,
             help=(
                 "Run one lineup model. Use All Versions to save all models in a single run."
             ),
         )
-        if lineup_model_label == "Spike v2 (Tail A/B)":
-            selected_model_key = "spike_v2_tail"
-            lineup_strategy = "spike"
-            include_tail_signals = True
-        elif lineup_model_label == "Cluster v1 (Experimental)":
-            selected_model_key = "cluster_v1_experimental"
-            lineup_strategy = "cluster"
-            include_tail_signals = False
-        elif lineup_model_label == "Spike v1 (Legacy A/B)":
-            selected_model_key = "spike_v1_legacy"
-            lineup_strategy = "spike"
-            include_tail_signals = False
-        elif lineup_model_label == "Standout v1 (Missed-Capture)":
-            selected_model_key = "standout_v1_capture"
-            lineup_strategy = "standard"
-            include_tail_signals = True
-        else:
-            selected_model_key = "standard_v1"
-            lineup_strategy = "standard"
-            include_tail_signals = False
+        selected_model_key = LINEUP_MODEL_BY_LABEL.get(lineup_model_label, "standard_v1")
+        selected_model_cfg = LINEUP_MODEL_BY_KEY.get(selected_model_key, LINEUP_MODEL_BY_KEY["standard_v1"])
+        lineup_strategy = str(selected_model_cfg.get("lineup_strategy") or "standard")
+        include_tail_signals = bool(selected_model_cfg.get("include_tail_signals", False))
     else:
         c5.caption("Lineup Models")
         c5.write(
-            "All Versions: `standard_v1`, `spike_v1_legacy`, `spike_v2_tail`, "
-            "`cluster_v1_experimental`, `standout_v1_capture`"
+            f"All Versions: `{ALL_VERSIONS_KEYS_TEXT.replace(', ', '`, `')}`"
         )
         selected_model_key = "standard_v1"
         lineup_strategy = "standard"
         include_tail_signals = False
 
-    if run_mode_key == "all" or lineup_strategy == "cluster":
+    if run_mode_key == "all":
         st.caption(
-            "Cluster v1 Phase 1 uses seed + mutation generation with target `15 clusters x 10 variants` "
-            "(auto-adjusted for smaller lineup counts/slates)."
+            "Default All Versions allocation targets (before optional phantom promotion): "
+            f"{ALL_VERSIONS_WEIGHT_TEXT}."
         )
 
     game_packet_for_lineups = st.session_state.get("cbb_game_slate_ai_packet")
@@ -4581,110 +4625,32 @@ with tab_lineups:
 
                     if run_mode_key == "all":
                         version_plan = [
-                            {
-                                "version_key": "standard_v1",
-                                "version_label": "Standard v1",
-                                "lineup_strategy": "standard",
-                                "include_tail_signals": False,
-                                "model_profile": "legacy_baseline",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
-                            },
-                            {
-                                "version_key": "spike_v1_legacy",
-                                "version_label": "Spike v1 (Legacy A/B)",
-                                "lineup_strategy": "spike",
-                                "include_tail_signals": False,
-                                "model_profile": "legacy_spike_pairs",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
-                            },
-                            {
-                                "version_key": "spike_v2_tail",
-                                "version_label": "Spike v2 (Tail A/B)",
-                                "lineup_strategy": "spike",
-                                "include_tail_signals": True,
-                                "model_profile": "tail_spike_pairs",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
-                            },
-                            {
-                                "version_key": "cluster_v1_experimental",
-                                "version_label": "Cluster v1 (Experimental)",
-                                "lineup_strategy": "cluster",
-                                "include_tail_signals": False,
-                                "model_profile": "cluster_seed_mutation_v1",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
-                                "cluster_target_count": 15,
-                                "cluster_variants_per_cluster": 10,
-                            },
-                            {
-                                "version_key": "standout_v1_capture",
-                                "version_label": "Standout v1 (Missed-Capture)",
-                                "lineup_strategy": "standard",
-                                "include_tail_signals": True,
-                                "model_profile": "standout_capture_v1",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
-                            },
+                            _lineup_model_config(str(cfg["version_key"]), spike_max_pair_overlap)
+                            for cfg in LINEUP_MODEL_REGISTRY
                         ]
+                        total_requested = int(lineup_count * len(version_plan))
+                        default_weights = {
+                            str(k): float(v)
+                            for k, v in DEFAULT_ALL_VERSION_WEIGHTS.items()
+                            if str(k).strip()
+                        }
+                        default_count_map = _allocate_weighted_counts(
+                            keys=[str(cfg.get("version_key") or "") for cfg in version_plan],
+                            total_count=total_requested,
+                            weights=default_weights,
+                            min_per_key=1,
+                        )
+                        for cfg in version_plan:
+                            vkey = str(cfg.get("version_key") or "")
+                            cfg["lineup_count"] = int(max(1, default_count_map.get(vkey, lineup_count)))
+                        preview = ", ".join(
+                            f"{cfg['version_key']}={int(cfg['lineup_count'])}" for cfg in version_plan
+                        )
+                        st.caption(f"Default allocation applied: {preview}")
                     else:
-                        if selected_model_key == "spike_v2_tail":
-                            version_plan = [
-                                {
-                                    "version_key": "spike_v2_tail",
-                                    "version_label": "Spike v2 (Tail A/B)",
-                                    "lineup_strategy": "spike",
-                                    "include_tail_signals": True,
-                                    "model_profile": "tail_spike_pairs",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
-                                }
-                            ]
-                        elif selected_model_key == "cluster_v1_experimental":
-                            version_plan = [
-                                {
-                                    "version_key": "cluster_v1_experimental",
-                                    "version_label": "Cluster v1 (Experimental)",
-                                    "lineup_strategy": "cluster",
-                                    "include_tail_signals": False,
-                                    "model_profile": "cluster_seed_mutation_v1",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
-                                    "cluster_target_count": 15,
-                                    "cluster_variants_per_cluster": 10,
-                                }
-                            ]
-                        elif selected_model_key == "spike_v1_legacy":
-                            version_plan = [
-                                {
-                                    "version_key": "spike_v1_legacy",
-                                    "version_label": "Spike v1 (Legacy A/B)",
-                                    "lineup_strategy": "spike",
-                                    "include_tail_signals": False,
-                                    "model_profile": "legacy_spike_pairs",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
-                                }
-                            ]
-                        elif selected_model_key == "standout_v1_capture":
-                            version_plan = [
-                                {
-                                    "version_key": "standout_v1_capture",
-                                    "version_label": "Standout v1 (Missed-Capture)",
-                                    "lineup_strategy": "standard",
-                                    "include_tail_signals": True,
-                                    "model_profile": "standout_capture_v1",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
-                                }
-                            ]
-                        else:
-                            version_plan = [
-                                {
-                                    "version_key": "standard_v1",
-                                    "version_label": "Standard v1",
-                                    "lineup_strategy": "standard",
-                                    "include_tail_signals": False,
-                                    "model_profile": "legacy_baseline",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
-                                }
-                            ]
-
-                    for cfg in version_plan:
-                        cfg["lineup_count"] = int(lineup_count)
+                        version_plan = [_lineup_model_config(selected_model_key, spike_max_pair_overlap)]
+                        for cfg in version_plan:
+                            cfg["lineup_count"] = int(lineup_count)
 
                     phantom_promotion_meta: dict[str, Any] = {}
                     if run_mode_key == "all" and promote_phantom_constructions and version_plan:
@@ -4814,6 +4780,7 @@ with tab_lineups:
                             "lineup_count": lineup_count,
                             "contest_type": contest_type,
                             "lineup_seed": lineup_seed,
+                            "all_versions_default_weights": DEFAULT_ALL_VERSION_WEIGHTS,
                             "max_salary_left": effective_max_salary_left,
                             "requested_max_salary_left": max_salary_left,
                             "strict_salary_utilization": strict_salary_utilization,
