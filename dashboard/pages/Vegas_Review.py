@@ -7,6 +7,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -25,6 +26,7 @@ from college_basketball_dfs.cbb_vegas_review import (
     build_vegas_review_games_frame,
     summarize_vegas_accuracy,
 )
+from college_basketball_dfs.cbb_tournament_review import build_projection_actual_comparison
 
 
 def _secret(name: str) -> str | None:
@@ -128,6 +130,157 @@ def load_projection_player_totals_dataset(
     return out, {
         "projection_days_found": int(projection_days),
         "projection_rows": int(len(out)),
+    }
+
+
+def _build_actual_results_from_players_frame(players_df: pd.DataFrame) -> pd.DataFrame:
+    if players_df is None or players_df.empty:
+        return pd.DataFrame()
+
+    needed = [
+        "player_id",
+        "player_name",
+        "team_name",
+        "minutes_played",
+        "points",
+        "rebounds",
+        "assists",
+        "steals",
+        "blocks",
+        "turnovers",
+        "tpm",
+    ]
+    cols = [c for c in needed if c in players_df.columns]
+    if not cols:
+        return pd.DataFrame()
+
+    out = players_df[cols].copy().rename(
+        columns={
+            "player_id": "ID",
+            "player_name": "Name",
+            "team_name": "team_name",
+            "minutes_played": "actual_minutes",
+            "points": "actual_points",
+            "rebounds": "actual_rebounds",
+            "assists": "actual_assists",
+            "steals": "actual_steals",
+            "blocks": "actual_blocks",
+            "turnovers": "actual_turnovers",
+            "tpm": "actual_threes",
+        }
+    )
+    for col in [
+        "actual_minutes",
+        "actual_points",
+        "actual_rebounds",
+        "actual_assists",
+        "actual_steals",
+        "actual_blocks",
+        "actual_turnovers",
+        "actual_threes",
+    ]:
+        out[col] = pd.to_numeric(out.get(col), errors="coerce").fillna(0.0)
+
+    dd_count = (
+        (out["actual_points"] >= 10).astype(int)
+        + (out["actual_rebounds"] >= 10).astype(int)
+        + (out["actual_assists"] >= 10).astype(int)
+        + (out["actual_steals"] >= 10).astype(int)
+        + (out["actual_blocks"] >= 10).astype(int)
+    )
+    bonus = (dd_count >= 2).astype(int) * 1.5 + (dd_count >= 3).astype(int) * 3.0
+    out["actual_dk_points"] = (
+        out["actual_points"]
+        + (1.25 * out["actual_rebounds"])
+        + (1.5 * out["actual_assists"])
+        + (2.0 * out["actual_steals"])
+        + (2.0 * out["actual_blocks"])
+        - (0.5 * out["actual_turnovers"])
+        + (0.5 * out["actual_threes"])
+        + bonus
+    )
+    out["ID"] = out["ID"].astype(str).str.strip()
+    out["Name"] = out["Name"].astype(str).str.strip()
+    return out
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_projection_actual_comparison_dataset(
+    bucket_name: str,
+    start_date: date,
+    end_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+
+    frames: list[pd.DataFrame] = []
+    dates = iter_dates(start_date, end_date)
+    projection_days = 0
+    actual_days = 0
+    comparison_days = 0
+
+    for d in dates:
+        proj_csv = store.read_projections_csv(d)
+        if not proj_csv or not proj_csv.strip():
+            continue
+        try:
+            proj_df = pd.read_csv(io.StringIO(proj_csv))
+        except Exception:
+            continue
+        if proj_df.empty:
+            continue
+        projection_days += 1
+
+        try:
+            players_blob = store.players_blob_name(d)
+            players_csv = store.read_players_csv_blob(players_blob)
+        except Exception:
+            players_csv = ""
+        if not players_csv or not players_csv.strip():
+            continue
+        try:
+            players_df = pd.read_csv(io.StringIO(players_csv))
+        except Exception:
+            continue
+        if players_df.empty:
+            continue
+        actual_days += 1
+
+        actual_df = _build_actual_results_from_players_frame(players_df)
+        if actual_df.empty:
+            continue
+        comparison_df = build_projection_actual_comparison(
+            projection_df=proj_df,
+            actual_results_df=actual_df,
+        )
+        if comparison_df.empty:
+            continue
+        comparison_days += 1
+        comparison_df = comparison_df.copy()
+        comparison_df["review_date"] = d.isoformat()
+        frames.append(comparison_df)
+
+    if not frames:
+        return pd.DataFrame(), {
+            "projection_days_found": int(projection_days),
+            "actual_days_found": int(actual_days),
+            "comparison_days_found": int(comparison_days),
+            "comparison_rows": 0,
+        }
+
+    out = pd.concat(frames, ignore_index=True)
+    return out, {
+        "projection_days_found": int(projection_days),
+        "actual_days_found": int(actual_days),
+        "comparison_days_found": int(comparison_days),
+        "comparison_rows": int(len(out)),
     }
 
 
@@ -595,6 +748,88 @@ def build_game_total_player_total_correlation_frame(
     return out
 
 
+def _render_projection_actual_lollipop(
+    comparison_df: pd.DataFrame,
+    *,
+    projection_col: str,
+    top_n: int,
+    sort_mode: str,
+) -> None:
+    if comparison_df is None or comparison_df.empty:
+        st.info("No projection-vs-actual rows available for this slate.")
+        return
+
+    work = comparison_df.copy()
+    if projection_col not in work.columns or "actual_dk_points" not in work.columns:
+        st.info("Required projection/actual columns are missing for this slate.")
+        return
+
+    work["projected_points"] = pd.to_numeric(work.get(projection_col), errors="coerce")
+    work["actual_dk_points"] = pd.to_numeric(work.get("actual_dk_points"), errors="coerce")
+    work = work.loc[work["projected_points"].notna() & work["actual_dk_points"].notna()].copy()
+    if work.empty:
+        st.info("No matched projected and actual points rows are available for this slate.")
+        return
+
+    if "Name + ID" in work.columns:
+        labels = work["Name + ID"].astype(str).str.strip()
+    elif "Name" in work.columns:
+        labels = work["Name"].astype(str).str.strip()
+    else:
+        labels = work.get("ID", pd.Series([""] * len(work))).astype(str).str.strip()
+    team = work.get("TeamAbbrev", pd.Series([""] * len(work))).astype(str).str.strip().str.upper()
+    work["player_label"] = labels.where(team == "", labels + " (" + team + ")")
+
+    work["point_error"] = work["actual_dk_points"] - work["projected_points"]
+    work["abs_point_error"] = work["point_error"].abs()
+
+    if sort_mode == "Actual DK Points (Highest)":
+        work = work.sort_values("actual_dk_points", ascending=False)
+    elif sort_mode == "Projected Points (Highest)":
+        work = work.sort_values("projected_points", ascending=False)
+    elif sort_mode == "Most Underprojected":
+        work = work.sort_values("point_error", ascending=False)
+    elif sort_mode == "Most Overprojected":
+        work = work.sort_values("point_error", ascending=True)
+    else:
+        work = work.sort_values("abs_point_error", ascending=False)
+
+    plot_df = work.head(max(1, int(top_n))).copy()
+    if plot_df.empty:
+        st.info("No rows available after filtering.")
+        return
+
+    mae = float(plot_df["abs_point_error"].mean()) if plot_df["abs_point_error"].notna().any() else 0.0
+    mean_error = float(plot_df["point_error"].mean()) if plot_df["point_error"].notna().any() else 0.0
+    lc1, lc2, lc3 = st.columns(3)
+    lc1.metric("Players Plotted", int(len(plot_df)))
+    lc2.metric("MAE (Plotted)", f"{mae:.2f}")
+    lc3.metric("Mean Error (Actual - Proj)", f"{mean_error:.2f}")
+
+    y_pos = list(range(len(plot_df)))
+    fig_h = max(4.0, (0.33 * float(len(plot_df))) + 1.2)
+    fig, ax = plt.subplots(figsize=(12, fig_h))
+
+    for i, row in enumerate(plot_df.itertuples(index=False)):
+        x0 = float(getattr(row, "projected_points"))
+        x1 = float(getattr(row, "actual_dk_points"))
+        ax.hlines(y=i, xmin=min(x0, x1), xmax=max(x0, x1), color="#b5b5b5", linewidth=1.4, alpha=0.9)
+
+    ax.scatter(plot_df["projected_points"], y_pos, color="#1f77b4", s=36, label="Projected")
+    ax.scatter(plot_df["actual_dk_points"], y_pos, color="#2ca02c", s=36, label="Actual")
+
+    ax.set_yticks(y_pos)
+    ax.set_yticklabels(plot_df["player_label"].tolist())
+    ax.invert_yaxis()
+    ax.set_xlabel("DK Fantasy Points")
+    ax.set_ylabel("Player")
+    ax.grid(axis="x", linestyle="-", alpha=0.2)
+    ax.legend(loc="best")
+    fig.tight_layout()
+    st.pyplot(fig, use_container_width=True)
+    plt.close(fig)
+
+
 st.set_page_config(page_title="Vegas Review", layout="wide")
 st.title("Vegas Review")
 st.caption(
@@ -650,6 +885,14 @@ with st.spinner("Loading game and odds history from GCS..."):
         service_account_json=cred_json,
         service_account_json_b64=cred_json_b64,
     )
+    projection_actual_df, projection_actual_meta = load_projection_actual_comparison_dataset(
+        bucket_name=bucket_name.strip(),
+        start_date=start_date,
+        end_date=end_date,
+        gcp_project=gcp_project.strip() or None,
+        service_account_json=cred_json,
+        service_account_json_b64=cred_json_b64,
+    )
 
 if games_df.empty:
     st.warning("No merged game-level results found for the selected range.")
@@ -661,11 +904,13 @@ model_df = build_calibration_models_frame(games_df)
 total_bucket_df = build_total_buckets_frame(games_df)
 spread_bucket_df = build_spread_buckets_frame(games_df)
 
-meta_col1, meta_col2, meta_col3, meta_col4 = st.columns(4)
+meta_col1, meta_col2, meta_col3, meta_col4, meta_col5, meta_col6 = st.columns(6)
 meta_col1.metric("Dates Scanned", int(meta["dates_scanned"]))
 meta_col2.metric("Raw Days Found", int(meta["raw_days_found"]))
 meta_col3.metric("Odds Days Found", int(meta["odds_days_found"]))
 meta_col4.metric("Projection Days Found", int(player_totals_meta.get("projection_days_found") or 0))
+meta_col5.metric("Actual Days Found", int(projection_actual_meta.get("actual_days_found") or 0))
+meta_col6.metric("Proj-Actual Days", int(projection_actual_meta.get("comparison_days_found") or 0))
 
 m1, m2, m3, m4 = st.columns(4)
 m1.metric("Games (Final)", int(summary["total_games"]))
@@ -782,6 +1027,77 @@ else:
         )
     else:
         st.dataframe(corr_display_df, hide_index=True, use_container_width=True)
+
+st.subheader("Projected vs Actual Lollipop (Per Slate)")
+st.caption(
+    "Player-level lollipop view for a single slate date. "
+    "Blue dot = projected DK points, green dot = actual DK points, gray segment = difference."
+)
+if projection_actual_df.empty:
+    st.info(
+        "No projection-vs-actual player dataset is available in this date range "
+        "(requires both projection snapshots and `cbb/players/<date>_players.csv`)."
+    )
+else:
+    date_values = (
+        projection_actual_df.get("review_date", pd.Series(dtype=str))
+        .astype(str)
+        .str.strip()
+        .replace("", pd.NA)
+        .dropna()
+        .unique()
+        .tolist()
+    )
+    date_values = sorted([str(x) for x in date_values], reverse=True)
+    if not date_values:
+        st.info("No dated rows available for lollipop plotting.")
+    else:
+        pcfg1, pcfg2, pcfg3, pcfg4 = st.columns(4)
+        selected_lollipop_date = pcfg1.selectbox(
+            "Slate Date",
+            options=date_values,
+            index=0,
+        )
+        projection_label_to_col = {
+            "Blended Projection": "blended_projection",
+            "Our DK Projection": "our_dk_projection",
+            "Vegas DK Projection": "vegas_dk_projection",
+        }
+        projection_label = pcfg2.selectbox(
+            "Projection Series",
+            options=list(projection_label_to_col.keys()),
+            index=0,
+        )
+        top_n_lollipop = int(
+            pcfg3.slider(
+                "Players to Plot",
+                min_value=10,
+                max_value=120,
+                value=40,
+                step=5,
+            )
+        )
+        sort_mode = pcfg4.selectbox(
+            "Sort",
+            options=[
+                "Absolute Error (Largest)",
+                "Actual DK Points (Highest)",
+                "Projected Points (Highest)",
+                "Most Underprojected",
+                "Most Overprojected",
+            ],
+            index=0,
+        )
+        day_df = projection_actual_df.loc[
+            projection_actual_df["review_date"].astype(str).str.strip() == str(selected_lollipop_date).strip()
+        ].copy()
+        pcol = projection_label_to_col.get(projection_label, "blended_projection")
+        _render_projection_actual_lollipop(
+            day_df,
+            projection_col=pcol,
+            top_n=top_n_lollipop,
+            sort_mode=sort_mode,
+        )
 
 st.subheader("Game/Odds Join Audit")
 st.caption(
