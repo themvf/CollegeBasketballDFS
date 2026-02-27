@@ -4,6 +4,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_player_exposure_comparison,
+    build_projection_bias_heatmap,
     build_top10_winner_gap_analysis,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
@@ -160,6 +161,52 @@ def test_normalize_contest_standings_maps_player_name_and_percent_drafted_column
     assert len(own) == 1
     assert str(own.iloc[0]["player_name"]) == "Alpha One"
     assert round(float(own.iloc[0]["actual_ownership"]), 2) == 12.5
+
+
+def test_build_projection_bias_heatmap_buckets_salary_and_position() -> None:
+    comp = pd.DataFrame(
+        [
+            {"Position": "PG", "Salary": 4800, "blend_error": 2.0},
+            {"Position": "PG", "Salary": 4800, "blend_error": 4.0},
+            {"Position": "SG", "Salary": 7300, "blend_error": -3.0},
+            {"Position": "SF", "Salary": 9800, "blend_error": 1.5},
+            {"Position": "G", "Salary": 8200, "blend_error": -1.0},
+        ]
+    )
+    packet = build_projection_bias_heatmap(comp, error_col="blend_error", min_samples_per_cell=1)
+    avg = packet["avg_error_matrix_df"]
+    samples = packet["samples_matrix_df"]
+    cells = packet["cells_df"]
+
+    assert not avg.empty
+    assert "Value (<5k)" in avg.columns
+    assert "Stud (9.5k+)" in avg.columns
+    assert "PG" in avg.index
+    assert "UNK" in avg.index
+    assert round(float(avg.loc["PG", "Value (<5k)"]), 2) == 3.0
+    assert int(samples.loc["PG", "Value (<5k)"]) == 2
+    assert int(samples.loc["UNK", "Upper (8k-9.5k)"]) == 1
+    assert not cells.empty
+    assert {"primary_position", "salary_bucket", "samples", "avg_error", "mae"}.issubset(set(cells.columns))
+
+
+def test_build_projection_bias_heatmap_masks_low_sample_cells() -> None:
+    comp = pd.DataFrame(
+        [
+            {"Position": "C", "Salary": 9600, "blend_error": 6.0},
+            {"Position": "C", "Salary": 9600, "blend_error": 4.0},
+            {"Position": "C", "Salary": 9600, "blend_error": 2.0},
+            {"Position": "SF", "Salary": 7600, "blend_error": -2.0},
+        ]
+    )
+    packet = build_projection_bias_heatmap(comp, error_col="blend_error", min_samples_per_cell=3)
+    avg = packet["avg_error_matrix_df"]
+    samples = packet["samples_matrix_df"]
+
+    assert round(float(avg.loc["C", "Stud (9.5k+)"]), 2) == 4.0
+    assert int(samples.loc["C", "Stud (9.5k+)"]) == 3
+    assert pd.isna(avg.loc["SF", "Mid (6.5k-8k)"])
+    assert int(samples.loc["SF", "Mid (6.5k-8k)"]) == 1
 
 
 def test_build_field_entries_and_players_builds_salary_left() -> None:

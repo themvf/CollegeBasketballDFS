@@ -13,6 +13,7 @@ from typing import Any
 from uuid import uuid4
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -50,6 +51,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_player_exposure_comparison,
+    build_projection_bias_heatmap,
     build_projection_actual_comparison,
     build_projection_adjustment_factors,
     build_top10_winner_gap_analysis,
@@ -133,36 +135,88 @@ PROJECTION_ROLE_BUCKET_LABELS = {
 SLATE_PRESET_OPTIONS = ["Main", "Afternoon", "Full Day", "Night", "Custom"]
 LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
     {
-        "label": "Standard v1",
+        "label": "Standard v1 (Balanced Core)",
         "version_key": "standard_v1",
         "lineup_strategy": "standard",
         "include_tail_signals": False,
         "model_profile": "legacy_baseline",
-        "all_versions_weight": 0.50,
+        "all_versions_weight": 0.15,
+        "gpp_overrides": {
+            "salary_left_target": 260,
+            "low_own_bucket_exposure_pct": 34.0,
+            "low_own_bucket_min_per_lineup": 1,
+            "low_own_bucket_max_projected_ownership": 13.0,
+            "low_own_bucket_min_projection": 20.0,
+            "low_own_bucket_min_tail_score": 56.0,
+            "low_own_bucket_objective_bonus": 1.2,
+            "preferred_game_bonus": 0.8,
+            "ceiling_boost_lineup_pct": 32.0,
+            "ceiling_boost_stack_bonus": 2.4,
+            "ceiling_boost_salary_left_target": 150,
+        },
     },
     {
-        "label": "Spike v2 (Tail A/B)",
+        "label": "Spike v2 (High-Variance Tail A/B)",
         "version_key": "spike_v2_tail",
         "lineup_strategy": "spike",
         "include_tail_signals": True,
         "model_profile": "tail_spike_pairs",
-        "all_versions_weight": 0.20,
+        "all_versions_weight": 0.35,
+        "gpp_overrides": {
+            "salary_left_target": 420,
+            "low_own_bucket_exposure_pct": 68.0,
+            "low_own_bucket_min_per_lineup": 2,
+            "low_own_bucket_max_projected_ownership": 11.0,
+            "low_own_bucket_min_projection": 16.0,
+            "low_own_bucket_min_tail_score": 62.0,
+            "low_own_bucket_objective_bonus": 2.0,
+            "preferred_game_bonus": 1.3,
+            "ceiling_boost_lineup_pct": 70.0,
+            "ceiling_boost_stack_bonus": 3.5,
+            "ceiling_boost_salary_left_target": 230,
+        },
     },
     {
-        "label": "Standout v1 (Missed-Capture)",
+        "label": "Standout v1 (Leverage Surge)",
         "version_key": "standout_v1_capture",
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "standout_capture_v1",
-        "all_versions_weight": 0.10,
+        "all_versions_weight": 0.20,
+        "gpp_overrides": {
+            "salary_left_target": 340,
+            "low_own_bucket_exposure_pct": 54.0,
+            "low_own_bucket_min_per_lineup": 1,
+            "low_own_bucket_max_projected_ownership": 12.0,
+            "low_own_bucket_min_projection": 18.0,
+            "low_own_bucket_min_tail_score": 58.0,
+            "low_own_bucket_objective_bonus": 1.7,
+            "preferred_game_bonus": 1.1,
+            "ceiling_boost_lineup_pct": 52.0,
+            "ceiling_boost_stack_bonus": 2.9,
+            "ceiling_boost_salary_left_target": 190,
+        },
     },
     {
-        "label": "Chalk-Value v1 (Tiered)",
+        "label": "Chalk-Value v1 (Leverage Pivots)",
         "version_key": "chalk_value_capture_v1",
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "chalk_value_capture_v1",
         "all_versions_weight": 0.10,
+        "gpp_overrides": {
+            "salary_left_target": 290,
+            "low_own_bucket_exposure_pct": 32.0,
+            "low_own_bucket_min_per_lineup": 1,
+            "low_own_bucket_max_projected_ownership": 13.0,
+            "low_own_bucket_min_projection": 19.0,
+            "low_own_bucket_min_tail_score": 55.0,
+            "low_own_bucket_objective_bonus": 1.3,
+            "preferred_game_bonus": 0.9,
+            "ceiling_boost_lineup_pct": 38.0,
+            "ceiling_boost_stack_bonus": 2.5,
+            "ceiling_boost_salary_left_target": 160,
+        },
     },
     {
         "label": "Salary-Efficiency v1 (Ceiling)",
@@ -170,7 +224,20 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "salary_efficiency_ceiling_v1",
-        "all_versions_weight": 0.10,
+        "all_versions_weight": 0.20,
+        "gpp_overrides": {
+            "salary_left_target": 370,
+            "low_own_bucket_exposure_pct": 48.0,
+            "low_own_bucket_min_per_lineup": 1,
+            "low_own_bucket_max_projected_ownership": 12.0,
+            "low_own_bucket_min_projection": 20.0,
+            "low_own_bucket_min_tail_score": 60.0,
+            "low_own_bucket_objective_bonus": 1.6,
+            "preferred_game_bonus": 1.1,
+            "ceiling_boost_lineup_pct": 66.0,
+            "ceiling_boost_stack_bonus": 3.1,
+            "ceiling_boost_salary_left_target": 210,
+        },
     },
 )
 LINEUP_MODEL_BY_KEY = {str(cfg["version_key"]): cfg for cfg in LINEUP_MODEL_REGISTRY}
@@ -197,7 +264,55 @@ def _lineup_model_config(version_key: str, spike_max_pair_overlap: int) -> dict[
         "include_tail_signals": bool(cfg.get("include_tail_signals", False)),
         "model_profile": str(cfg.get("model_profile") or "legacy_baseline"),
         "spike_max_pair_overlap": int(spike_max_pair_overlap),
+        "gpp_overrides": dict(cfg.get("gpp_overrides") or {}),
     }
+
+
+def _contest_is_gpp(contest_type: str) -> bool:
+    return str(contest_type or "").strip().lower() in {"small gpp", "large gpp"}
+
+
+def _resolve_lineup_runtime_controls(
+    *,
+    contest_type: str,
+    version_cfg: dict[str, Any],
+    apply_gpp_variance_presets: bool,
+    salary_left_target: int,
+    low_own_bucket_exposure_pct: float,
+    low_own_bucket_min_per_lineup: int,
+    low_own_bucket_max_projected_ownership: float,
+    low_own_bucket_min_projection: float,
+    low_own_bucket_min_tail_score: float,
+    low_own_bucket_objective_bonus: float,
+    preferred_game_bonus: float,
+    ceiling_boost_lineup_pct: float,
+    ceiling_boost_stack_bonus: float,
+    ceiling_boost_salary_left_target: int,
+) -> dict[str, Any]:
+    controls: dict[str, Any] = {
+        "salary_left_target": int(salary_left_target),
+        "low_own_bucket_exposure_pct": float(low_own_bucket_exposure_pct),
+        "low_own_bucket_min_per_lineup": int(low_own_bucket_min_per_lineup),
+        "low_own_bucket_max_projected_ownership": float(low_own_bucket_max_projected_ownership),
+        "low_own_bucket_min_projection": float(low_own_bucket_min_projection),
+        "low_own_bucket_min_tail_score": float(low_own_bucket_min_tail_score),
+        "low_own_bucket_objective_bonus": float(low_own_bucket_objective_bonus),
+        "preferred_game_bonus": float(preferred_game_bonus),
+        "ceiling_boost_lineup_pct": float(ceiling_boost_lineup_pct),
+        "ceiling_boost_stack_bonus": float(ceiling_boost_stack_bonus),
+        "ceiling_boost_salary_left_target": int(ceiling_boost_salary_left_target),
+        "variance_preset_applied": False,
+    }
+    if not apply_gpp_variance_presets or not _contest_is_gpp(contest_type):
+        return controls
+    preset = version_cfg.get("gpp_overrides") if isinstance(version_cfg.get("gpp_overrides"), dict) else {}
+    if not preset:
+        return controls
+    for key, val in preset.items():
+        if key in controls and key != "variance_preset_applied":
+            controls[key] = val
+    controls["variance_preset_applied"] = True
+    return controls
 
 
 def _csv_values(text: str | None) -> list[str]:
@@ -4028,10 +4143,11 @@ with tab_lineups:
 
     c5, c6, c7 = st.columns(3)
     if run_mode_key == "single":
+        default_model_index = 1 if _contest_is_gpp(contest_type) else 0
         lineup_model_label = c5.selectbox(
             "Lineup Model",
             options=[str(cfg["label"]) for cfg in LINEUP_MODEL_REGISTRY],
-            index=2,
+            index=default_model_index,
             help=(
                 "Run one lineup model. Use All Versions to save all models in a single run."
             ),
@@ -4053,6 +4169,20 @@ with tab_lineups:
         st.caption(
             "Default All Versions allocation targets (before optional phantom promotion): "
             f"{ALL_VERSIONS_WEIGHT_TEXT}."
+        )
+    apply_gpp_variance_presets = bool(
+        st.checkbox(
+            "Apply GPP Variance Presets by Model",
+            value=True,
+            help=(
+                "For Small/Large GPP, each lineup model gets its own variance-oriented controls "
+                "(low-own share, ceiling share, salary-left target, and stack bias bonus)."
+            ),
+        )
+    )
+    if apply_gpp_variance_presets and _contest_is_gpp(contest_type):
+        st.caption(
+            "GPP variance presets are active: each model runs with distinct variance controls."
         )
 
     game_packet_for_lineups = st.session_state.get("cbb_game_slate_ai_packet")
@@ -4332,6 +4462,9 @@ with tab_lineups:
             disabled=low_own_bucket_exposure_pct <= 0.0,
         )
     )
+    low_own_bucket_min_tail_score = 55.0
+    low_own_bucket_objective_bonus = 1.3
+    preferred_game_bonus = 0.6
     cb1, cb2, cb3, cb4 = st.columns(4)
     ceiling_boost_lineup_pct = float(
         cb1.slider(
@@ -4698,6 +4831,29 @@ with tab_lineups:
                         if version_lineup_count <= 0:
                             continue
                         version_offset = int(sum(int(c.get("lineup_count") or 0) for c in version_plan[:version_idx]))
+                        runtime_controls = _resolve_lineup_runtime_controls(
+                            contest_type=contest_type,
+                            version_cfg=version_cfg,
+                            apply_gpp_variance_presets=apply_gpp_variance_presets,
+                            salary_left_target=salary_left_target,
+                            low_own_bucket_exposure_pct=low_own_bucket_exposure_pct,
+                            low_own_bucket_min_per_lineup=low_own_bucket_min_per_lineup,
+                            low_own_bucket_max_projected_ownership=low_own_bucket_max_projected_ownership,
+                            low_own_bucket_min_projection=low_own_bucket_min_projection,
+                            low_own_bucket_min_tail_score=low_own_bucket_min_tail_score,
+                            low_own_bucket_objective_bonus=low_own_bucket_objective_bonus,
+                            preferred_game_bonus=preferred_game_bonus,
+                            ceiling_boost_lineup_pct=ceiling_boost_lineup_pct,
+                            ceiling_boost_stack_bonus=ceiling_boost_stack_bonus,
+                            ceiling_boost_salary_left_target=ceiling_boost_salary_left_target,
+                        )
+                        if bool(runtime_controls.get("variance_preset_applied")):
+                            st.caption(
+                                f"[{version_cfg['version_key']}] variance preset: "
+                                f"low_own={float(runtime_controls['low_own_bucket_exposure_pct']):.0f}%, "
+                                f"ceiling={float(runtime_controls['ceiling_boost_lineup_pct']):.0f}%, "
+                                f"salary_left_target={int(runtime_controls['salary_left_target'])}"
+                            )
 
                         def _lineup_progress(done: int, total: int, status: str) -> None:
                             done_local = max(0, min(version_lineup_count, int(done)))
@@ -4734,19 +4890,19 @@ with tab_lineups:
                             uncertainty_weight=uncertainty_weight,
                             high_risk_extra_shrink=high_risk_extra_shrink,
                             dnp_risk_threshold=dnp_risk_threshold,
-                            low_own_bucket_exposure_pct=low_own_bucket_exposure_pct,
-                            low_own_bucket_min_per_lineup=low_own_bucket_min_per_lineup,
-                            low_own_bucket_max_projected_ownership=low_own_bucket_max_projected_ownership,
-                            low_own_bucket_min_projection=low_own_bucket_min_projection,
-                            low_own_bucket_min_tail_score=55.0,
-                            low_own_bucket_objective_bonus=1.3,
+                            low_own_bucket_exposure_pct=float(runtime_controls["low_own_bucket_exposure_pct"]),
+                            low_own_bucket_min_per_lineup=int(runtime_controls["low_own_bucket_min_per_lineup"]),
+                            low_own_bucket_max_projected_ownership=float(runtime_controls["low_own_bucket_max_projected_ownership"]),
+                            low_own_bucket_min_projection=float(runtime_controls["low_own_bucket_min_projection"]),
+                            low_own_bucket_min_tail_score=float(runtime_controls["low_own_bucket_min_tail_score"]),
+                            low_own_bucket_objective_bonus=float(runtime_controls["low_own_bucket_objective_bonus"]),
                             preferred_game_keys=list(game_agent_bias_meta.get("applied_game_keys") or []),
-                            preferred_game_bonus=0.6,
-                            ceiling_boost_lineup_pct=ceiling_boost_lineup_pct,
-                            ceiling_boost_stack_bonus=ceiling_boost_stack_bonus,
-                            ceiling_boost_salary_left_target=ceiling_boost_salary_left_target,
+                            preferred_game_bonus=float(runtime_controls["preferred_game_bonus"]),
+                            ceiling_boost_lineup_pct=float(runtime_controls["ceiling_boost_lineup_pct"]),
+                            ceiling_boost_stack_bonus=float(runtime_controls["ceiling_boost_stack_bonus"]),
+                            ceiling_boost_salary_left_target=int(runtime_controls["ceiling_boost_salary_left_target"]),
                             objective_score_adjustments=objective_score_adjustments,
-                            salary_left_target=salary_left_target,
+                            salary_left_target=int(runtime_controls["salary_left_target"]),
                             random_seed=lineup_seed + version_idx,
                             model_profile=str(version_cfg.get("model_profile") or "legacy_baseline"),
                             progress_callback=_lineup_progress,
@@ -4757,6 +4913,8 @@ with tab_lineups:
                             "lineup_strategy": str(version_cfg["lineup_strategy"]),
                             "include_tail_signals": bool(version_cfg.get("include_tail_signals", False)),
                             "model_profile": str(version_cfg.get("model_profile") or ""),
+                            "variance_preset_applied": bool(runtime_controls.get("variance_preset_applied")),
+                            "runtime_controls": runtime_controls,
                             "lineup_count_requested": int(version_lineup_count),
                             "lineups": lineups,
                             "warnings": warnings,
@@ -4781,6 +4939,7 @@ with tab_lineups:
                             "contest_type": contest_type,
                             "lineup_seed": lineup_seed,
                             "all_versions_default_weights": DEFAULT_ALL_VERSION_WEIGHTS,
+                            "apply_gpp_variance_presets": apply_gpp_variance_presets,
                             "max_salary_left": effective_max_salary_left,
                             "requested_max_salary_left": max_salary_left,
                             "strict_salary_utilization": strict_salary_utilization,
@@ -4804,6 +4963,9 @@ with tab_lineups:
                             "low_own_bucket_min_per_lineup": low_own_bucket_min_per_lineup,
                             "low_own_bucket_max_projected_ownership": low_own_bucket_max_projected_ownership,
                             "low_own_bucket_min_projection": low_own_bucket_min_projection,
+                            "low_own_bucket_min_tail_score": low_own_bucket_min_tail_score,
+                            "low_own_bucket_objective_bonus": low_own_bucket_objective_bonus,
+                            "preferred_game_bonus": preferred_game_bonus,
                             "ceiling_boost_lineup_pct": ceiling_boost_lineup_pct,
                             "ceiling_boost_stack_bonus": ceiling_boost_stack_bonus,
                             "ceiling_boost_salary_left_target": ceiling_boost_salary_left_target,
@@ -5979,6 +6141,109 @@ with tab_tournament_review:
                         ]
                         compare_use_cols = [c for c in compare_cols if c in proj_compare_view.columns]
                         st.dataframe(proj_compare_view[compare_use_cols], hide_index=True, use_container_width=True)
+
+                        st.subheader("Lineup Generator Diagnostics")
+                        st.caption(
+                            "Use these visuals to isolate projection bias, confidence calibration gaps, and leverage misses."
+                        )
+                        d1, d2 = st.columns([2, 1])
+                        diag_projection_source = d1.selectbox(
+                            "Projection Source for Bias Heatmap",
+                            options=["Blended Projection", "Our Projection", "Vegas Projection"],
+                            index=0,
+                            key="tournament_diag_projection_source",
+                        )
+                        diag_min_samples = int(
+                            d2.number_input(
+                                "Min Samples per Cell",
+                                min_value=1,
+                                max_value=200,
+                                value=5,
+                                step=1,
+                                key="tournament_diag_min_samples",
+                                help="Cells with fewer samples are masked in the heatmap.",
+                            )
+                        )
+                        error_col = {
+                            "Blended Projection": "blend_error",
+                            "Our Projection": "our_error",
+                            "Vegas Projection": "vegas_error",
+                        }.get(diag_projection_source, "blend_error")
+                        heatmap_packet = build_projection_bias_heatmap(
+                            proj_compare_view,
+                            error_col=error_col,
+                            min_samples_per_cell=diag_min_samples,
+                        )
+                        heatmap_df = (
+                            heatmap_packet.get("avg_error_matrix_df").copy()
+                            if isinstance(heatmap_packet.get("avg_error_matrix_df"), pd.DataFrame)
+                            else pd.DataFrame()
+                        )
+                        samples_df = (
+                            heatmap_packet.get("samples_matrix_df").copy()
+                            if isinstance(heatmap_packet.get("samples_matrix_df"), pd.DataFrame)
+                            else pd.DataFrame()
+                        )
+                        heatmap_cells_df = (
+                            heatmap_packet.get("cells_df").copy()
+                            if isinstance(heatmap_packet.get("cells_df"), pd.DataFrame)
+                            else pd.DataFrame()
+                        )
+                        if heatmap_cells_df.empty:
+                            st.info("Not enough projection-vs-actual rows to build diagnostics heatmap.")
+                        else:
+                            st.markdown("**1) Projection Bias Heatmap (Salary x Position)**")
+                            st.caption("Average Error (Actual FPTS - Projected FPTS)")
+                            chart_df = heatmap_df.apply(pd.to_numeric, errors="coerce")
+                            text_values = chart_df.applymap(lambda v: "" if pd.isna(v) else f"{float(v):.2f}")
+                            chart_vals = pd.to_numeric(chart_df.stack(), errors="coerce").dropna()
+                            max_abs = float(chart_vals.abs().max()) if not chart_vals.empty else 0.0
+                            color_bound = max(1.0, max_abs)
+                            heatmap_fig = px.imshow(
+                                chart_df,
+                                labels={"x": "Salary Bucket", "y": "Primary Position", "color": "Avg Error"},
+                                color_continuous_scale="RdBu",
+                                zmin=-color_bound,
+                                zmax=color_bound,
+                                aspect="auto",
+                            )
+                            heatmap_fig.update_traces(text=text_values.values, texttemplate="%{text}")
+                            heatmap_fig.update_layout(
+                                height=440,
+                                margin=dict(l=8, r=8, t=24, b=8),
+                                coloraxis_colorbar_title_text="Avg Error",
+                            )
+                            heatmap_fig.update_xaxes(side="bottom")
+                            st.plotly_chart(
+                                heatmap_fig,
+                                use_container_width=True,
+                                key=f"tournament_projection_bias_heatmap_{error_col}",
+                            )
+
+                            if not samples_df.empty:
+                                st.caption("Sample counts by cell")
+                                st.dataframe(samples_df, use_container_width=True)
+                            diag_cols = [
+                                "primary_position",
+                                "salary_bucket",
+                                "samples",
+                                "avg_error",
+                                "mae",
+                                "median_error",
+                                "std_error",
+                            ]
+                            diag_show_cols = [c for c in diag_cols if c in heatmap_cells_df.columns]
+                            if diag_show_cols:
+                                diag_table = heatmap_cells_df[diag_show_cols].sort_values(
+                                    ["salary_bucket", "primary_position"], ascending=[True, True], kind="stable"
+                                )
+                                st.download_button(
+                                    "Download Projection Bias Cells CSV",
+                                    data=diag_table.to_csv(index=False),
+                                    file_name=f"tournament_projection_bias_cells_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                                    mime="text/csv",
+                                    key="download_tournament_projection_bias_cells_csv",
+                                )
 
                         adjust_df = build_projection_adjustment_factors(proj_compare_df)
                         st.caption(

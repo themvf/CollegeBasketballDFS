@@ -10,6 +10,14 @@ NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 HIGH_POINTS_THRESHOLD = 35.0
 LOW_OWNERSHIP_THRESHOLD = 10.0
 NULLISH_TEXT_VALUES = {"", "nan", "none", "null"}
+DIAGNOSTIC_SALARY_BUCKET_LABELS = (
+    "Value (<5k)",
+    "Low Mid (5k-6.5k)",
+    "Mid (6.5k-8k)",
+    "Upper (8k-9.5k)",
+    "Stud (9.5k+)",
+)
+DIAGNOSTIC_POSITION_ORDER = ("PG", "SG", "SF", "PF", "C", "UNK")
 PROJECTED_OWNERSHIP_ALIASES = (
     "projected_ownership",
     "projected ownership",
@@ -79,6 +87,33 @@ def _to_float(value: Any) -> float | None:
 
 def _norm_col_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _salary_bucket_label(value: Any) -> str:
+    salary = pd.to_numeric(value, errors="coerce")
+    if pd.isna(salary):
+        return ""
+    salary_val = float(salary)
+    if salary_val < 5000.0:
+        return "Value (<5k)"
+    if salary_val < 6500.0:
+        return "Low Mid (5k-6.5k)"
+    if salary_val < 8000.0:
+        return "Mid (6.5k-8k)"
+    if salary_val < 9500.0:
+        return "Upper (8k-9.5k)"
+    return "Stud (9.5k+)"
+
+
+def _primary_position_label(value: Any) -> str:
+    text = str(value or "").strip().upper()
+    if not text or text.lower() in NULLISH_TEXT_VALUES:
+        return "UNK"
+    tokens = [tok for tok in re.split(r"[^A-Z]+", text) if tok]
+    for tok in tokens:
+        if tok in {"PG", "SG", "SF", "PF", "C"}:
+            return tok
+    return "UNK"
 
 
 def _resolve_column_alias(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
@@ -851,6 +886,79 @@ def build_projection_adjustment_factors(comparison_df: pd.DataFrame) -> pd.DataF
         _segment_frame(comparison_df, "Forward (F)", pos.str.startswith("F")),
     ]
     return pd.DataFrame(rows)
+
+
+def build_projection_bias_heatmap(
+    comparison_df: pd.DataFrame | None,
+    *,
+    error_col: str = "blend_error",
+    min_samples_per_cell: int = 1,
+) -> dict[str, pd.DataFrame]:
+    empty_matrix = pd.DataFrame(index=list(DIAGNOSTIC_POSITION_ORDER), columns=list(DIAGNOSTIC_SALARY_BUCKET_LABELS))
+    empty_samples = empty_matrix.copy()
+    if comparison_df is None or comparison_df.empty or error_col not in comparison_df.columns:
+        return {
+            "avg_error_matrix_df": empty_matrix,
+            "samples_matrix_df": empty_samples,
+            "cells_df": pd.DataFrame(
+                columns=["primary_position", "salary_bucket", "samples", "avg_error", "abs_avg_error", "mae"]
+            ),
+        }
+
+    work = comparison_df.copy()
+    work["error_value"] = pd.to_numeric(work.get(error_col), errors="coerce")
+    work["Salary"] = pd.to_numeric(work.get("Salary"), errors="coerce")
+    work["salary_bucket"] = work["Salary"].map(_salary_bucket_label)
+    work["primary_position"] = work.get("Position", pd.Series(dtype=str)).map(_primary_position_label)
+    work = work.loc[work["error_value"].notna() & (work["salary_bucket"].astype(str).str.strip() != "")].copy()
+    if work.empty:
+        return {
+            "avg_error_matrix_df": empty_matrix,
+            "samples_matrix_df": empty_samples,
+            "cells_df": pd.DataFrame(
+                columns=["primary_position", "salary_bucket", "samples", "avg_error", "abs_avg_error", "mae"]
+            ),
+        }
+
+    grouped = (
+        work.groupby(["primary_position", "salary_bucket"], as_index=False)
+        .agg(
+            samples=("error_value", "count"),
+            avg_error=("error_value", "mean"),
+            median_error=("error_value", "median"),
+            std_error=("error_value", "std"),
+        )
+        .reset_index(drop=True)
+    )
+    mae_df = (
+        work.groupby(["primary_position", "salary_bucket"], as_index=False)
+        .agg(mae=("error_value", lambda s: float(pd.to_numeric(s, errors="coerce").abs().mean())))
+        .reset_index(drop=True)
+    )
+    grouped = grouped.merge(mae_df, on=["primary_position", "salary_bucket"], how="left")
+    grouped["samples"] = pd.to_numeric(grouped["samples"], errors="coerce").fillna(0).astype(int)
+    grouped["avg_error"] = pd.to_numeric(grouped["avg_error"], errors="coerce")
+    grouped["abs_avg_error"] = grouped["avg_error"].abs()
+    grouped["mae"] = pd.to_numeric(grouped["mae"], errors="coerce")
+    grouped["median_error"] = pd.to_numeric(grouped.get("median_error"), errors="coerce")
+    grouped["std_error"] = pd.to_numeric(grouped.get("std_error"), errors="coerce")
+    grouped = grouped.sort_values(["primary_position", "salary_bucket"], kind="stable").reset_index(drop=True)
+
+    min_n = int(max(1, min_samples_per_cell))
+    grouped_for_matrix = grouped.copy()
+    grouped_for_matrix.loc[grouped_for_matrix["samples"] < min_n, "avg_error"] = pd.NA
+
+    avg_matrix = grouped_for_matrix.pivot(index="primary_position", columns="salary_bucket", values="avg_error")
+    avg_matrix = avg_matrix.reindex(index=list(DIAGNOSTIC_POSITION_ORDER), columns=list(DIAGNOSTIC_SALARY_BUCKET_LABELS))
+
+    samples_matrix = grouped.pivot(index="primary_position", columns="salary_bucket", values="samples")
+    samples_matrix = samples_matrix.reindex(index=list(DIAGNOSTIC_POSITION_ORDER), columns=list(DIAGNOSTIC_SALARY_BUCKET_LABELS))
+
+    return {
+        "avg_error_matrix_df": avg_matrix,
+        "samples_matrix_df": samples_matrix,
+        "cells_df": grouped,
+    }
 
 
 def build_user_strategy_summary(entry_summary_df: pd.DataFrame) -> pd.DataFrame:
