@@ -218,6 +218,7 @@ def test_build_player_pool_ownership_v2_has_slate_controls() -> None:
 
 def test_build_player_pool_uses_historical_ownership_prior_when_current_field_is_missing() -> None:
     slate = _sample_slate()
+    slate.index = pd.Index(range(10, 10 + len(slate)))
     history = pd.DataFrame(
         [
             {"Name": "Guard 1", "TeamAbbrev": "CCC", "actual_ownership": 26.0, "review_date": "2026-02-07"},

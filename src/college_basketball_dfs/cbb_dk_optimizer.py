@@ -288,13 +288,14 @@ def _attach_historical_ownership_priors(
     )
 
     historical_baseline = pd.to_numeric(out["historical_ownership_baseline"], errors="coerce")
-    out["field_ownership_pct"] = existing_field.where(existing_field.notna(), historical_baseline).round(2)
-    out["historical_ownership_used_in_prior"] = existing_field.isna() & historical_baseline.notna()
+    current_field = pd.to_numeric(out.get("field_ownership_pct"), errors="coerce")
+    out["field_ownership_pct"] = current_field.where(current_field.notna(), historical_baseline).round(2)
+    out["historical_ownership_used_in_prior"] = current_field.isna() & historical_baseline.notna()
     source = pd.Series([""] * len(out), index=out.index, dtype="object")
-    source.loc[existing_field.notna()] = "current_field"
-    source.loc[existing_field.isna() & pd.to_numeric(out["historical_ownership_last5"], errors="coerce").notna()] = "historical_last5"
+    source.loc[current_field.notna()] = "current_field"
+    source.loc[current_field.isna() & pd.to_numeric(out["historical_ownership_last5"], errors="coerce").notna()] = "historical_last5"
     source.loc[
-        existing_field.isna()
+        current_field.isna()
         & pd.to_numeric(out["historical_ownership_last5"], errors="coerce").isna()
         & pd.to_numeric(out["historical_ownership_avg"], errors="coerce").notna()
     ] = "historical_avg"
