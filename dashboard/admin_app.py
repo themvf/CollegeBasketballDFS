@@ -2853,6 +2853,126 @@ def load_ownership_frame_for_date(
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def _read_contest_standings_ownership_history_for_date(
+    bucket_name: str,
+    selected_date: date,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    prefix = f"{store.contest_standings_prefix}/{selected_date.isoformat()}_"
+    try:
+        blob_names = sorted(
+            {
+                str(blob.name or "")
+                for blob in store.bucket.list_blobs(prefix=prefix)
+                if str(blob.name or "").lower().endswith(".csv")
+            }
+        )
+    except Exception:
+        return pd.DataFrame(columns=["Name", "TeamAbbrev", "actual_ownership", "review_date"])
+
+    frames: list[pd.DataFrame] = []
+    for blob_name in blob_names:
+        try:
+            csv_text = store.bucket.blob(blob_name).download_as_text(encoding="utf-8")
+        except Exception:
+            continue
+        if not csv_text or not csv_text.strip():
+            continue
+        try:
+            standings_df = pd.read_csv(io.StringIO(csv_text))
+        except Exception:
+            continue
+        if standings_df.empty:
+            continue
+        normalized = normalize_contest_standings_frame(standings_df)
+        extracted = extract_actual_ownership_from_standings(normalized)
+        if extracted.empty:
+            continue
+        one = extracted.rename(columns={"player_name": "Name"}).copy()
+        one["Name"] = one["Name"].astype(str).str.strip()
+        one["TeamAbbrev"] = ""
+        one["actual_ownership"] = pd.to_numeric(one.get("actual_ownership"), errors="coerce")
+        one["review_date"] = selected_date.isoformat()
+        one = one.loc[(one["Name"] != "") & one["actual_ownership"].notna(), ["Name", "TeamAbbrev", "actual_ownership", "review_date"]]
+        if not one.empty:
+            frames.append(one)
+
+    if not frames:
+        return pd.DataFrame(columns=["Name", "TeamAbbrev", "actual_ownership", "review_date"])
+    return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=900, show_spinner=False)
+def load_historical_ownership_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    selected_slate_key: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    season_start = season_start_for_date(selected_date)
+    if selected_date <= season_start:
+        return pd.DataFrame(columns=["Name", "TeamAbbrev", "actual_ownership", "review_date"])
+
+    history_dates = iter_dates(season_start, selected_date - timedelta(days=1))
+    frames: list[pd.DataFrame] = []
+    for history_date in history_dates:
+        own_df = load_ownership_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=history_date,
+            selected_slate_key=selected_slate_key,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if own_df.empty and selected_slate_key:
+            own_df = load_ownership_frame_for_date(
+                bucket_name=bucket_name,
+                selected_date=history_date,
+                selected_slate_key=None,
+                gcp_project=gcp_project,
+                service_account_json=service_account_json,
+                service_account_json_b64=service_account_json_b64,
+            )
+        if own_df.empty:
+            own_df = _read_contest_standings_ownership_history_for_date(
+                bucket_name=bucket_name,
+                selected_date=history_date,
+                gcp_project=gcp_project,
+                service_account_json=service_account_json,
+                service_account_json_b64=service_account_json_b64,
+            )
+        if own_df.empty:
+            continue
+        one = own_df.copy()
+        if "TeamAbbrev" not in one.columns:
+            one["TeamAbbrev"] = ""
+        one["Name"] = one["Name"].astype(str).str.strip()
+        one["TeamAbbrev"] = one["TeamAbbrev"].astype(str).str.strip().str.upper()
+        one["actual_ownership"] = pd.to_numeric(one.get("actual_ownership"), errors="coerce")
+        one["review_date"] = pd.to_datetime(one.get("review_date"), errors="coerce").where(
+            pd.to_datetime(one.get("review_date"), errors="coerce").notna(),
+            pd.Timestamp(history_date),
+        )
+        one = one.loc[(one["Name"] != "") & one["actual_ownership"].notna(), ["Name", "TeamAbbrev", "actual_ownership", "review_date"]]
+        if not one.empty:
+            frames.append(one)
+
+    if not frames:
+        return pd.DataFrame(columns=["Name", "TeamAbbrev", "actual_ownership", "review_date"])
+    return pd.concat(frames, ignore_index=True)
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def load_actual_results_frame_for_date(
     bucket_name: str,
     selected_date: date,
@@ -3009,6 +3129,14 @@ def build_optimizer_pool_for_date(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
+    ownership_history_df = load_historical_ownership_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=slate_date,
+        selected_slate_key=slate_key,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
     odds_df = load_odds_frame_for_date(
         bucket_name=bucket_name,
         selected_date=slate_date,
@@ -3037,6 +3165,7 @@ def build_optimizer_pool_for_date(
         slate_df=filtered_slate,
         props_df=props_df,
         season_stats_df=season_history_df,
+        ownership_history_df=ownership_history_df,
         bookmaker_filter=(bookmaker or None),
         odds_games_df=odds_scored_df,
         recent_form_games=int(max(1, recent_form_games)),

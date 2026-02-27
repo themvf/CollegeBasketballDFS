@@ -148,6 +148,160 @@ def _normalize_col_name(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
 
 
+def _attach_historical_ownership_priors(
+    pool_df: pd.DataFrame,
+    ownership_history_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    for col in [
+        "historical_ownership_avg",
+        "historical_ownership_last5",
+        "historical_ownership_samples",
+        "historical_ownership_baseline",
+    ]:
+        if col not in out.columns:
+            out[col] = pd.NA
+    if "ownership_prior_source" not in out.columns:
+        out["ownership_prior_source"] = ""
+    if "historical_ownership_used_in_prior" not in out.columns:
+        out["historical_ownership_used_in_prior"] = False
+    if "field_ownership_pct" not in out.columns:
+        out["field_ownership_pct"] = pd.NA
+
+    existing_field = pd.to_numeric(out.get("field_ownership_pct"), errors="coerce")
+    if ownership_history_df is None or ownership_history_df.empty:
+        out["ownership_prior_source"] = existing_field.map(lambda x: "current_field" if pd.notna(x) else "")
+        return out
+
+    hist = ownership_history_df.copy()
+    rename_map: dict[str, str] = {}
+    normalized_cols = {_normalize_col_name(col): col for col in hist.columns}
+    for alias, dest in {
+        "playername": "Name",
+        "player": "Name",
+        "name": "Name",
+        "teamabbrev": "TeamAbbrev",
+        "teamabbr": "TeamAbbrev",
+        "team": "TeamAbbrev",
+        "actualownership": "actual_ownership",
+        "actualown": "actual_ownership",
+        "fieldownership": "actual_ownership",
+        "ownership": "actual_ownership",
+        "own": "actual_ownership",
+        "pctdrafted": "actual_ownership",
+    }.items():
+        source_col = normalized_cols.get(alias)
+        if source_col and source_col not in rename_map:
+            rename_map[source_col] = dest
+    if rename_map:
+        hist = hist.rename(columns=rename_map)
+
+    if "Name" not in hist.columns or "actual_ownership" not in hist.columns:
+        out["ownership_prior_source"] = existing_field.map(lambda x: "current_field" if pd.notna(x) else "")
+        return out
+
+    if "TeamAbbrev" not in hist.columns:
+        hist["TeamAbbrev"] = ""
+    if "review_date" not in hist.columns:
+        hist["review_date"] = pd.NaT
+
+    hist["Name"] = hist["Name"].astype(str).str.strip()
+    hist["TeamAbbrev"] = hist["TeamAbbrev"].astype(str).str.strip().str.upper()
+    hist["actual_ownership"] = pd.to_numeric(hist.get("actual_ownership"), errors="coerce").clip(lower=0.0, upper=100.0)
+    hist["review_date"] = pd.to_datetime(hist.get("review_date"), errors="coerce")
+    hist["_name_norm"] = hist["Name"].map(_normalize_text)
+    hist["_team_norm"] = hist["TeamAbbrev"].map(_normalize_text)
+    hist = hist.loc[(hist["_name_norm"] != "") & hist["actual_ownership"].notna()].copy()
+    if hist.empty:
+        out["ownership_prior_source"] = existing_field.map(lambda x: "current_field" if pd.notna(x) else "")
+        return out
+
+    team_hist = hist.loc[hist["_team_norm"] != ""].copy()
+    if not team_hist.empty:
+        team_hist = team_hist.sort_values(["_name_norm", "_team_norm", "review_date"], kind="stable")
+        team_avg = (
+            team_hist.groupby(["_name_norm", "_team_norm"], as_index=False)
+            .agg(
+                historical_ownership_avg_team=("actual_ownership", "mean"),
+                historical_ownership_samples_team=("actual_ownership", "count"),
+            )
+        )
+        team_last5 = (
+            team_hist.groupby(["_name_norm", "_team_norm"], as_index=False, group_keys=False)
+            .tail(5)
+            .groupby(["_name_norm", "_team_norm"], as_index=False)["actual_ownership"]
+            .mean()
+            .rename(columns={"actual_ownership": "historical_ownership_last5_team"})
+        )
+        out = out.merge(team_avg, on=["_name_norm", "_team_norm"], how="left")
+        out = out.merge(team_last5, on=["_name_norm", "_team_norm"], how="left")
+    else:
+        out["historical_ownership_avg_team"] = pd.NA
+        out["historical_ownership_last5_team"] = pd.NA
+        out["historical_ownership_samples_team"] = pd.NA
+
+    current_name_counts = out["_name_norm"].value_counts(dropna=False)
+    unique_name_keys = set(current_name_counts.loc[current_name_counts == 1].index.tolist())
+    name_hist = hist.loc[hist["_name_norm"].isin(unique_name_keys)].copy()
+    if not name_hist.empty:
+        name_hist = name_hist.sort_values(["_name_norm", "review_date"], kind="stable")
+        name_avg = (
+            name_hist.groupby("_name_norm", as_index=False)
+            .agg(
+                historical_ownership_avg_name=("actual_ownership", "mean"),
+                historical_ownership_samples_name=("actual_ownership", "count"),
+            )
+        )
+        name_last5 = (
+            name_hist.groupby("_name_norm", as_index=False, group_keys=False)
+            .tail(5)
+            .groupby("_name_norm", as_index=False)["actual_ownership"]
+            .mean()
+            .rename(columns={"actual_ownership": "historical_ownership_last5_name"})
+        )
+        out = out.merge(name_avg, on="_name_norm", how="left")
+        out = out.merge(name_last5, on="_name_norm", how="left")
+    else:
+        out["historical_ownership_avg_name"] = pd.NA
+        out["historical_ownership_last5_name"] = pd.NA
+        out["historical_ownership_samples_name"] = pd.NA
+
+    out["historical_ownership_avg"] = pd.to_numeric(out.get("historical_ownership_avg_team"), errors="coerce")
+    out["historical_ownership_avg"] = out["historical_ownership_avg"].where(
+        out["historical_ownership_avg"].notna(),
+        pd.to_numeric(out.get("historical_ownership_avg_name"), errors="coerce"),
+    )
+    out["historical_ownership_last5"] = pd.to_numeric(out.get("historical_ownership_last5_team"), errors="coerce")
+    out["historical_ownership_last5"] = out["historical_ownership_last5"].where(
+        out["historical_ownership_last5"].notna(),
+        pd.to_numeric(out.get("historical_ownership_last5_name"), errors="coerce"),
+    )
+    out["historical_ownership_samples"] = pd.to_numeric(out.get("historical_ownership_samples_team"), errors="coerce")
+    out["historical_ownership_samples"] = out["historical_ownership_samples"].where(
+        out["historical_ownership_samples"].notna(),
+        pd.to_numeric(out.get("historical_ownership_samples_name"), errors="coerce"),
+    )
+    out["historical_ownership_baseline"] = pd.to_numeric(out["historical_ownership_last5"], errors="coerce")
+    out["historical_ownership_baseline"] = out["historical_ownership_baseline"].where(
+        out["historical_ownership_baseline"].notna(),
+        pd.to_numeric(out["historical_ownership_avg"], errors="coerce"),
+    )
+
+    historical_baseline = pd.to_numeric(out["historical_ownership_baseline"], errors="coerce")
+    out["field_ownership_pct"] = existing_field.where(existing_field.notna(), historical_baseline).round(2)
+    out["historical_ownership_used_in_prior"] = existing_field.isna() & historical_baseline.notna()
+    source = pd.Series([""] * len(out), index=out.index, dtype="object")
+    source.loc[existing_field.notna()] = "current_field"
+    source.loc[existing_field.isna() & pd.to_numeric(out["historical_ownership_last5"], errors="coerce").notna()] = "historical_last5"
+    source.loc[
+        existing_field.isna()
+        & pd.to_numeric(out["historical_ownership_last5"], errors="coerce").isna()
+        & pd.to_numeric(out["historical_ownership_avg"], errors="coerce").notna()
+    ] = "historical_avg"
+    out["ownership_prior_source"] = source
+    return out
+
+
 def normalize_injuries_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     cols = ["player_name", "team", "status", "notes", "active", "updated_at"]
     if df is None or df.empty:
@@ -485,6 +639,7 @@ def build_player_pool(
     slate_df: pd.DataFrame,
     props_df: pd.DataFrame | None,
     season_stats_df: pd.DataFrame | None = None,
+    ownership_history_df: pd.DataFrame | None = None,
     bookmaker_filter: str | None = None,
     odds_games_df: pd.DataFrame | None = None,
     recent_form_games: int = 7,
@@ -507,6 +662,7 @@ def build_player_pool(
     out["game_key"] = out.get("Game Info", "").map(_game_key)
     out["_name_norm"] = out["Name"].map(_normalize_text)
     out["_team_norm"] = out["TeamAbbrev"].map(_normalize_text)
+    out = _attach_historical_ownership_priors(out, ownership_history_df)
 
     # Attach game-level Vegas tail metrics (p+8 / p+12 / volatility) by matching slate game keys to odds events.
     if odds_games_df is not None and not odds_games_df.empty and "game_key" in out.columns:
@@ -1202,6 +1358,12 @@ def build_player_pool(
         "our_dk_fpts_last7_name",
         "our_dk_fpts_last3_team",
         "our_dk_fpts_last3_name",
+        "historical_ownership_avg_team",
+        "historical_ownership_last5_team",
+        "historical_ownership_samples_team",
+        "historical_ownership_avg_name",
+        "historical_ownership_last5_name",
+        "historical_ownership_samples_name",
     ]
     existing_drop = [c for c in drop_cols if c in out.columns]
     return out.drop(columns=existing_drop)
@@ -2452,6 +2614,13 @@ def generate_lineups(
         "projection_uncertainty_score",
         "dnp_risk_score",
         "projection_uncertainty_multiplier",
+        "field_ownership_pct",
+        "historical_ownership_avg",
+        "historical_ownership_last5",
+        "historical_ownership_samples",
+        "historical_ownership_baseline",
+        "ownership_prior_source",
+        "historical_ownership_used_in_prior",
         "ownership_chalk_surge_score",
         "ownership_chalk_surge_flag",
         "ownership_confidence",

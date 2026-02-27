@@ -216,6 +216,44 @@ def test_build_player_pool_ownership_v2_has_slate_controls() -> None:
     assert abs(float(own.sum()) - 800.0) <= 5.0
 
 
+def test_build_player_pool_uses_historical_ownership_prior_when_current_field_is_missing() -> None:
+    slate = _sample_slate()
+    history = pd.DataFrame(
+        [
+            {"Name": "Guard 1", "TeamAbbrev": "CCC", "actual_ownership": 26.0, "review_date": "2026-02-07"},
+            {"Name": "Guard 1", "TeamAbbrev": "CCC", "actual_ownership": 28.0, "review_date": "2026-02-10"},
+            {"Name": "Guard 1", "TeamAbbrev": "CCC", "actual_ownership": 30.0, "review_date": "2026-02-12"},
+            {"Name": "Forward 1", "TeamAbbrev": "DDD", "actual_ownership": 5.0, "review_date": "2026-02-08"},
+            {"Name": "Forward 1", "TeamAbbrev": "DDD", "actual_ownership": 6.0, "review_date": "2026-02-11"},
+            {"Name": "Forward 1", "TeamAbbrev": "DDD", "actual_ownership": 4.0, "review_date": "2026-02-13"},
+        ]
+    )
+
+    base_pool = build_player_pool(slate, _sample_props(), bookmaker_filter="fanduel")
+    hist_pool = build_player_pool(
+        slate,
+        _sample_props(),
+        ownership_history_df=history,
+        bookmaker_filter="fanduel",
+    )
+
+    hist_g1 = hist_pool.loc[hist_pool["Name"] == "Guard 1"].iloc[0]
+    hist_f1 = hist_pool.loc[hist_pool["Name"] == "Forward 1"].iloc[0]
+
+    assert round(float(hist_g1["historical_ownership_avg"]), 2) == 28.0
+    assert round(float(hist_g1["historical_ownership_last5"]), 2) == 28.0
+    assert int(hist_g1["historical_ownership_samples"]) == 3
+    assert round(float(hist_g1["field_ownership_pct"]), 2) == 28.0
+    assert hist_g1["ownership_prior_source"] == "historical_last5"
+    assert bool(hist_g1["historical_ownership_used_in_prior"]) is True
+    assert round(float(hist_f1["field_ownership_pct"]), 2) == 5.0
+    projected_shift = (
+        pd.to_numeric(hist_pool["projected_ownership"], errors="coerce")
+        - pd.to_numeric(base_pool["projected_ownership"], errors="coerce")
+    ).abs().sum()
+    assert projected_shift > 0.0
+
+
 def test_generate_lineups_respects_locks_and_excludes() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     locked = ["1001"]
