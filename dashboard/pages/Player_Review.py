@@ -19,7 +19,6 @@ if str(SRC) not in sys.path:
 from college_basketball_dfs.cbb_backfill import iter_dates, season_start_for_date
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_ncaa import prior_day
-from college_basketball_dfs.cbb_tournament_review import build_projection_actual_comparison
 
 
 PROJECTED_OWNERSHIP_ALIASES = (
@@ -95,10 +94,15 @@ def load_projection_player_totals_dataset(
         frames.append(df)
 
     if not frames:
-        return pd.DataFrame(), {"projection_days_found": 0, "projection_rows": 0}
+        return pd.DataFrame(), {
+            "dates_scanned": int(len(dates)),
+            "projection_days_found": 0,
+            "projection_rows": 0,
+        }
 
     out = pd.concat(frames, ignore_index=True)
     return out, {
+        "dates_scanned": int(len(dates)),
         "projection_days_found": int(projection_days),
         "projection_rows": int(len(out)),
     }
@@ -176,7 +180,7 @@ def _build_actual_results_from_players_frame(players_df: pd.DataFrame) -> pd.Dat
 
 
 @st.cache_data(ttl=900, show_spinner=False)
-def load_projection_actual_comparison_dataset(
+def load_actual_player_history_dataset(
     bucket_name: str,
     start_date: date,
     end_date: date,
@@ -193,22 +197,9 @@ def load_projection_actual_comparison_dataset(
 
     frames: list[pd.DataFrame] = []
     dates = iter_dates(start_date, end_date)
-    projection_days = 0
     actual_days = 0
-    comparison_days = 0
 
     for d in dates:
-        proj_csv = store.read_projections_csv(d)
-        if not proj_csv or not proj_csv.strip():
-            continue
-        try:
-            proj_df = pd.read_csv(io.StringIO(proj_csv))
-        except Exception:
-            continue
-        if proj_df.empty:
-            continue
-        projection_days += 1
-
         try:
             players_blob = store.players_blob_name(d)
             players_csv = store.read_players_csv_blob(players_blob)
@@ -222,36 +213,27 @@ def load_projection_actual_comparison_dataset(
             continue
         if players_df.empty:
             continue
-        actual_days += 1
 
         actual_df = _build_actual_results_from_players_frame(players_df)
         if actual_df.empty:
             continue
-        comparison_df = build_projection_actual_comparison(
-            projection_df=proj_df,
-            actual_results_df=actual_df,
-        )
-        if comparison_df.empty:
-            continue
-        comparison_days += 1
-        comparison_df = comparison_df.copy()
-        comparison_df["review_date"] = d.isoformat()
-        frames.append(comparison_df)
+        actual_days += 1
+        actual_df = actual_df.copy()
+        actual_df["review_date"] = d.isoformat()
+        frames.append(actual_df)
 
     if not frames:
         return pd.DataFrame(), {
-            "projection_days_found": int(projection_days),
+            "dates_scanned": int(len(dates)),
             "actual_days_found": int(actual_days),
-            "comparison_days_found": int(comparison_days),
-            "comparison_rows": 0,
+            "actual_rows": 0,
         }
 
     out = pd.concat(frames, ignore_index=True)
     return out, {
-        "projection_days_found": int(projection_days),
+        "dates_scanned": int(len(dates)),
         "actual_days_found": int(actual_days),
-        "comparison_days_found": int(comparison_days),
-        "comparison_rows": int(len(out)),
+        "actual_rows": int(len(out)),
     }
 
 
@@ -454,10 +436,10 @@ def _aggregate_player_metric(
 
 
 def build_player_review_table(
-    projection_actual_df: pd.DataFrame,
+    actual_player_history_df: pd.DataFrame,
     player_totals_df: pd.DataFrame,
 ) -> tuple[pd.DataFrame, list[str], dict[str, bool]]:
-    actual_history = _build_player_history_frame(projection_actual_df)
+    actual_history = _build_player_history_frame(actual_player_history_df)
     projection_history = _build_player_history_frame(player_totals_df)
 
     identity_frames: list[pd.DataFrame] = []
@@ -639,7 +621,7 @@ with st.spinner("Loading projection snapshots and actual results from GCS..."):
         service_account_json=cred_json,
         service_account_json_b64=cred_json_b64,
     )
-    projection_actual_df, projection_actual_meta = load_projection_actual_comparison_dataset(
+    actual_history_df, actual_history_meta = load_actual_player_history_dataset(
         bucket_name=bucket_name.strip(),
         start_date=start_date,
         end_date=end_date,
@@ -648,14 +630,30 @@ with st.spinner("Loading projection snapshots and actual results from GCS..."):
         service_account_json_b64=cred_json_b64,
     )
 
-m1, m2, m3, m4 = st.columns(4)
-m1.metric("Projection Days", int(player_totals_meta.get("projection_days_found") or 0))
-m2.metric("Projection Rows", int(player_totals_meta.get("projection_rows") or 0))
-m3.metric("Proj-Actual Days", int(projection_actual_meta.get("comparison_days_found") or 0))
-m4.metric("Proj-Actual Rows", int(projection_actual_meta.get("comparison_rows") or 0))
+m1, m2, m3, m4, m5 = st.columns(5)
+m1.metric("Dates Scanned", int(player_totals_meta.get("dates_scanned") or actual_history_meta.get("dates_scanned") or 0))
+m2.metric("Projection Days", int(player_totals_meta.get("projection_days_found") or 0))
+m3.metric("Actual Player Days", int(actual_history_meta.get("actual_days_found") or 0))
+m4.metric("Projection Rows", int(player_totals_meta.get("projection_rows") or 0))
+m5.metric("Actual Player Rows", int(actual_history_meta.get("actual_rows") or 0))
+
+dates_scanned = int(player_totals_meta.get("dates_scanned") or actual_history_meta.get("dates_scanned") or 0)
+projection_days = int(player_totals_meta.get("projection_days_found") or 0)
+if dates_scanned > 0 and projection_days < dates_scanned:
+    st.warning(
+        f"Projection snapshots were found for {projection_days} of {dates_scanned} scanned dates "
+        f"({start_date.isoformat()} to {end_date.isoformat()}). "
+        "Ownership and salary metrics are limited to available projection days."
+    )
+actual_days_found = int(actual_history_meta.get("actual_days_found") or 0)
+if dates_scanned > 0 and actual_days_found < dates_scanned:
+    st.info(
+        f"Actual player results were found for {actual_days_found} of {dates_scanned} scanned dates "
+        f"({start_date.isoformat()} to {end_date.isoformat()})."
+    )
 
 player_review_df, player_review_teams, player_review_meta = build_player_review_table(
-    projection_actual_df=projection_actual_df,
+    actual_player_history_df=actual_history_df,
     player_totals_df=player_totals_df,
 )
 
