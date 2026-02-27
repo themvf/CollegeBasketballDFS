@@ -332,6 +332,8 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["row_order"] = pd.RangeIndex(start=0, stop=len(out), step=1)
 
     out["player_id"] = out["player_id"].astype(str).str.strip()
+    out["player_id"] = out["player_id"].where(~out["player_id"].str.lower().isin(NULLISH_TEXT_VALUES), "")
+    out["player_id"] = out["player_id"].str.replace(r"\.0+$", "", regex=True)
     out["player_name"] = out["player_name"].astype(str).str.strip()
     out["team"] = out["team"].astype(str).str.strip().str.upper()
     out["position"] = out["position"].astype(str).str.strip().str.upper()
@@ -358,15 +360,18 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
             missing_team = (out["team"] == "") & (out["player_name_key"] != "")
             out.loc[missing_team, "team"] = out.loc[missing_team, "player_name_key"].map(team_map).fillna("")
 
+    has_id_key = out["player_id_key"] != ""
+    # Prefer player ID to merge projection and actual rows even when team text differs.
+    out.loc[has_id_key, "player_key"] = "id:" + out.loc[has_id_key, "player_id_key"]
     has_name_key = out["player_name_key"] != ""
     has_team = out["team"] != ""
-    out.loc[has_name_key & has_team, "player_key"] = (
-        "name:" + out.loc[has_name_key & has_team, "player_name_key"] + "|team:" + out.loc[has_name_key & has_team, "team"]
+    missing_key = out["player_key"] == ""
+    out.loc[missing_key & has_name_key & has_team, "player_key"] = (
+        "name:" + out.loc[missing_key & has_name_key & has_team, "player_name_key"] + "|team:"
+        + out.loc[missing_key & has_name_key & has_team, "team"]
     )
     missing_key = out["player_key"] == ""
     out.loc[missing_key & has_name_key, "player_key"] = "name:" + out.loc[missing_key & has_name_key, "player_name_key"]
-    has_id_key = out["player_id_key"] != ""
-    out.loc[(out["player_key"] == "") & has_id_key, "player_key"] = "id:" + out.loc[(out["player_key"] == "") & has_id_key, "player_id_key"]
     out = out.loc[out["player_key"] != ""].copy()
     out["review_date"] = pd.to_datetime(out["review_date"], errors="coerce")
 
