@@ -752,6 +752,145 @@ def _aggregate_player_variance(
     return out
 
 
+def build_ownership_accuracy_daily_frame(player_totals_df: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, int]]:
+    history = _build_player_history_frame(player_totals_df)
+    if history.empty:
+        return pd.DataFrame(), {
+            "slates": 0,
+            "matched_rows": 0,
+            "projected_rows": 0,
+            "actual_rows": 0,
+            "ambiguous_name_day_pairs_excluded": 0,
+        }
+
+    work = history.copy()
+    work["review_date"] = pd.to_datetime(work.get("review_date"), errors="coerce")
+    work["_review_day"] = work["review_date"].dt.strftime("%Y-%m-%d")
+    work["_name_key"] = _name_key_series(work["player_name"] if "player_name" in work.columns else pd.Series("", index=work.index))
+    work["team"] = work["team"].astype(str).str.strip().str.upper()
+    work["position"] = work["position"].astype(str).str.strip().str.upper()
+    work["player_name"] = work["player_name"].astype(str).str.strip()
+    work = work.loc[(work["_review_day"].astype(str).str.strip() != "") & (work["_name_key"].astype(str).str.strip() != "")].copy()
+    if work.empty:
+        return pd.DataFrame(), {
+            "slates": 0,
+            "matched_rows": 0,
+            "projected_rows": 0,
+            "actual_rows": 0,
+            "ambiguous_name_day_pairs_excluded": 0,
+        }
+
+    ambiguous_name_days = (
+        work.loc[work["team"] != ""]
+        .groupby(["_review_day", "_name_key"], as_index=False)["team"]
+        .nunique()
+        .rename(columns={"team": "_team_count"})
+    )
+    ambiguous_name_days = ambiguous_name_days.loc[ambiguous_name_days["_team_count"] > 1].copy()
+    ambiguous_keys: set[str] = set()
+    if not ambiguous_name_days.empty:
+        ambiguous_keys = set(
+            (
+                ambiguous_name_days["_review_day"].astype(str)
+                + "||"
+                + ambiguous_name_days["_name_key"].astype(str)
+            ).tolist()
+        )
+        work["_day_name_key"] = work["_review_day"].astype(str) + "||" + work["_name_key"].astype(str)
+        work = work.loc[~work["_day_name_key"].isin(ambiguous_keys)].copy()
+        work = work.drop(columns=["_day_name_key"], errors="ignore")
+
+    projection_daily = (
+        work.loc[work["projected_ownership"].notna()]
+        .groupby(["_review_day", "_name_key"], as_index=False)
+        .agg(
+            player_name_proj=("player_name", _first_nonempty),
+            team_proj=("team", _first_nonempty),
+            position_proj=("position", _first_nonempty),
+            projected_ownership=("projected_ownership", "mean"),
+            projected_dk_points=("projected_dk_points", "mean"),
+            salary=("salary", "mean"),
+            projected_source_rows=("projected_ownership", "count"),
+        )
+    )
+    actual_daily = (
+        work.loc[work["actual_ownership"].notna()]
+        .groupby(["_review_day", "_name_key"], as_index=False)
+        .agg(
+            player_name_actual=("player_name", _first_nonempty),
+            team_actual=("team", _first_nonempty),
+            position_actual=("position", _first_nonempty),
+            actual_ownership=("actual_ownership", "mean"),
+            actual_source_rows=("actual_ownership", "count"),
+        )
+    )
+
+    if projection_daily.empty and actual_daily.empty:
+        return pd.DataFrame(), {
+            "slates": 0,
+            "matched_rows": 0,
+            "projected_rows": 0,
+            "actual_rows": 0,
+            "ambiguous_name_day_pairs_excluded": int(len(ambiguous_keys)),
+        }
+
+    out = projection_daily.merge(
+        actual_daily,
+        on=["_review_day", "_name_key"],
+        how="outer",
+    )
+    out["review_date"] = pd.to_datetime(out["_review_day"], errors="coerce")
+    out["Player Name"] = out["player_name_proj"].where(
+        out["player_name_proj"].astype(str).str.strip() != "",
+        out["player_name_actual"],
+    )
+    out["Team"] = out["team_proj"].where(out["team_proj"].astype(str).str.strip() != "", out["team_actual"])
+    out["Position"] = out["position_proj"].where(
+        out["position_proj"].astype(str).str.strip() != "",
+        out["position_actual"],
+    )
+    out["Player Name"] = out["Player Name"].astype(str).str.strip()
+    out["Team"] = out["Team"].astype(str).str.strip().str.upper()
+    out["Position"] = out["Position"].astype(str).str.strip().str.upper()
+    out["projected_ownership"] = pd.to_numeric(out.get("projected_ownership"), errors="coerce")
+    out["actual_ownership"] = pd.to_numeric(out.get("actual_ownership"), errors="coerce")
+    out["projected_dk_points"] = pd.to_numeric(out.get("projected_dk_points"), errors="coerce")
+    out["salary"] = pd.to_numeric(out.get("salary"), errors="coerce")
+    out["projected_source_rows"] = pd.to_numeric(out.get("projected_source_rows"), errors="coerce").round(0).astype("Int64")
+    out["actual_source_rows"] = pd.to_numeric(out.get("actual_source_rows"), errors="coerce").round(0).astype("Int64")
+    out["ownership_delta"] = out["actual_ownership"] - out["projected_ownership"]
+    out["ownership_abs_delta"] = out["ownership_delta"].abs()
+    out = out.loc[out["Player Name"] != ""].copy()
+    out = out.sort_values(
+        ["review_date", "ownership_abs_delta", "Player Name"],
+        ascending=[False, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+
+    meta = {
+        "slates": int(out["review_date"].dropna().dt.strftime("%Y-%m-%d").nunique()),
+        "matched_rows": int((out["projected_ownership"].notna() & out["actual_ownership"].notna()).sum()),
+        "projected_rows": int(out["projected_ownership"].notna().sum()),
+        "actual_rows": int(out["actual_ownership"].notna().sum()),
+        "ambiguous_name_day_pairs_excluded": int(len(ambiguous_keys)),
+    }
+    keep_cols = [
+        "review_date",
+        "Player Name",
+        "Team",
+        "Position",
+        "projected_dk_points",
+        "salary",
+        "projected_ownership",
+        "actual_ownership",
+        "ownership_delta",
+        "ownership_abs_delta",
+        "projected_source_rows",
+        "actual_source_rows",
+    ]
+    return out[keep_cols].copy(), meta
+
+
 def build_player_review_table(
     actual_player_history_df: pd.DataFrame,
     player_totals_df: pd.DataFrame,
@@ -1374,6 +1513,7 @@ player_review_df, player_review_teams, player_review_meta = build_player_review_
     player_totals_df=player_totals_df,
     dfs_only=str(player_universe_mode).strip().lower().startswith("dfs"),
 )
+ownership_daily_df, ownership_daily_meta = build_ownership_accuracy_daily_frame(player_totals_df=player_totals_df)
 
 if player_review_df.empty or not player_review_teams:
     st.warning(
@@ -1923,6 +2063,302 @@ else:
             mime="text/csv",
             key="download_player_review_ownership_misses_csv",
         )
+
+st.subheader("Slate-Level Ownership Mass")
+if ownership_daily_df.empty:
+    st.info("No date-level projected/actual ownership history is available for this range.")
+else:
+    mass_df = (
+        ownership_daily_df.groupby("review_date", as_index=False)
+        .agg(
+            ProjectedOwnershipMass=("projected_ownership", "sum"),
+            ActualOwnershipMass=("actual_ownership", "sum"),
+            ProjectedPlayers=("projected_ownership", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
+            ActualPlayers=("actual_ownership", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
+            MatchedPlayers=(
+                "ownership_abs_delta",
+                lambda s: int(
+                    ownership_daily_df.loc[s.index, "projected_ownership"].notna()
+                    .mul(ownership_daily_df.loc[s.index, "actual_ownership"].notna())
+                    .sum()
+                ),
+            ),
+        )
+        .sort_values("review_date", ascending=True, kind="stable")
+        .reset_index(drop=True)
+    )
+    mass_df["Mass Delta (Actual - Projected)"] = (
+        pd.to_numeric(mass_df["ActualOwnershipMass"], errors="coerce")
+        - pd.to_numeric(mass_df["ProjectedOwnershipMass"], errors="coerce")
+    )
+    mass_df["Abs Mass Delta"] = mass_df["Mass Delta (Actual - Projected)"].abs()
+    for col in [
+        "ProjectedOwnershipMass",
+        "ActualOwnershipMass",
+        "Mass Delta (Actual - Projected)",
+        "Abs Mass Delta",
+    ]:
+        mass_df[col] = pd.to_numeric(mass_df[col], errors="coerce").round(2)
+    mass_df["Slate Date"] = pd.to_datetime(mass_df["review_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    mm1, mm2, mm3 = st.columns(3)
+    mm1.metric("Slates with Ownership History", int(ownership_daily_meta.get("slates") or 0))
+    mm2.metric("Avg Mass Delta", f"{float(pd.to_numeric(mass_df['Mass Delta (Actual - Projected)'], errors='coerce').mean()):.2f}")
+    mm3.metric("Avg Matched Players / Slate", f"{float(pd.to_numeric(mass_df['MatchedPlayers'], errors='coerce').mean()):.1f}")
+    ambiguous_excluded = int(ownership_daily_meta.get("ambiguous_name_day_pairs_excluded") or 0)
+    if ambiguous_excluded > 0:
+        st.caption(
+            f"Excluded {ambiguous_excluded} ambiguous name/day pairs where the same player name mapped to multiple teams."
+        )
+
+    fig_mass, ax_mass = plt.subplots(figsize=(11, 5.5))
+    ax_mass.plot(mass_df["Slate Date"], mass_df["ProjectedOwnershipMass"], label="Projected ownership mass", linewidth=2.0)
+    ax_mass.plot(mass_df["Slate Date"], mass_df["ActualOwnershipMass"], label="Actual ownership mass", linewidth=2.0)
+    ax_mass.set_ylabel("Total Ownership %")
+    ax_mass.set_xlabel("Slate Date")
+    ax_mass.grid(alpha=0.2)
+    ax_mass.legend()
+    ax_mass.tick_params(axis="x", rotation=45)
+    fig_mass.tight_layout()
+    st.pyplot(fig_mass, use_container_width=True)
+    plt.close(fig_mass)
+
+    worst_mass_df = mass_df.sort_values("Abs Mass Delta", ascending=False, kind="stable").head(20).copy()
+    mass_show_cols = [
+        "Slate Date",
+        "ProjectedOwnershipMass",
+        "ActualOwnershipMass",
+        "Mass Delta (Actual - Projected)",
+        "Abs Mass Delta",
+        "ProjectedPlayers",
+        "ActualPlayers",
+        "MatchedPlayers",
+    ]
+    worst_mass_df = worst_mass_df[mass_show_cols].rename(
+        columns={
+            "ProjectedOwnershipMass": "Projected Mass",
+            "ActualOwnershipMass": "Actual Mass",
+        }
+    )
+    st.caption("Worst slate-level ownership mass misses")
+    st.dataframe(worst_mass_df, hide_index=True, use_container_width=True)
+    st.download_button(
+        "Download Ownership Mass by Slate CSV",
+        data=mass_df[
+            [
+                "Slate Date",
+                "ProjectedOwnershipMass",
+                "ActualOwnershipMass",
+                "Mass Delta (Actual - Projected)",
+                "Abs Mass Delta",
+                "ProjectedPlayers",
+                "ActualPlayers",
+                "MatchedPlayers",
+            ]
+        ].rename(
+            columns={
+                "ProjectedOwnershipMass": "Projected Mass",
+                "ActualOwnershipMass": "Actual Mass",
+            }
+        ).to_csv(index=False),
+        file_name=f"player_review_ownership_mass_{start_date.isoformat()}_{end_date.isoformat()}.csv",
+        mime="text/csv",
+        key="download_player_review_ownership_mass_csv",
+    )
+
+st.subheader("False Chalk / Missed Chalk")
+if ownership_daily_df.empty:
+    st.info("No date-level ownership rows are available for false-chalk diagnostics.")
+else:
+    chalk_dates = sorted(
+        [
+            str(x)
+            for x in pd.to_datetime(ownership_daily_df["review_date"], errors="coerce")
+            .dropna()
+            .dt.strftime("%Y-%m-%d")
+            .unique()
+            .tolist()
+            if str(x).strip()
+        ],
+        reverse=True,
+    )
+    c1, c2, c3, c4, c5, c6 = st.columns(6)
+    chalk_scope = c1.selectbox(
+        "Scope",
+        options=["All Teams", "Selected Team"],
+        index=0,
+        key="player_review_false_chalk_scope",
+    )
+    chalk_date = c2.selectbox(
+        "Slate Date",
+        options=["All Dates"] + chalk_dates,
+        index=0,
+        key="player_review_false_chalk_date",
+    )
+    chalk_min_points = float(
+        c3.number_input(
+            "Min Projected Points",
+            min_value=0.0,
+            value=15.0,
+            step=0.5,
+            key="player_review_false_chalk_min_points",
+        )
+    )
+    chalk_high_threshold = float(
+        c4.number_input(
+            "Chalk Threshold %",
+            min_value=0.0,
+            max_value=100.0,
+            value=20.0,
+            step=0.5,
+            key="player_review_false_chalk_high_threshold",
+        )
+    )
+    chalk_low_threshold = float(
+        c5.number_input(
+            "Low Threshold %",
+            min_value=0.0,
+            max_value=100.0,
+            value=10.0,
+            step=0.5,
+            key="player_review_false_chalk_low_threshold",
+        )
+    )
+    chalk_row_limit = int(
+        c6.number_input(
+            "Rows",
+            min_value=5,
+            max_value=100,
+            value=25,
+            step=5,
+            key="player_review_false_chalk_rows",
+        )
+    )
+
+    chalk_df = ownership_daily_df.copy()
+    if str(chalk_scope).strip().lower() == "selected team":
+        chalk_df = chalk_df.loc[
+            chalk_df["Team"].astype(str).str.strip().str.upper() == str(selected_team).strip().upper()
+        ].copy()
+    if str(chalk_date).strip().lower() != "all dates":
+        chalk_df = chalk_df.loc[
+            pd.to_datetime(chalk_df["review_date"], errors="coerce").dt.strftime("%Y-%m-%d") == str(chalk_date).strip()
+        ].copy()
+    for col in [
+        "projected_dk_points",
+        "projected_ownership",
+        "actual_ownership",
+        "salary",
+        "projected_source_rows",
+        "actual_source_rows",
+    ]:
+        if col in chalk_df.columns:
+            chalk_df[col] = pd.to_numeric(chalk_df[col], errors="coerce")
+    chalk_df = chalk_df.loc[
+        chalk_df["projected_dk_points"].notna()
+        & chalk_df["projected_ownership"].notna()
+        & chalk_df["actual_ownership"].notna()
+        & (chalk_df["projected_dk_points"] >= float(chalk_min_points))
+    ].copy()
+    chalk_df["Slate Date"] = pd.to_datetime(chalk_df["review_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+
+    false_chalk_df = chalk_df.loc[
+        (chalk_df["projected_ownership"] >= float(chalk_high_threshold))
+        & (chalk_df["actual_ownership"] <= float(chalk_low_threshold))
+    ].sort_values(["ownership_delta", "projected_ownership"], ascending=[True, False], kind="stable").head(chalk_row_limit)
+    missed_chalk_df = chalk_df.loc[
+        (chalk_df["projected_ownership"] <= float(chalk_low_threshold))
+        & (chalk_df["actual_ownership"] >= float(chalk_high_threshold))
+    ].sort_values(["ownership_delta", "actual_ownership"], ascending=[False, False], kind="stable").head(chalk_row_limit)
+
+    fc_metric, mc_metric = st.columns(2)
+    fc_metric.metric("False Chalk Rows", int(len(false_chalk_df)))
+    mc_metric.metric("Missed Chalk Rows", int(len(missed_chalk_df)))
+
+    chalk_cols = [
+        "Slate Date",
+        "Team",
+        "Player Name",
+        "Position",
+        "projected_dk_points",
+        "projected_ownership",
+        "actual_ownership",
+        "ownership_delta",
+        "ownership_abs_delta",
+        "salary",
+        "projected_source_rows",
+        "actual_source_rows",
+    ]
+    chalk_cols = [c for c in chalk_cols if c in chalk_df.columns]
+
+    false_chalk_view = false_chalk_df[chalk_cols].rename(
+        columns={
+            "projected_dk_points": "Projected Points",
+            "projected_ownership": "Projected Own (%)",
+            "actual_ownership": "Actual Own (%)",
+            "ownership_delta": "Delta (Actual - Projected)",
+            "ownership_abs_delta": "Abs Delta",
+            "salary": "Avg DK Salary",
+            "projected_source_rows": "Projected Rows",
+            "actual_source_rows": "Actual Rows",
+        }
+    )
+    missed_chalk_view = missed_chalk_df[chalk_cols].rename(
+        columns={
+            "projected_dk_points": "Projected Points",
+            "projected_ownership": "Projected Own (%)",
+            "actual_ownership": "Actual Own (%)",
+            "ownership_delta": "Delta (Actual - Projected)",
+            "ownership_abs_delta": "Abs Delta",
+            "salary": "Avg DK Salary",
+            "projected_source_rows": "Projected Rows",
+            "actual_source_rows": "Actual Rows",
+        }
+    )
+    for frame in [false_chalk_view, missed_chalk_view]:
+        for col in [
+            "Projected Points",
+            "Projected Own (%)",
+            "Actual Own (%)",
+            "Delta (Actual - Projected)",
+            "Abs Delta",
+            "Avg DK Salary",
+        ]:
+            if col in frame.columns:
+                frame[col] = pd.to_numeric(frame[col], errors="coerce").round(2)
+
+    fc_col, mc_col = st.columns(2)
+    fc_col.caption(
+        f"False chalk: projected >= {chalk_high_threshold:.1f}% and actual <= {chalk_low_threshold:.1f}%"
+    )
+    if false_chalk_view.empty:
+        fc_col.info("No false-chalk rows matched the current filters.")
+    else:
+        fc_col.dataframe(false_chalk_view, hide_index=True, use_container_width=True)
+
+    mc_col.caption(
+        f"Missed chalk: projected <= {chalk_low_threshold:.1f}% and actual >= {chalk_high_threshold:.1f}%"
+    )
+    if missed_chalk_view.empty:
+        mc_col.info("No missed-chalk rows matched the current filters.")
+    else:
+        mc_col.dataframe(missed_chalk_view, hide_index=True, use_container_width=True)
+
+    false_chalk_download = false_chalk_view.copy()
+    false_chalk_download["Classification"] = "False Chalk"
+    missed_chalk_download = missed_chalk_view.copy()
+    missed_chalk_download["Classification"] = "Missed Chalk"
+    combined_chalk_download = pd.concat(
+        [false_chalk_download, missed_chalk_download],
+        ignore_index=True,
+    )
+    st.download_button(
+        "Download False Chalk / Missed Chalk CSV",
+        data=combined_chalk_download.to_csv(index=False),
+        file_name=f"player_review_false_missed_chalk_{start_date.isoformat()}_{end_date.isoformat()}.csv",
+        mime="text/csv",
+        key="download_player_review_false_missed_chalk_csv",
+    )
 
 st.subheader("Low-Owned High-Scoring Targets")
 if not all(col in player_review_df.columns for col in [past5_points_col, "Average Ownership Season"]):
