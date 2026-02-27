@@ -289,6 +289,7 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
         "position",
         "review_date",
         "row_order",
+        "minutes",
         "actual_dk_points",
         "projected_ownership",
         "salary",
@@ -303,6 +304,18 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     position_col = _resolve_column_alias(work, ("Position", "position", "Roster Position", "roster_position", "Pos", "pos"))
     review_date_col = _resolve_column_alias(work, ("review_date", "review date", "slate_date", "game_date", "date"))
     salary_col = _resolve_column_alias(work, ("Salary", "salary", "dk_salary", "dk salary"))
+    minutes_col = _resolve_column_alias(
+        work,
+        (
+            "actual_minutes",
+            "actual minutes",
+            "minutes_played",
+            "minutes",
+            "our_minutes_recent",
+            "our_minutes_last7",
+            "our_minutes_avg",
+        ),
+    )
     points_col = _resolve_column_alias(work, ("actual_dk_points", "actual dk points", "final_dk_points", "dk_points"))
     ownership_col = _resolve_column_alias(work, PROJECTED_OWNERSHIP_ALIASES)
 
@@ -313,6 +326,7 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["position"] = work[position_col] if position_col else ""
     out["review_date"] = work[review_date_col] if review_date_col else pd.NA
     out["salary"] = pd.to_numeric(work[salary_col], errors="coerce") if salary_col else pd.NA
+    out["minutes"] = pd.to_numeric(work[minutes_col], errors="coerce") if minutes_col else pd.NA
     out["actual_dk_points"] = pd.to_numeric(work[points_col], errors="coerce") if points_col else pd.NA
     out["projected_ownership"] = _coerce_ownership_series(work[ownership_col]) if ownership_col else pd.NA
     out["row_order"] = pd.RangeIndex(start=0, stop=len(out), step=1)
@@ -359,23 +373,16 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     return out[cols].copy()
 
 
-def _aggregate_player_metric(
-    history_df: pd.DataFrame,
-    *,
-    value_col: str,
-    season_col: str,
-    last5_col: str,
-    agg_mode: str,
-) -> pd.DataFrame:
+def _build_metric_daily_frame(history_df: pd.DataFrame, *, value_col: str) -> pd.DataFrame:
     if history_df is None or history_df.empty or value_col not in history_df.columns:
-        return pd.DataFrame(columns=["player_key", season_col, last5_col])
+        return pd.DataFrame(columns=["player_key", value_col, "_sort_date", "_sort_ord"])
 
     work = history_df.copy()
     work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
     work = work.loc[work["player_key"].astype(str).str.strip() != ""].copy()
     work = work.loc[work[value_col].notna()].copy()
     if work.empty:
-        return pd.DataFrame(columns=["player_key", season_col, last5_col])
+        return pd.DataFrame(columns=["player_key", value_col, "_sort_date", "_sort_ord"])
 
     work["review_date"] = pd.to_datetime(work.get("review_date"), errors="coerce")
     work["_review_day"] = work["review_date"].dt.strftime("%Y-%m-%d")
@@ -395,12 +402,26 @@ def _aggregate_player_metric(
         work["_sort_ord"] = pd.to_numeric(work.get("row_order"), errors="coerce").fillna(0.0)
 
     work = work.sort_values(["player_key", "_sort_date", "_sort_ord"], ascending=[True, False, False], kind="stable")
-    last5 = work.groupby("player_key", sort=False, as_index=False).head(5).copy()
+    return work[["player_key", value_col, "_sort_date", "_sort_ord"]].copy()
+
+
+def _aggregate_player_metric(
+    history_df: pd.DataFrame,
+    *,
+    value_col: str,
+    season_col: str,
+    last5_col: str,
+    agg_mode: str,
+) -> pd.DataFrame:
+    daily = _build_metric_daily_frame(history_df, value_col=value_col)
+    if daily.empty:
+        return pd.DataFrame(columns=["player_key", season_col, last5_col])
+    last5 = daily.groupby("player_key", sort=False, as_index=False).head(5).copy()
 
     mode = str(agg_mode or "").strip().lower()
     if mode == "mean":
         season = (
-            work.groupby("player_key", as_index=False)[value_col]
+            daily.groupby("player_key", as_index=False)[value_col]
             .mean(numeric_only=True)
             .rename(columns={value_col: season_col})
         )
@@ -411,7 +432,7 @@ def _aggregate_player_metric(
         )
     elif mode == "median":
         season = (
-            work.groupby("player_key", as_index=False)[value_col]
+            daily.groupby("player_key", as_index=False)[value_col]
             .median(numeric_only=True)
             .rename(columns={value_col: season_col})
         )
@@ -422,7 +443,7 @@ def _aggregate_player_metric(
         )
     else:
         season = (
-            work.groupby("player_key", as_index=False)[value_col]
+            daily.groupby("player_key", as_index=False)[value_col]
             .sum(numeric_only=True)
             .rename(columns={value_col: season_col})
         )
@@ -433,6 +454,25 @@ def _aggregate_player_metric(
         )
 
     return season.merge(recent, on="player_key", how="outer")
+
+
+def _aggregate_player_variance(
+    history_df: pd.DataFrame,
+    *,
+    value_col: str,
+    variance_col: str,
+) -> pd.DataFrame:
+    daily = _build_metric_daily_frame(history_df, value_col=value_col)
+    if daily.empty:
+        return pd.DataFrame(columns=["player_key", variance_col])
+
+    out = (
+        daily.groupby("player_key", as_index=False)[value_col]
+        .agg(lambda s: float(pd.to_numeric(s, errors="coerce").var(ddof=0)))
+        .rename(columns={value_col: variance_col})
+    )
+    out[variance_col] = pd.to_numeric(out[variance_col], errors="coerce").fillna(0.0)
+    return out
 
 
 def build_player_review_table(
@@ -499,6 +539,21 @@ def build_player_review_table(
         last5_col="Average Ownership Last 5 Games",
         agg_mode="mean",
     )
+    fantasy_points_variance = _aggregate_player_variance(
+        actual_history,
+        value_col="actual_dk_points",
+        variance_col="Fantasy Points Variance",
+    )
+    minutes_variance = _aggregate_player_variance(
+        actual_history,
+        value_col="minutes",
+        variance_col="Minutes Variance",
+    )
+    ownership_variance = _aggregate_player_variance(
+        projection_history,
+        value_col="projected_ownership",
+        variance_col="Ownership Variance",
+    )
 
     salary_source = actual_history if actual_history["salary"].notna().any() else projection_history
     salary_summary = _aggregate_player_metric(
@@ -507,6 +562,11 @@ def build_player_review_table(
         season_col="Average DK Salary This Season",
         last5_col="_unused_last5_salary",
         agg_mode="mean",
+    )
+    salary_variance = _aggregate_player_variance(
+        salary_source,
+        value_col="salary",
+        variance_col="Salary Variance",
     )
     if "_unused_points_last5_sum" in points_season_summary.columns:
         points_season_summary = points_season_summary.drop(columns=["_unused_points_last5_sum"])
@@ -522,6 +582,10 @@ def build_player_review_table(
     out = out.merge(points_median_summary, on="player_key", how="left")
     out = out.merge(ownership_summary, on="player_key", how="left")
     out = out.merge(salary_summary, on="player_key", how="left")
+    out = out.merge(minutes_variance, on="player_key", how="left")
+    out = out.merge(fantasy_points_variance, on="player_key", how="left")
+    out = out.merge(ownership_variance, on="player_key", how="left")
+    out = out.merge(salary_variance, on="player_key", how="left")
     out = out.rename(columns={"player_name": "Player Name", "position": "Position", "team": "Team"})
 
     for col in [
@@ -531,6 +595,10 @@ def build_player_review_table(
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
+        "Minutes Variance",
+        "Fantasy Points Variance",
+        "Ownership Variance",
+        "Salary Variance",
     ]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -550,6 +618,10 @@ def build_player_review_table(
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
+        "Minutes Variance",
+        "Fantasy Points Variance",
+        "Ownership Variance",
+        "Salary Variance",
     ]:
         if col in out.columns:
             out[col] = out[col].round(2)
@@ -710,10 +782,17 @@ all_players_df = all_players_df.sort_values(
     ascending=[False, False, True, True],
     kind="stable",
 )
-st.dataframe(all_players_df[show_cols], hide_index=True, use_container_width=True)
+all_players_show_cols = show_cols + [
+    "Minutes Variance",
+    "Fantasy Points Variance",
+    "Ownership Variance",
+    "Salary Variance",
+]
+all_players_show_cols = [c for c in all_players_show_cols if c in all_players_df.columns]
+st.dataframe(all_players_df[all_players_show_cols], hide_index=True, use_container_width=True)
 st.download_button(
     "Download All Players Review CSV",
-    data=all_players_df[show_cols].to_csv(index=False),
+    data=all_players_df[all_players_show_cols].to_csv(index=False),
     file_name=f"player_review_all_teams_{start_date.isoformat()}_{end_date.isoformat()}.csv",
     mime="text/csv",
     key="download_player_review_all_players_csv",
