@@ -54,6 +54,7 @@ from college_basketball_dfs.cbb_tail_model import (
 from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
+    build_ownership_projection_diagnostics,
     build_player_exposure_comparison,
     build_projection_bias_heatmap,
     build_projection_actual_comparison,
@@ -6082,6 +6083,146 @@ with tab_tournament_review:
                         ]
                         use_cols = [c for c in exp_cols if c in exposure_df.columns]
                         st.dataframe(exposure_df[use_cols], hide_index=True, use_container_width=True)
+
+                        st.markdown("**Ownership Projection Diagnostics**")
+                        actual_source_options: list[tuple[str, str]] = [("Field Ownership (From Standings)", "field_ownership_pct")]
+                        if "actual_ownership_from_file" in exposure_df.columns and bool(
+                            pd.to_numeric(exposure_df["actual_ownership_from_file"], errors="coerce").notna().any()
+                        ):
+                            actual_source_options.append(("Actual Ownership Upload", "actual_ownership_from_file"))
+                        actual_source_label = st.selectbox(
+                            "Actual Ownership Source",
+                            options=[label for label, _ in actual_source_options],
+                            index=0,
+                            key="tournament_ownership_diag_actual_source",
+                            help="Choose the actual ownership series to compare against projected ownership.",
+                        )
+                        actual_source_col = next(
+                            (col for label, col in actual_source_options if label == actual_source_label),
+                            "field_ownership_pct",
+                        )
+                        top_misses_n = int(
+                            st.slider(
+                                "Top Ownership Misses to Show",
+                                min_value=10,
+                                max_value=100,
+                                value=25,
+                                step=5,
+                                key="tournament_ownership_diag_top_misses_n",
+                            )
+                        )
+                        own_diag = build_ownership_projection_diagnostics(
+                            exposure_df,
+                            projected_col="projected_ownership",
+                            actual_col=actual_source_col,
+                            top_misses_n=top_misses_n,
+                        )
+                        own_summary = own_diag.get("summary") if isinstance(own_diag.get("summary"), dict) else {}
+                        own_samples = int(own_summary.get("samples") or 0)
+                        if own_samples <= 0:
+                            st.info("Ownership diagnostics unavailable: need players with both projected and actual ownership.")
+                        else:
+                            od1, od2, od3, od4, od5, od6 = st.columns(6)
+                            od1.metric("Matched Players", own_samples)
+                            od2.metric("Ownership MAE", f"{_safe_float_value(own_summary.get('mae')):.2f}")
+                            od3.metric("Ownership RMSE", f"{_safe_float_value(own_summary.get('rmse')):.2f}")
+                            od4.metric("Bias (Actual - Proj)", f"{_safe_float_value(own_summary.get('bias')):+.2f}")
+                            od5.metric("Within +/-3 pts", f"{_safe_float_value(own_summary.get('within_3_pct')):.1f}%")
+                            od6.metric("Corr (Pearson)", f"{_safe_float_value(own_summary.get('corr')):.3f}")
+                            oe1, oe2 = st.columns(2)
+                            oe1.metric("Overprojected Share", f"{_safe_float_value(own_summary.get('overprojected_pct')):.1f}%")
+                            oe2.metric("Underprojected Share", f"{_safe_float_value(own_summary.get('underprojected_pct')):.1f}%")
+                            st.caption(
+                                "Positive bias means actual ownership was higher than projected on average (we underprojected)."
+                            )
+
+                            own_matched_df = (
+                                own_diag.get("matched_df").copy()
+                                if isinstance(own_diag.get("matched_df"), pd.DataFrame)
+                                else pd.DataFrame()
+                            )
+                            if not own_matched_df.empty:
+                                scatter_cols = [c for c in ["Name", "TeamAbbrev", "projected_ownership", "actual_ownership"] if c in own_matched_df.columns]
+                                scatter_df = own_matched_df[scatter_cols].copy()
+                                scatter_df["projected_ownership"] = pd.to_numeric(
+                                    scatter_df.get("projected_ownership"), errors="coerce"
+                                )
+                                scatter_df["actual_ownership"] = pd.to_numeric(
+                                    scatter_df.get("actual_ownership"), errors="coerce"
+                                )
+                                scatter_df = scatter_df.dropna(subset=["projected_ownership", "actual_ownership"]).copy()
+                                if not scatter_df.empty:
+                                    if px is None:
+                                        st.info(
+                                            "Plotly is not installed in this environment; showing ownership scatter values as a table."
+                                        )
+                                        st.dataframe(scatter_df, use_container_width=True)
+                                    else:
+                                        own_fig = px.scatter(
+                                            scatter_df,
+                                            x="projected_ownership",
+                                            y="actual_ownership",
+                                            hover_name="Name" if "Name" in scatter_df.columns else None,
+                                            color="TeamAbbrev" if "TeamAbbrev" in scatter_df.columns else None,
+                                            labels={
+                                                "projected_ownership": "Projected Ownership %",
+                                                "actual_ownership": "Actual Ownership %",
+                                            },
+                                            title="Ownership Calibration: Projected vs Actual",
+                                        )
+                                        max_axis = float(
+                                            max(
+                                                pd.to_numeric(scatter_df["projected_ownership"], errors="coerce").max() or 0.0,
+                                                pd.to_numeric(scatter_df["actual_ownership"], errors="coerce").max() or 0.0,
+                                            )
+                                        )
+                                        max_axis = max(10.0, max_axis + 1.0)
+                                        own_fig.add_shape(
+                                            type="line",
+                                            x0=0.0,
+                                            y0=0.0,
+                                            x1=max_axis,
+                                            y1=max_axis,
+                                            line=dict(color="#8c8c8c", dash="dash"),
+                                        )
+                                        own_fig.update_layout(height=420, margin=dict(l=8, r=8, t=44, b=8))
+                                        st.plotly_chart(
+                                            own_fig,
+                                            use_container_width=True,
+                                            key=f"tournament_ownership_calibration_scatter_{actual_source_col}",
+                                        )
+
+                            own_buckets_df = (
+                                own_diag.get("buckets_df").copy()
+                                if isinstance(own_diag.get("buckets_df"), pd.DataFrame)
+                                else pd.DataFrame()
+                            )
+                            if not own_buckets_df.empty:
+                                st.caption("Ownership calibration by projected-ownership bucket")
+                                st.dataframe(own_buckets_df, hide_index=True, use_container_width=True)
+                                st.download_button(
+                                    "Download Ownership Calibration Buckets CSV",
+                                    data=own_buckets_df.to_csv(index=False),
+                                    file_name=f"tournament_ownership_calibration_buckets_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                                    mime="text/csv",
+                                    key="download_tournament_ownership_calibration_buckets_csv",
+                                )
+
+                            own_misses_df = (
+                                own_diag.get("top_misses_df").copy()
+                                if isinstance(own_diag.get("top_misses_df"), pd.DataFrame)
+                                else pd.DataFrame()
+                            )
+                            if not own_misses_df.empty:
+                                st.caption("Largest ownership misses (absolute error)")
+                                st.dataframe(own_misses_df, hide_index=True, use_container_width=True)
+                                st.download_button(
+                                    "Download Ownership Misses CSV",
+                                    data=own_misses_df.to_csv(index=False),
+                                    file_name=f"tournament_ownership_misses_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                                    mime="text/csv",
+                                    key="download_tournament_ownership_misses_csv",
+                                )
 
                     st.subheader("Projection vs Actual (Tournament Slate)")
                     proj_compare_df = build_projection_actual_comparison(

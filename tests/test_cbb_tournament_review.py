@@ -3,6 +3,7 @@ import pandas as pd
 from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
+    build_ownership_projection_diagnostics,
     build_player_exposure_comparison,
     build_projection_bias_heatmap,
     build_segment_impact_table,
@@ -246,6 +247,47 @@ def test_build_segment_impact_table_leaves_under_sampled_cells_unchanged() -> No
     assert int(row["samples"]) == 2
     assert round(float(row["mae_delta"]), 2) == 0.0
     assert round(float(row["bias_post"]), 2) == round(float(row["bias_pre"]), 2)
+
+
+def test_build_ownership_projection_diagnostics_summary_and_buckets() -> None:
+    exposure = pd.DataFrame(
+        [
+            {"Name": "Alpha One", "TeamAbbrev": "AAA", "projected_ownership": 8.0, "field_ownership_pct": 12.0},
+            {"Name": "Bravo Two", "TeamAbbrev": "BBB", "projected_ownership": 18.0, "field_ownership_pct": 15.0},
+            {"Name": "Charlie Three", "TeamAbbrev": "CCC", "projected_ownership": 32.0, "field_ownership_pct": 25.0},
+            {"Name": "Delta Four", "TeamAbbrev": "DDD", "projected_ownership": pd.NA, "field_ownership_pct": 9.0},
+        ]
+    )
+    out = build_ownership_projection_diagnostics(exposure, projected_col="projected_ownership", actual_col="field_ownership_pct")
+    summary = out["summary"]
+    assert int(summary["samples"]) == 3
+    assert round(float(summary["mae"]), 2) == round((4.0 + 3.0 + 7.0) / 3.0, 2)
+    assert round(float(summary["bias"]), 2) == round((4.0 - 3.0 - 7.0) / 3.0, 2)
+    buckets = out["buckets_df"]
+    assert not buckets.empty
+    assert "5-10%" in buckets["ownership_bucket"].astype(str).tolist()
+    misses = out["top_misses_df"]
+    assert not misses.empty
+    assert str(misses.iloc[0]["Name"]) == "Charlie Three"
+
+
+def test_build_ownership_projection_diagnostics_supports_actual_upload_column() -> None:
+    exposure = pd.DataFrame(
+        [
+            {"Name": "Alpha One", "projected_ownership": 10.0, "actual_ownership_from_file": 14.0},
+            {"Name": "Bravo Two", "projected_ownership": 20.0, "actual_ownership_from_file": 18.0},
+            {"Name": "Charlie Three", "projected_ownership": 30.0, "actual_ownership_from_file": pd.NA},
+        ]
+    )
+    out = build_ownership_projection_diagnostics(
+        exposure,
+        projected_col="projected_ownership",
+        actual_col="actual_ownership_from_file",
+    )
+    summary = out["summary"]
+    assert int(summary["samples"]) == 2
+    assert round(float(summary["mae"]), 2) == 3.0
+    assert round(float(summary["bias"]), 2) == 1.0
 
 
 def test_build_field_entries_and_players_builds_salary_left() -> None:

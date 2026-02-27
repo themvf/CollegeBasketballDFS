@@ -25,6 +25,7 @@ DIAGNOSTIC_SALARY_BUCKET_KEYS = {
     "Stud (9.5k+)": "STUD",
 }
 DIAGNOSTIC_POSITION_ORDER = ("PG", "SG", "SF", "PF", "C", "UNK")
+OWNERSHIP_BUCKET_ORDER = ("<5%", "5-10%", "10-15%", "15-20%", "20-30%", "30%+")
 PROJECTED_OWNERSHIP_ALIASES = (
     "projected_ownership",
     "projected ownership",
@@ -121,6 +122,24 @@ def _primary_position_label(value: Any) -> str:
         if tok in {"PG", "SG", "SF", "PF", "C"}:
             return tok
     return "UNK"
+
+
+def _ownership_bucket_label(value: Any) -> str:
+    own = pd.to_numeric(value, errors="coerce")
+    if pd.isna(own):
+        return ""
+    own_val = float(own)
+    if own_val < 5.0:
+        return "<5%"
+    if own_val < 10.0:
+        return "5-10%"
+    if own_val < 15.0:
+        return "10-15%"
+    if own_val < 20.0:
+        return "15-20%"
+    if own_val < 30.0:
+        return "20-30%"
+    return "30%+"
 
 
 def _resolve_column_alias(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
@@ -673,6 +692,151 @@ def build_player_exposure_comparison(
 
     expo = expo.sort_values("field_ownership_pct", ascending=False).reset_index(drop=True)
     return expo.drop(columns=["name_key", "name_key_loose"])
+
+
+def build_ownership_projection_diagnostics(
+    exposure_df: pd.DataFrame | None,
+    *,
+    projected_col: str = "projected_ownership",
+    actual_col: str = "field_ownership_pct",
+    top_misses_n: int = 25,
+) -> dict[str, Any]:
+    empty_buckets = pd.DataFrame(
+        columns=["ownership_bucket", "samples", "avg_projected_ownership", "avg_actual_ownership", "bias", "mae", "rmse"]
+    )
+    empty_misses = pd.DataFrame(
+        columns=[
+            "Name",
+            "TeamAbbrev",
+            "projected_ownership",
+            "actual_ownership",
+            "ownership_error",
+            "abs_ownership_error",
+            "final_dk_points",
+        ]
+    )
+    out: dict[str, Any] = {
+        "summary": {
+            "samples": 0,
+            "mae": pd.NA,
+            "rmse": pd.NA,
+            "bias": pd.NA,
+            "corr": pd.NA,
+            "within_3_pct": pd.NA,
+            "within_5_pct": pd.NA,
+            "overprojected_pct": pd.NA,
+            "underprojected_pct": pd.NA,
+        },
+        "buckets_df": empty_buckets,
+        "top_misses_df": empty_misses,
+        "matched_df": pd.DataFrame(),
+    }
+    if exposure_df is None or exposure_df.empty:
+        return out
+    if projected_col not in exposure_df.columns or actual_col not in exposure_df.columns:
+        return out
+
+    work = exposure_df.copy()
+    work["projected_ownership"] = pd.to_numeric(work.get(projected_col), errors="coerce")
+    work["actual_ownership"] = pd.to_numeric(work.get(actual_col), errors="coerce")
+    work["final_dk_points"] = pd.to_numeric(work.get("final_dk_points"), errors="coerce")
+    matched = work.loc[work["projected_ownership"].notna() & work["actual_ownership"].notna()].copy()
+    if matched.empty:
+        return out
+
+    matched["ownership_error"] = matched["actual_ownership"] - matched["projected_ownership"]
+    matched["abs_ownership_error"] = pd.to_numeric(matched["ownership_error"], errors="coerce").abs()
+    matched["sq_ownership_error"] = pd.to_numeric(matched["ownership_error"], errors="coerce") ** 2
+    matched["ownership_bucket"] = matched["projected_ownership"].map(_ownership_bucket_label)
+
+    samples = int(len(matched))
+    mae = float(matched["abs_ownership_error"].mean()) if matched["abs_ownership_error"].notna().any() else pd.NA
+    rmse = (
+        float(pd.to_numeric(matched["sq_ownership_error"], errors="coerce").mean() ** 0.5)
+        if matched["sq_ownership_error"].notna().any()
+        else pd.NA
+    )
+    bias = float(matched["ownership_error"].mean()) if matched["ownership_error"].notna().any() else pd.NA
+    corr_val: float | Any = pd.NA
+    if samples >= 2:
+        corr_series = matched[["projected_ownership", "actual_ownership"]].corr(numeric_only=True)
+        corr_candidate = pd.to_numeric(corr_series.iloc[0, 1], errors="coerce")
+        if pd.notna(corr_candidate):
+            corr_val = float(corr_candidate)
+    within_3 = (
+        float((pd.to_numeric(matched["abs_ownership_error"], errors="coerce") <= 3.0).mean() * 100.0)
+        if samples > 0
+        else pd.NA
+    )
+    within_5 = (
+        float((pd.to_numeric(matched["abs_ownership_error"], errors="coerce") <= 5.0).mean() * 100.0)
+        if samples > 0
+        else pd.NA
+    )
+    over_pct = (
+        float((pd.to_numeric(matched["ownership_error"], errors="coerce") < 0.0).mean() * 100.0)
+        if samples > 0
+        else pd.NA
+    )
+    under_pct = (
+        float((pd.to_numeric(matched["ownership_error"], errors="coerce") > 0.0).mean() * 100.0)
+        if samples > 0
+        else pd.NA
+    )
+
+    buckets = (
+        matched.loc[matched["ownership_bucket"].astype(str).str.strip() != ""]
+        .groupby("ownership_bucket", as_index=False)
+        .agg(
+            samples=("Name", "count"),
+            avg_projected_ownership=("projected_ownership", "mean"),
+            avg_actual_ownership=("actual_ownership", "mean"),
+            bias=("ownership_error", "mean"),
+            mae=("abs_ownership_error", "mean"),
+            rmse=("sq_ownership_error", lambda s: float(pd.to_numeric(s, errors="coerce").mean() ** 0.5)),
+        )
+    )
+    if not buckets.empty:
+        buckets["ownership_bucket"] = pd.Categorical(
+            buckets["ownership_bucket"],
+            categories=list(OWNERSHIP_BUCKET_ORDER),
+            ordered=True,
+        )
+        buckets = buckets.sort_values("ownership_bucket", kind="stable").reset_index(drop=True)
+
+    misses = matched.copy()
+    keep_miss_cols = [
+        "Name",
+        "TeamAbbrev",
+        "projected_ownership",
+        "actual_ownership",
+        "ownership_error",
+        "abs_ownership_error",
+        "final_dk_points",
+    ]
+    keep_miss_cols = [c for c in keep_miss_cols if c in misses.columns]
+    misses = misses[keep_miss_cols].sort_values(
+        ["abs_ownership_error", "actual_ownership"],
+        ascending=[False, False],
+        kind="stable",
+    )
+    misses = misses.head(max(1, int(top_misses_n))).reset_index(drop=True)
+
+    out["summary"] = {
+        "samples": samples,
+        "mae": mae,
+        "rmse": rmse,
+        "bias": bias,
+        "corr": corr_val,
+        "within_3_pct": within_3,
+        "within_5_pct": within_5,
+        "overprojected_pct": over_pct,
+        "underprojected_pct": under_pct,
+    }
+    out["buckets_df"] = buckets
+    out["top_misses_df"] = misses
+    out["matched_df"] = matched
+    return out
 
 
 def build_projection_actual_comparison(
