@@ -1674,6 +1674,69 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _annotate_lineups_with_version_metadata(
+    lineups: list[dict[str, Any]] | None,
+    *,
+    version_key: str,
+    version_label: str,
+    lineup_strategy: str,
+    model_profile: str,
+    include_tail_signals: bool,
+) -> list[dict[str, Any]]:
+    annotated: list[dict[str, Any]] = []
+    for lineup in (lineups or []):
+        if not isinstance(lineup, dict):
+            continue
+        one = dict(lineup)
+        one["version_key"] = str(one.get("version_key") or version_key)
+        one["version_label"] = str(one.get("version_label") or version_label or version_key)
+        one["lineup_model_key"] = str(one.get("lineup_model_key") or version_key)
+        one["lineup_model_label"] = str(one.get("lineup_model_label") or version_label or version_key)
+        one["lineup_strategy"] = str(one.get("lineup_strategy") or lineup_strategy or "")
+        one["model_profile"] = str(one.get("model_profile") or model_profile or "")
+        one["include_tail_signals"] = bool(one.get("include_tail_signals", include_tail_signals))
+        ceiling_projection = _safe_float_value(one.get("ceiling_projection"), default=float("nan"))
+        if math.isnan(ceiling_projection):
+            ceiling_projection = round(_safe_float_value(one.get("projected_points"), 0.0) * 1.18, 2)
+        one["ceiling_projection"] = round(float(ceiling_projection), 2)
+        annotated.append(one)
+    return annotated
+
+
+def _build_lineup_versions_export_frame(
+    generated_versions: dict[str, Any] | None,
+    *,
+    run_id: str = "",
+) -> pd.DataFrame:
+    versions = generated_versions if isinstance(generated_versions, dict) else {}
+    export_lineups: list[dict[str, Any]] = []
+    for version_key, version_data in versions.items():
+        version_dict = version_data if isinstance(version_data, dict) else {}
+        annotated = _annotate_lineups_with_version_metadata(
+            version_dict.get("lineups") or [],
+            version_key=str(version_key),
+            version_label=str(version_dict.get("version_label") or version_key),
+            lineup_strategy=str(version_dict.get("lineup_strategy") or ""),
+            model_profile=str(version_dict.get("model_profile") or ""),
+            include_tail_signals=bool(version_dict.get("include_tail_signals", False)),
+        )
+        export_lineups.extend(annotated)
+
+    if not export_lineups:
+        return pd.DataFrame()
+
+    export_df = lineups_slots_frame(export_lineups)
+    if export_df.empty:
+        export_df = lineups_summary_frame(export_lineups)
+    if export_df.empty:
+        return export_df
+
+    export_df = export_df.copy()
+    if run_id:
+        export_df.insert(0, "Run ID", str(run_id))
+    return export_df
+
+
 def persist_lineup_run_bundle(
     store: CbbGcsStore,
     slate_date: date,
@@ -5042,6 +5105,14 @@ with tab_lineups:
                             model_profile=str(version_cfg.get("model_profile") or "legacy_baseline"),
                             progress_callback=_lineup_progress,
                         )
+                        annotated_lineups = _annotate_lineups_with_version_metadata(
+                            lineups,
+                            version_key=str(version_cfg["version_key"]),
+                            version_label=str(version_cfg["version_label"]),
+                            lineup_strategy=str(version_cfg["lineup_strategy"]),
+                            model_profile=str(version_cfg.get("model_profile") or ""),
+                            include_tail_signals=bool(version_cfg.get("include_tail_signals", False)),
+                        )
                         generated_versions[str(version_cfg["version_key"])] = {
                             "version_key": str(version_cfg["version_key"]),
                             "version_label": str(version_cfg["version_label"]),
@@ -5051,9 +5122,9 @@ with tab_lineups:
                             "variance_preset_applied": bool(runtime_controls.get("variance_preset_applied")),
                             "runtime_controls": runtime_controls,
                             "lineup_count_requested": int(version_lineup_count),
-                            "lineups": lineups,
+                            "lineups": annotated_lineups,
                             "warnings": warnings,
-                            "upload_csv": build_dk_upload_csv(lineups) if lineups else "",
+                            "upload_csv": build_dk_upload_csv(annotated_lineups) if annotated_lineups else "",
                         }
 
                     total_generated = sum(len(v.get("lineups") or []) for v in generated_versions.values())
@@ -5206,8 +5277,19 @@ with tab_lineups:
                     active_version = generated_versions.get(active_version_key) or {}
                     generated = active_version.get("lineups") or []
                     generated = enrich_lineups_minutes_from_pool(generated, pool_sorted)
+                    generated = _annotate_lineups_with_version_metadata(
+                        generated,
+                        version_key=str(active_version.get("version_key") or active_version_key),
+                        version_label=str(active_version.get("version_label") or active_version_key),
+                        lineup_strategy=str(active_version.get("lineup_strategy") or ""),
+                        model_profile=str(active_version.get("model_profile") or ""),
+                        include_tail_signals=bool(active_version.get("include_tail_signals", False)),
+                    )
                     active_version["lineups"] = generated
+                    active_version["upload_csv"] = str(active_version.get("upload_csv") or build_dk_upload_csv(generated))
                     generated_versions[active_version_key] = active_version
+                    run_bundle["versions"] = generated_versions
+                    st.session_state["cbb_generated_run_bundle"] = run_bundle
                     warnings = [str(x) for x in (active_version.get("warnings") or [])]
                     upload_csv = str(active_version.get("upload_csv") or "")
                     st.session_state["cbb_generated_lineups"] = generated
@@ -5239,13 +5321,31 @@ with tab_lineups:
 
                         export_date = run_bundle_slate_date or selected_lineup_slate_date
                         export_slate = run_bundle_slate_key or selected_lineup_slate_key
-                        st.download_button(
-                            "Download DK Upload CSV",
-                            data=upload_csv,
-                            file_name=f"dk_lineups_{export_date}_{export_slate}_{active_version_key}.csv",
-                            mime="text/csv",
-                            key="download_dk_upload_csv",
+                        all_generated_export_df = _build_lineup_versions_export_frame(
+                            generated_versions,
+                            run_id=str(run_bundle.get("run_id") or ""),
                         )
+                        dl1, dl2 = st.columns(2)
+                        with dl1:
+                            if not all_generated_export_df.empty:
+                                st.download_button(
+                                    "Download All Generated Lineups CSV",
+                                    data=all_generated_export_df.to_csv(index=False),
+                                    file_name=(
+                                        f"all_generated_lineups_{export_date}_{export_slate}_"
+                                        f"{run_bundle.get('run_id', 'run')}.csv"
+                                    ),
+                                    mime="text/csv",
+                                    key="download_all_generated_lineups_csv",
+                                )
+                        with dl2:
+                            st.download_button(
+                                "Download DK Upload CSV",
+                                data=upload_csv,
+                                file_name=f"dk_lineups_{export_date}_{export_slate}_{active_version_key}.csv",
+                                mime="text/csv",
+                                key="download_dk_upload_csv",
+                            )
                 elif generate_lineups_clicked:
                     st.error("No lineups were generated. Adjust locks/exclusions/exposure settings and retry.")
 
@@ -5567,6 +5667,8 @@ with tab_lineups:
                         default=_slate_key_from_label(lineup_slate_key),
                     )
 
+                    saved_versions_bundle: dict[str, Any] = {}
+
                     versions_meta = selected_manifest.get("versions") or []
                     if versions_meta:
                         version_meta_map = {str(v.get("version_key") or ""): v for v in versions_meta}
@@ -5586,16 +5688,75 @@ with tab_lineups:
                                 ),
                                 key="saved_run_version_picker",
                             )
-                            saved_payload = load_saved_lineup_version_payload(
-                                bucket_name=bucket_name,
-                                selected_date=selected_manifest_date,
-                                run_id=str(selected_manifest.get("run_id") or ""),
-                                version_key=selected_saved_version,
-                                selected_slate_key=selected_manifest_slate_key,
-                                gcp_project=gcp_project or None,
-                                service_account_json=cred_json,
-                                service_account_json_b64=cred_json_b64,
-                            )
+                            saved_payload_map: dict[str, dict[str, Any]] = {}
+                            for version_key in saved_version_keys:
+                                payload = load_saved_lineup_version_payload(
+                                    bucket_name=bucket_name,
+                                    selected_date=selected_manifest_date,
+                                    run_id=str(selected_manifest.get("run_id") or ""),
+                                    version_key=version_key,
+                                    selected_slate_key=selected_manifest_slate_key,
+                                    gcp_project=gcp_project or None,
+                                    service_account_json=cred_json,
+                                    service_account_json_b64=cred_json_b64,
+                                )
+                                if not isinstance(payload, dict):
+                                    continue
+                                version_meta = version_meta_map.get(version_key, {})
+                                annotated_lineups = _annotate_lineups_with_version_metadata(
+                                    payload.get("lineups") or [],
+                                    version_key=version_key,
+                                    version_label=str(
+                                        payload.get("version_label")
+                                        or version_meta.get("version_label")
+                                        or version_key
+                                    ),
+                                    lineup_strategy=str(
+                                        payload.get("lineup_strategy")
+                                        or version_meta.get("lineup_strategy")
+                                        or ""
+                                    ),
+                                    model_profile=str(
+                                        payload.get("model_profile")
+                                        or version_meta.get("model_profile")
+                                        or ""
+                                    ),
+                                    include_tail_signals=bool(
+                                        payload.get("include_tail_signals")
+                                        if "include_tail_signals" in payload
+                                        else version_meta.get("include_tail_signals", False)
+                                    ),
+                                )
+                                saved_payload_map[version_key] = {
+                                    **payload,
+                                    "lineups": annotated_lineups,
+                                }
+                                saved_versions_bundle[version_key] = {
+                                    "version_key": version_key,
+                                    "version_label": str(
+                                        payload.get("version_label")
+                                        or version_meta.get("version_label")
+                                        or version_key
+                                    ),
+                                    "lineup_strategy": str(
+                                        payload.get("lineup_strategy")
+                                        or version_meta.get("lineup_strategy")
+                                        or ""
+                                    ),
+                                    "model_profile": str(
+                                        payload.get("model_profile")
+                                        or version_meta.get("model_profile")
+                                        or ""
+                                    ),
+                                    "include_tail_signals": bool(
+                                        payload.get("include_tail_signals")
+                                        if "include_tail_signals" in payload
+                                        else version_meta.get("include_tail_signals", False)
+                                    ),
+                                    "lineups": annotated_lineups,
+                                }
+
+                            saved_payload = saved_payload_map.get(selected_saved_version)
                             if isinstance(saved_payload, dict):
                                 saved_lineups = saved_payload.get("lineups") or []
                                 saved_warnings = [str(x) for x in (saved_payload.get("warnings") or [])]
@@ -5609,17 +5770,36 @@ with tab_lineups:
                                     if not saved_slots_df.empty:
                                         st.dataframe(saved_slots_df, hide_index=True, use_container_width=True)
                                     saved_upload_csv = str(saved_payload.get("dk_upload_csv") or build_dk_upload_csv(saved_lineups))
-                                    st.download_button(
-                                        "Download Saved DK Upload CSV",
-                                        data=saved_upload_csv,
-                                        file_name=(
-                                            f"dk_lineups_{selected_manifest_date.isoformat()}_"
-                                            f"{selected_manifest_slate_key}_"
-                                            f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
-                                        ),
-                                        mime="text/csv",
-                                        key=f"download_saved_dk_upload_csv_{selected_saved_version}",
+                                    all_saved_export_df = _build_lineup_versions_export_frame(
+                                        saved_versions_bundle,
+                                        run_id=str(selected_manifest.get("run_id") or ""),
                                     )
+                                    sdl1, sdl2 = st.columns(2)
+                                    with sdl1:
+                                        if not all_saved_export_df.empty:
+                                            st.download_button(
+                                                "Download Saved Generated Lineups CSV",
+                                                data=all_saved_export_df.to_csv(index=False),
+                                                file_name=(
+                                                    f"saved_generated_lineups_{selected_manifest_date.isoformat()}_"
+                                                    f"{selected_manifest_slate_key}_"
+                                                    f"{selected_manifest.get('run_id', 'run')}.csv"
+                                                ),
+                                                mime="text/csv",
+                                                key=f"download_saved_generated_lineups_csv_{selected_saved_version}",
+                                            )
+                                    with sdl2:
+                                        st.download_button(
+                                            "Download Saved DK Upload CSV",
+                                            data=saved_upload_csv,
+                                            file_name=(
+                                                f"dk_lineups_{selected_manifest_date.isoformat()}_"
+                                                f"{selected_manifest_slate_key}_"
+                                                f"{selected_manifest.get('run_id', 'run')}_{selected_saved_version}.csv"
+                                            ),
+                                            mime="text/csv",
+                                            key=f"download_saved_dk_upload_csv_{selected_saved_version}",
+                                        )
         except Exception as exc:
             st.exception(exc)
 

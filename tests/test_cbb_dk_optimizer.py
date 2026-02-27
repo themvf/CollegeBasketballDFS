@@ -299,12 +299,21 @@ def test_lineup_minutes_summary_columns_present() -> None:
     assert len(lineups) == 3
     assert all(abs(float(lineup["expected_minutes_sum"]) - 248.0) < 1e-6 for lineup in lineups)
     assert all(abs(float(lineup["avg_minutes_last3"]) - 30.0) < 1e-6 for lineup in lineups)
+    assert all(float(lineup["ceiling_projection"]) > float(lineup["projected_points"]) for lineup in lineups)
+    for lineup in lineups:
+        lineup["lineup_model_label"] = "Standard v1"
 
     summary_df = lineups_summary_frame(lineups)
     assert "Expected Minutes Sum" in summary_df.columns
     assert "Avg Minutes (Past 3 Games)" in summary_df.columns
+    assert "Ceiling Projection" in summary_df.columns
+    assert "Lineup Model" in summary_df.columns
     assert abs(float(pd.to_numeric(summary_df["Expected Minutes Sum"], errors="coerce").iloc[0]) - 248.0) < 1e-6
     assert abs(float(pd.to_numeric(summary_df["Avg Minutes (Past 3 Games)"], errors="coerce").iloc[0]) - 30.0) < 1e-6
+    assert float(pd.to_numeric(summary_df["Ceiling Projection"], errors="coerce").iloc[0]) > float(
+        pd.to_numeric(summary_df["Projected Points"], errors="coerce").iloc[0]
+    )
+    assert str(summary_df["Lineup Model"].iloc[0]) == "Standard v1"
 
 
 def test_enrich_lineups_minutes_from_pool_backfills_legacy_lineups() -> None:
@@ -934,6 +943,7 @@ def test_generate_lineups_records_model_profile_in_payload() -> None:
     assert warnings == []
     assert len(lineups) == 6
     assert all(str(lineup.get("model_profile")) == "standout_capture_v1" for lineup in lineups)
+    assert all(float(lineup.get("ceiling_projection") or 0.0) > float(lineup.get("projected_points") or 0.0) for lineup in lineups)
 
 
 def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:

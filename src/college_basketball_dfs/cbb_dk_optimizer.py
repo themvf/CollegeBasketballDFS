@@ -89,6 +89,24 @@ def _lineup_minutes_metrics(players: list[dict[str, Any]]) -> tuple[float, float
     return round(expected_minutes_sum, 2), round(avg_minutes_last3, 2)
 
 
+def _lineup_ceiling_projection_value(lineup: dict[str, Any]) -> float:
+    explicit = _safe_float(lineup.get("ceiling_projection"))
+    if explicit is not None and not math.isnan(explicit):
+        return round(float(explicit), 2)
+    projected = _safe_float(lineup.get("projected_points"))
+    if projected is None or math.isnan(projected):
+        return 0.0
+    return round(float(projected) * 1.18, 2)
+
+
+def _lineup_model_label_value(lineup: dict[str, Any]) -> str:
+    for key in ("lineup_model_label", "version_label", "lineup_model_key", "version_key", "model_profile"):
+        value = str(lineup.get(key) or "").strip()
+        if value:
+            return value
+    return ""
+
+
 def _position_base(value: Any) -> str:
     raw = str(value or "").strip().upper()
     if not raw:
@@ -2856,6 +2874,7 @@ def generate_lineups(
                 "salary": lineup_salary,
                 "salary_left": SALARY_CAP - lineup_salary,
                 "projected_points": round(lineup_proj, 2),
+                "ceiling_projection": round(lineup_proj * 1.18, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
                 "expected_minutes_sum": expected_minutes_sum,
                 "avg_minutes_last3": avg_minutes_last3,
@@ -3192,6 +3211,7 @@ def _generate_lineups_cluster_mode(
                 "salary": lineup_salary,
                 "salary_left": SALARY_CAP - lineup_salary,
                 "projected_points": round(lineup_proj, 2),
+                "ceiling_projection": round(lineup_proj * 1.18, 2),
                 "projected_ownership_sum": round(lineup_own, 2),
                 "expected_minutes_sum": expected_minutes_sum,
                 "avg_minutes_last3": avg_minutes_last3,
@@ -3246,11 +3266,15 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             "Lineup": lineup["lineup_number"],
             "Salary": lineup["salary"],
             "Projected Points": lineup["projected_points"],
+            "Ceiling Projection": _lineup_ceiling_projection_value(lineup),
             "Projected Ownership Sum": lineup["projected_ownership_sum"],
             "Expected Minutes Sum": round(float(expected_minutes_sum_value), 2),
             "Avg Minutes (Past 3 Games)": round(float(avg_minutes_last3_value), 2),
             "Players": " | ".join(str(p.get("Name + ID") or p.get("Name")) for p in players),
         }
+        lineup_model_label = _lineup_model_label_value(lineup)
+        if lineup_model_label:
+            row["Lineup Model"] = lineup_model_label
         if lineup.get("pair_id") is not None and lineup.get("pair_role"):
             row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
@@ -3346,6 +3370,7 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             "Lineup": lineup["lineup_number"],
             "Salary": lineup["salary"],
             "Projected Points": lineup["projected_points"],
+            "Ceiling Projection": _lineup_ceiling_projection_value(lineup),
             "Projected Ownership Sum": lineup["projected_ownership_sum"],
             "Expected Minutes Sum": round(float(expected_minutes_sum_value), 2),
             "Avg Minutes (Past 3 Games)": round(float(avg_minutes_last3_value), 2),
@@ -3358,6 +3383,9 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             "UTIL1": slots[6].get("Name + ID") or slots[6].get("Name"),
             "UTIL2": slots[7].get("Name + ID") or slots[7].get("Name"),
         }
+        lineup_model_label = _lineup_model_label_value(lineup)
+        if lineup_model_label:
+            row["Lineup Model"] = lineup_model_label
         if lineup.get("pair_id") is not None and lineup.get("pair_role"):
             row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
