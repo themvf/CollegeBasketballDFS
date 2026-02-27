@@ -13,8 +13,12 @@ from typing import Any
 from uuid import uuid4
 
 import pandas as pd
-import plotly.express as px
 import streamlit as st
+
+try:
+    import plotly.express as px
+except ModuleNotFoundError:  # pragma: no cover - optional dependency in some deploy targets
+    px = None
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
@@ -6200,26 +6204,32 @@ with tab_tournament_review:
                             chart_vals = pd.to_numeric(chart_df.stack(), errors="coerce").dropna()
                             max_abs = float(chart_vals.abs().max()) if not chart_vals.empty else 0.0
                             color_bound = max(1.0, max_abs)
-                            heatmap_fig = px.imshow(
-                                chart_df,
-                                labels={"x": "Salary Bucket", "y": "Primary Position", "color": "Avg Error"},
-                                color_continuous_scale="RdBu",
-                                zmin=-color_bound,
-                                zmax=color_bound,
-                                aspect="auto",
-                            )
-                            heatmap_fig.update_traces(text=text_values.values, texttemplate="%{text}")
-                            heatmap_fig.update_layout(
-                                height=440,
-                                margin=dict(l=8, r=8, t=24, b=8),
-                                coloraxis_colorbar_title_text="Avg Error",
-                            )
-                            heatmap_fig.update_xaxes(side="bottom")
-                            st.plotly_chart(
-                                heatmap_fig,
-                                use_container_width=True,
-                                key=f"tournament_projection_bias_heatmap_{error_col}",
-                            )
+                            if px is None:
+                                st.info(
+                                    "Plotly is not installed in this environment; showing heatmap values as a table."
+                                )
+                                st.dataframe(chart_df, use_container_width=True)
+                            else:
+                                heatmap_fig = px.imshow(
+                                    chart_df,
+                                    labels={"x": "Salary Bucket", "y": "Primary Position", "color": "Avg Error"},
+                                    color_continuous_scale="RdBu",
+                                    zmin=-color_bound,
+                                    zmax=color_bound,
+                                    aspect="auto",
+                                )
+                                heatmap_fig.update_traces(text=text_values.values, texttemplate="%{text}")
+                                heatmap_fig.update_layout(
+                                    height=440,
+                                    margin=dict(l=8, r=8, t=24, b=8),
+                                    coloraxis_colorbar_title_text="Avg Error",
+                                )
+                                heatmap_fig.update_xaxes(side="bottom")
+                                st.plotly_chart(
+                                    heatmap_fig,
+                                    use_container_width=True,
+                                    key=f"tournament_projection_bias_heatmap_{error_col}",
+                                )
 
                             if not samples_df.empty:
                                 st.caption("Sample counts by cell")
