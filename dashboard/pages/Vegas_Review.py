@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 import os
+import re
 import sys
 from datetime import date
 from pathlib import Path
@@ -27,6 +28,24 @@ from college_basketball_dfs.cbb_vegas_review import (
     summarize_vegas_accuracy,
 )
 from college_basketball_dfs.cbb_tournament_review import build_projection_actual_comparison
+
+
+PROJECTED_OWNERSHIP_ALIASES = (
+    "projected_ownership",
+    "projected ownership",
+    "projectedownership",
+    "proj_ownership",
+    "projownership",
+    "ownership_projection",
+    "ownershipprojection",
+    "ownership_proj",
+    "ownershipproj",
+    "own_pct",
+    "own%",
+    "ownership",
+    "projected_ownership_v1",
+)
+NULLISH_TEXT_VALUES = {"", "nan", "none", "null"}
 
 
 def _secret(name: str) -> str | None:
@@ -282,6 +301,268 @@ def load_projection_actual_comparison_dataset(
         "comparison_days_found": int(comparison_days),
         "comparison_rows": int(len(out)),
     }
+
+
+def _norm_col_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _resolve_column_alias(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
+    if df is None or df.empty:
+        return None
+    normalized = {_norm_col_key(c): str(c) for c in df.columns}
+    for alias in aliases:
+        alias_key = _norm_col_key(alias)
+        if alias_key in normalized:
+            return normalized[alias_key]
+    return None
+
+
+def _norm_text_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _first_nonempty(series: pd.Series) -> str:
+    for value in series:
+        text = str(value or "").strip()
+        if text and text.lower() not in NULLISH_TEXT_VALUES:
+            return text
+    return ""
+
+
+def _coerce_ownership_series(series: pd.Series) -> pd.Series:
+    text = series.astype(str).str.strip().str.replace("%", "", regex=False)
+    text = text.mask(text.str.lower().isin(NULLISH_TEXT_VALUES), pd.NA)
+    out = pd.to_numeric(text, errors="coerce")
+    valid = out.dropna()
+    if not valid.empty and float(valid.quantile(0.95)) <= 1.0:
+        out = out * 100.0
+    return out
+
+
+def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "player_key",
+        "player_name",
+        "team",
+        "position",
+        "review_date",
+        "row_order",
+        "actual_dk_points",
+        "projected_ownership",
+        "salary",
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=cols)
+
+    work = df.copy()
+    id_col = _resolve_column_alias(work, ("ID", "id", "player_id", "playerid"))
+    name_col = _resolve_column_alias(work, ("Name", "name", "player_name", "player"))
+    team_col = _resolve_column_alias(work, ("TeamAbbrev", "team_abbrev", "team_name", "team", "Team"))
+    position_col = _resolve_column_alias(work, ("Position", "position", "Roster Position", "roster_position", "Pos", "pos"))
+    review_date_col = _resolve_column_alias(work, ("review_date", "review date", "slate_date", "game_date", "date"))
+    salary_col = _resolve_column_alias(work, ("Salary", "salary", "dk_salary", "dk salary"))
+    points_col = _resolve_column_alias(work, ("actual_dk_points", "actual dk points", "final_dk_points", "dk_points"))
+    ownership_col = _resolve_column_alias(work, PROJECTED_OWNERSHIP_ALIASES)
+
+    out = pd.DataFrame(index=work.index)
+    out["player_id"] = work[id_col] if id_col else ""
+    out["player_name"] = work[name_col] if name_col else ""
+    out["team"] = work[team_col] if team_col else ""
+    out["position"] = work[position_col] if position_col else ""
+    out["review_date"] = work[review_date_col] if review_date_col else pd.NA
+    out["salary"] = pd.to_numeric(work[salary_col], errors="coerce") if salary_col else pd.NA
+    out["actual_dk_points"] = pd.to_numeric(work[points_col], errors="coerce") if points_col else pd.NA
+    out["projected_ownership"] = _coerce_ownership_series(work[ownership_col]) if ownership_col else pd.NA
+    out["row_order"] = pd.RangeIndex(start=0, stop=len(out), step=1)
+
+    out["player_id"] = out["player_id"].astype(str).str.strip()
+    out["player_name"] = out["player_name"].astype(str).str.strip()
+    out["team"] = out["team"].astype(str).str.strip().str.upper()
+    out["position"] = out["position"].astype(str).str.strip().str.upper()
+    out["player_name_key"] = out["player_name"].map(_norm_text_key)
+    out["player_id_key"] = out["player_id"].map(_norm_text_key)
+
+    out["player_key"] = ""
+    has_id_key = out["player_id_key"] != ""
+    out.loc[has_id_key, "player_key"] = "id:" + out.loc[has_id_key, "player_id_key"]
+    missing_key = out["player_key"] == ""
+    has_name_key = out["player_name_key"] != ""
+    use_name_key = missing_key & has_name_key
+    out.loc[use_name_key, "player_key"] = (
+        "name:" + out.loc[use_name_key, "player_name_key"] + "|team:" + out.loc[use_name_key, "team"]
+    )
+    out = out.loc[out["player_key"] != ""].copy()
+    out["review_date"] = pd.to_datetime(out["review_date"], errors="coerce")
+    out["team"] = out["team"].replace({"NAN": "", "NONE": "", "NULL": ""})
+    out["position"] = out["position"].replace({"NAN": "", "NONE": "", "NULL": ""})
+
+    return out[cols].copy()
+
+
+def _aggregate_player_metric(
+    history_df: pd.DataFrame,
+    *,
+    value_col: str,
+    season_col: str,
+    last5_col: str,
+    agg_mode: str,
+) -> pd.DataFrame:
+    if history_df is None or history_df.empty or value_col not in history_df.columns:
+        return pd.DataFrame(columns=["player_key", season_col, last5_col])
+
+    work = history_df.copy()
+    work[value_col] = pd.to_numeric(work[value_col], errors="coerce")
+    work = work.loc[work["player_key"].astype(str).str.strip() != ""].copy()
+    work = work.loc[work[value_col].notna()].copy()
+    if work.empty:
+        return pd.DataFrame(columns=["player_key", season_col, last5_col])
+
+    work["_sort_date"] = pd.to_datetime(work.get("review_date"), errors="coerce")
+    work["_sort_ord"] = pd.to_numeric(work.get("row_order"), errors="coerce").fillna(0.0)
+    work = work.sort_values(
+        ["player_key", "_sort_date", "_sort_ord"],
+        ascending=[True, False, False],
+        kind="stable",
+    )
+    last5 = work.groupby("player_key", sort=False, as_index=False).head(5).copy()
+
+    if agg_mode == "mean":
+        season = (
+            work.groupby("player_key", as_index=False)[value_col]
+            .mean(numeric_only=True)
+            .rename(columns={value_col: season_col})
+        )
+        recent = (
+            last5.groupby("player_key", as_index=False)[value_col]
+            .mean(numeric_only=True)
+            .rename(columns={value_col: last5_col})
+        )
+    else:
+        season = (
+            work.groupby("player_key", as_index=False)[value_col]
+            .sum(numeric_only=True)
+            .rename(columns={value_col: season_col})
+        )
+        recent = (
+            last5.groupby("player_key", as_index=False)[value_col]
+            .sum(numeric_only=True)
+            .rename(columns={value_col: last5_col})
+        )
+
+    return season.merge(recent, on="player_key", how="outer")
+
+
+def build_player_review_table(
+    projection_actual_df: pd.DataFrame,
+    player_totals_df: pd.DataFrame,
+) -> tuple[pd.DataFrame, list[str], dict[str, bool]]:
+    actual_history = _build_player_history_frame(projection_actual_df)
+    projection_history = _build_player_history_frame(player_totals_df)
+
+    identity_frames: list[pd.DataFrame] = []
+    for frame in [actual_history, projection_history]:
+        if frame.empty:
+            continue
+        identity_frames.append(frame[["player_key", "player_name", "team", "position", "review_date", "row_order"]].copy())
+
+    if not identity_frames:
+        meta = {"has_points": False, "has_ownership": False, "has_salary": False}
+        return pd.DataFrame(), [], meta
+
+    identity = pd.concat(identity_frames, ignore_index=True)
+    identity["review_date"] = pd.to_datetime(identity.get("review_date"), errors="coerce")
+    identity["_sort_date"] = identity["review_date"]
+    identity["_sort_ord"] = pd.to_numeric(identity.get("row_order"), errors="coerce").fillna(0.0)
+    identity = identity.sort_values(
+        ["player_key", "_sort_date", "_sort_ord"],
+        ascending=[True, False, False],
+        kind="stable",
+    )
+    identity_summary = (
+        identity.groupby("player_key", as_index=False)
+        .agg(
+            player_name=("player_name", _first_nonempty),
+            team=("team", _first_nonempty),
+            position=("position", _first_nonempty),
+        )
+        .copy()
+    )
+
+    points_summary = _aggregate_player_metric(
+        actual_history,
+        value_col="actual_dk_points",
+        season_col="Total Fantasy Points Season",
+        last5_col="Total Fantasy Points Last 5 Games",
+        agg_mode="sum",
+    )
+    ownership_summary = _aggregate_player_metric(
+        projection_history,
+        value_col="projected_ownership",
+        season_col="Average Ownership Season",
+        last5_col="Average Ownership Last 5 Games",
+        agg_mode="mean",
+    )
+
+    salary_source = actual_history if actual_history["salary"].notna().any() else projection_history
+    salary_summary = _aggregate_player_metric(
+        salary_source,
+        value_col="salary",
+        season_col="Average DK Salary This Season",
+        last5_col="_unused_last5_salary",
+        agg_mode="mean",
+    )
+    if "_unused_last5_salary" in salary_summary.columns:
+        salary_summary = salary_summary.drop(columns=["_unused_last5_salary"])
+
+    out = identity_summary.merge(points_summary, on="player_key", how="left")
+    out = out.merge(ownership_summary, on="player_key", how="left")
+    out = out.merge(salary_summary, on="player_key", how="left")
+    out = out.rename(columns={"player_name": "Player Name", "position": "Position", "team": "Team"})
+
+    for col in [
+        "Total Fantasy Points Season",
+        "Total Fantasy Points Last 5 Games",
+        "Average Ownership Season",
+        "Average Ownership Last 5 Games",
+        "Average DK Salary This Season",
+    ]:
+        if col in out.columns:
+            out[col] = pd.to_numeric(out[col], errors="coerce")
+
+    for col in ["Total Fantasy Points Season", "Total Fantasy Points Last 5 Games"]:
+        if col in out.columns:
+            out[col] = out[col].fillna(0.0)
+
+    for col in [
+        "Total Fantasy Points Season",
+        "Total Fantasy Points Last 5 Games",
+        "Average Ownership Season",
+        "Average Ownership Last 5 Games",
+        "Average DK Salary This Season",
+    ]:
+        if col in out.columns:
+            out[col] = out[col].round(2)
+
+    out["Player Name"] = out["Player Name"].astype(str).str.strip()
+    out["Team"] = out["Team"].astype(str).str.strip().str.upper()
+    out["Position"] = out["Position"].astype(str).str.strip().str.upper()
+    out = out.loc[out["Player Name"] != ""].copy()
+    out = out.sort_values(
+        ["Team", "Total Fantasy Points Season", "Player Name"],
+        ascending=[True, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+
+    team_options = sorted([str(x).strip().upper() for x in out["Team"].dropna().unique().tolist() if str(x).strip()])
+    meta = {
+        "has_points": bool(points_summary["Total Fantasy Points Season"].notna().any()) if not points_summary.empty else False,
+        "has_ownership": bool(ownership_summary["Average Ownership Season"].notna().any())
+        if not ownership_summary.empty
+        else False,
+        "has_salary": bool(salary_summary["Average DK Salary This Season"].notna().any()) if not salary_summary.empty else False,
+    }
+    return out, team_options, meta
 
 
 def _safe_corr(series_x: pd.Series, series_y: pd.Series, method: str) -> float | None:
@@ -1098,6 +1379,56 @@ else:
             top_n=top_n_lollipop,
             sort_mode=sort_mode,
         )
+
+st.subheader("Player Review")
+st.caption(
+    "Select a team to review player-level fantasy totals, ownership trends, and average DK salary "
+    "for the selected date window."
+)
+player_review_df, player_review_teams, player_review_meta = build_player_review_table(
+    projection_actual_df=projection_actual_df,
+    player_totals_df=player_totals_df,
+)
+if player_review_df.empty or not player_review_teams:
+    st.info(
+        "Player review rows are unavailable in this date range. "
+        "This section needs projection snapshots and/or projection-vs-actual rows."
+    )
+else:
+    selected_player_review_team = st.selectbox(
+        "Team",
+        options=player_review_teams,
+        index=0,
+        key="vegas_player_review_team",
+    )
+    player_team_view_df = player_review_df.loc[
+        player_review_df["Team"].astype(str).str.strip().str.upper() == str(selected_player_review_team).strip().upper()
+    ].copy()
+    show_cols = [
+        "Player Name",
+        "Position",
+        "Total Fantasy Points Season",
+        "Total Fantasy Points Last 5 Games",
+        "Average Ownership Season",
+        "Average Ownership Last 5 Games",
+        "Average DK Salary This Season",
+    ]
+    show_cols = [c for c in show_cols if c in player_team_view_df.columns]
+    if player_team_view_df.empty:
+        st.info("No player rows found for the selected team in this date range.")
+    else:
+        player_team_view_df = player_team_view_df.sort_values(
+            ["Total Fantasy Points Season", "Player Name"],
+            ascending=[False, True],
+            kind="stable",
+        )
+        st.dataframe(player_team_view_df[show_cols], hide_index=True, use_container_width=True)
+    if not bool(player_review_meta.get("has_points")):
+        st.caption("Note: Total fantasy points are unavailable because no matched actual DK points were found.")
+    if not bool(player_review_meta.get("has_ownership")):
+        st.caption("Note: Ownership columns are unavailable because projection ownership values were not found.")
+    if not bool(player_review_meta.get("has_salary")):
+        st.caption("Note: Average DK salary is unavailable because salary values were not found.")
 
 st.subheader("Game/Odds Join Audit")
 st.caption(
