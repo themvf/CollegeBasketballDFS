@@ -592,17 +592,13 @@ with st.sidebar:
     end_date = st.date_input("End Date", value=default_end, key="player_review_end_date")
     bucket_name = st.text_input("GCS Bucket", value=default_bucket, key="player_review_bucket")
     gcp_project = st.text_input("GCP Project (optional)", value=default_project, key="player_review_project")
-    run_review_clicked = st.button("Run Player Review", key="run_player_review")
+    st.caption("This page refreshes automatically when settings change.")
     if st.button("Clear Cached Results", key="clear_player_review_cache"):
         st.cache_data.clear()
         st.success("Cache cleared.")
 
 if start_date > end_date:
     st.error("Start Date must be on or before End Date.")
-    st.stop()
-
-if not run_review_clicked:
-    st.info("Select your date range and click `Run Player Review`.")
     st.stop()
 
 if not bucket_name.strip():
