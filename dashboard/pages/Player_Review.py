@@ -1227,6 +1227,97 @@ else:
         key="download_player_review_csv",
     )
 
+st.subheader("Low-Owned High-Scoring Targets")
+if not all(col in player_review_df.columns for col in [past5_points_col, "Average Ownership Season"]):
+    st.info("This filter needs both last-5 fantasy points and average ownership columns.")
+else:
+    past5_all = pd.to_numeric(player_review_df[past5_points_col], errors="coerce")
+    valid_past5 = past5_all.dropna()
+    default_min_past5 = float(valid_past5.quantile(0.75)) if not valid_past5.empty else 25.0
+    if not pd.notna(default_min_past5):
+        default_min_past5 = 25.0
+    default_min_past5 = float(max(0.0, round(default_min_past5, 1)))
+
+    t1, t2, t3 = st.columns(3)
+    leverage_scope = t1.selectbox(
+        "Scope",
+        options=["All Teams", "Selected Team"],
+        index=0,
+        key="player_review_leverage_scope",
+    )
+    leverage_own_cap = float(
+        t2.number_input(
+            "Max Avg Ownership %",
+            min_value=0.0,
+            max_value=100.0,
+            value=10.0,
+            step=0.5,
+            key="player_review_leverage_own_cap",
+        )
+    )
+    leverage_min_past5 = float(
+        t3.number_input(
+            f"Min {past5_points_col}",
+            min_value=0.0,
+            value=default_min_past5,
+            step=0.5,
+            key="player_review_leverage_min_past5",
+        )
+    )
+
+    leverage_source = player_review_df.copy()
+    if str(leverage_scope).strip().lower() == "selected team":
+        leverage_source = leverage_source.loc[
+            leverage_source["Team"].astype(str).str.strip().str.upper() == str(selected_team).strip().upper()
+        ].copy()
+
+    leverage_source[past5_points_col] = pd.to_numeric(leverage_source[past5_points_col], errors="coerce")
+    leverage_source["Average Ownership Season"] = pd.to_numeric(
+        leverage_source["Average Ownership Season"], errors="coerce"
+    )
+    leverage_df = leverage_source.loc[
+        leverage_source[past5_points_col].notna()
+        & leverage_source["Average Ownership Season"].notna()
+        & (leverage_source[past5_points_col] >= float(leverage_min_past5))
+        & (leverage_source["Average Ownership Season"] < float(leverage_own_cap))
+    ].copy()
+    leverage_df = leverage_df.sort_values(
+        [past5_points_col, "Average Ownership Season", "Total Fantasy Points Season", "Player Name"],
+        ascending=[False, True, False, True],
+        kind="stable",
+    ).reset_index(drop=True)
+
+    leverage_cols = [
+        "Team",
+        "Player Name",
+        "Position",
+        past5_points_col,
+        "Average Ownership Season",
+        "Average Ownership Last 5 Games",
+        "Total Fantasy Points Season",
+        "Average DK Salary This Season",
+        "Ownership Games Season",
+        "Ownership Games Last 5 Window",
+    ]
+    leverage_cols = [c for c in leverage_cols if c in leverage_df.columns]
+    st.caption(
+        "Players meeting: "
+        f"`{past5_points_col} >= {leverage_min_past5:.1f}` and "
+        f"`Average Ownership Season < {leverage_own_cap:.1f}%`."
+    )
+    st.metric("Matching Players", int(len(leverage_df)))
+    if leverage_df.empty:
+        st.info("No players matched the current thresholds.")
+    else:
+        st.dataframe(leverage_df[leverage_cols], hide_index=True, use_container_width=True)
+        st.download_button(
+            "Download Low-Owned High-Scoring Targets CSV",
+            data=leverage_df[leverage_cols].to_csv(index=False),
+            file_name=f"player_review_low_owned_targets_{start_date.isoformat()}_{end_date.isoformat()}.csv",
+            mime="text/csv",
+            key="download_player_review_low_owned_targets_csv",
+        )
+
 st.subheader("All Players")
 all_players_df = player_review_df.copy()
 all_players_df = all_players_df.sort_values(
