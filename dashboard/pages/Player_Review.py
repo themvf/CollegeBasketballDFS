@@ -38,6 +38,7 @@ PROJECTED_OWNERSHIP_ALIASES = (
     "projected_ownership_v1",
 )
 NULLISH_TEXT_VALUES = {"", "nan", "none", "null"}
+NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 
 
 def _secret(name: str) -> str | None:
@@ -273,6 +274,13 @@ def _norm_text_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
 
 
+def _norm_text_key_loose(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [tok for tok in text.split() if tok and tok not in NAME_SUFFIX_TOKENS]
+    return "".join(tokens)
+
+
 def _first_nonempty(series: pd.Series) -> str:
     for value in series:
         text = str(value or "").strip()
@@ -331,22 +339,40 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["player_name"] = out["player_name"].astype(str).str.strip()
     out["team"] = out["team"].astype(str).str.strip().str.upper()
     out["position"] = out["position"].astype(str).str.strip().str.upper()
-    out["player_name_key"] = out["player_name"].map(_norm_text_key)
+    out["player_name_key"] = out["player_name"].map(_norm_text_key_loose)
+    out["player_name_key"] = out["player_name_key"].where(out["player_name_key"] != "", out["player_name"].map(_norm_text_key))
     out["player_id_key"] = out["player_id"].map(_norm_text_key)
-
-    out["player_key"] = ""
-    has_id_key = out["player_id_key"] != ""
-    out.loc[has_id_key, "player_key"] = "id:" + out.loc[has_id_key, "player_id_key"]
-    missing_key = out["player_key"] == ""
-    has_name_key = out["player_name_key"] != ""
-    use_name_key = missing_key & has_name_key
-    out.loc[use_name_key, "player_key"] = (
-        "name:" + out.loc[use_name_key, "player_name_key"] + "|team:" + out.loc[use_name_key, "team"]
-    )
-    out = out.loc[out["player_key"] != ""].copy()
-    out["review_date"] = pd.to_datetime(out["review_date"], errors="coerce")
     out["team"] = out["team"].replace({"NAN": "", "NONE": "", "NULL": ""})
     out["position"] = out["position"].replace({"NAN": "", "NONE": "", "NULL": ""})
+
+    out["player_key"] = ""
+
+    # Backfill missing team when name maps to a single known team in this frame.
+    known_team = out.loc[(out["player_name_key"] != "") & (out["team"] != ""), ["player_name_key", "team"]].drop_duplicates()
+    if not known_team.empty:
+        team_counts = known_team.groupby("player_name_key", as_index=False)["team"].nunique()
+        single_name_keys = set(team_counts.loc[team_counts["team"] == 1, "player_name_key"].astype(str).tolist())
+        if single_name_keys:
+            team_map = (
+                known_team.loc[known_team["player_name_key"].isin(single_name_keys)]
+                .drop_duplicates("player_name_key")
+                .set_index("player_name_key")["team"]
+                .to_dict()
+            )
+            missing_team = (out["team"] == "") & (out["player_name_key"] != "")
+            out.loc[missing_team, "team"] = out.loc[missing_team, "player_name_key"].map(team_map).fillna("")
+
+    has_name_key = out["player_name_key"] != ""
+    has_team = out["team"] != ""
+    out.loc[has_name_key & has_team, "player_key"] = (
+        "name:" + out.loc[has_name_key & has_team, "player_name_key"] + "|team:" + out.loc[has_name_key & has_team, "team"]
+    )
+    missing_key = out["player_key"] == ""
+    out.loc[missing_key & has_name_key, "player_key"] = "name:" + out.loc[missing_key & has_name_key, "player_name_key"]
+    has_id_key = out["player_id_key"] != ""
+    out.loc[(out["player_key"] == "") & has_id_key, "player_key"] = "id:" + out.loc[(out["player_key"] == "") & has_id_key, "player_id_key"]
+    out = out.loc[out["player_key"] != ""].copy()
+    out["review_date"] = pd.to_datetime(out["review_date"], errors="coerce")
 
     return out[cols].copy()
 
@@ -369,13 +395,24 @@ def _aggregate_player_metric(
     if work.empty:
         return pd.DataFrame(columns=["player_key", season_col, last5_col])
 
-    work["_sort_date"] = pd.to_datetime(work.get("review_date"), errors="coerce")
-    work["_sort_ord"] = pd.to_numeric(work.get("row_order"), errors="coerce").fillna(0.0)
-    work = work.sort_values(
-        ["player_key", "_sort_date", "_sort_ord"],
-        ascending=[True, False, False],
-        kind="stable",
-    )
+    work["review_date"] = pd.to_datetime(work.get("review_date"), errors="coerce")
+    work["_review_day"] = work["review_date"].dt.strftime("%Y-%m-%d")
+    has_day = work["_review_day"].astype(str).str.strip() != ""
+    if bool(has_day.any()):
+        # Collapse duplicate snapshot rows for the same player/day to one per-day value.
+        work = (
+            work.loc[has_day]
+            .groupby(["player_key", "_review_day"], as_index=False)[value_col]
+            .mean(numeric_only=True)
+            .rename(columns={"_review_day": "review_day"})
+        )
+        work["_sort_date"] = pd.to_datetime(work["review_day"], errors="coerce")
+        work["_sort_ord"] = 0.0
+    else:
+        work["_sort_date"] = pd.to_datetime(work.get("review_date"), errors="coerce")
+        work["_sort_ord"] = pd.to_numeric(work.get("row_order"), errors="coerce").fillna(0.0)
+
+    work = work.sort_values(["player_key", "_sort_date", "_sort_ord"], ascending=[True, False, False], kind="stable")
     last5 = work.groupby("player_key", sort=False, as_index=False).head(5).copy()
 
     mode = str(agg_mode or "").strip().lower()
