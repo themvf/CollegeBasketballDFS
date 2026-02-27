@@ -1231,12 +1231,7 @@ st.subheader("Low-Owned High-Scoring Targets")
 if not all(col in player_review_df.columns for col in [past5_points_col, "Average Ownership Season"]):
     st.info("This filter needs both last-5 fantasy points and average ownership columns.")
 else:
-    past5_all = pd.to_numeric(player_review_df[past5_points_col], errors="coerce")
-    valid_past5 = past5_all.dropna()
-    default_min_past5 = float(valid_past5.quantile(0.75)) if not valid_past5.empty else 25.0
-    if not pd.notna(default_min_past5):
-        default_min_past5 = 25.0
-    default_min_past5 = float(max(0.0, round(default_min_past5, 1)))
+    default_min_past5 = 15.0
 
     t1, t2, t3 = st.columns(3)
     leverage_scope = t1.selectbox(
