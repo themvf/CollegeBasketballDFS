@@ -15,6 +15,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     build_player_pool,
     enrich_lineups_minutes_from_pool,
     generate_lineups,
+    lineups_slots_frame,
     lineups_summary_frame,
     normalize_projected_ownership_total,
     normalize_injuries_frame,
@@ -314,6 +315,14 @@ def test_lineup_minutes_summary_columns_present() -> None:
         pd.to_numeric(summary_df["Projected Points"], errors="coerce").iloc[0]
     )
     assert str(summary_df["Lineup Model"].iloc[0]) == "Standard v1"
+
+    slots_df = lineups_slots_frame(lineups)
+    assert "G1 Team" in slots_df.columns
+    assert "G1 Salary" in slots_df.columns
+    assert "G1 Projected Points" in slots_df.columns
+    assert "G1 Ceiling Projection" in slots_df.columns
+    assert "G1 Projected Ownership" in slots_df.columns
+    assert pd.to_numeric(slots_df["G1 Salary"], errors="coerce").iloc[0] > 0
 
 
 def test_enrich_lineups_minutes_from_pool_backfills_legacy_lineups() -> None:

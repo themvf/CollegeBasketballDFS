@@ -107,6 +107,16 @@ def _lineup_model_label_value(lineup: dict[str, Any]) -> str:
     return ""
 
 
+def _player_ceiling_projection_value(player: dict[str, Any]) -> float:
+    explicit = _safe_float(player.get("ceiling_projection"))
+    if explicit is not None and not math.isnan(explicit):
+        return round(float(explicit), 2)
+    projected = _safe_float(player.get("projected_dk_points"))
+    if projected is None or math.isnan(projected):
+        return 0.0
+    return round(float(projected) * 1.18, 2)
+
+
 def _position_base(value: Any) -> str:
     raw = str(value or "").strip().upper()
     if not raw:
@@ -3355,6 +3365,7 @@ def enrich_lineups_minutes_from_pool(
 
 def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
     rows: list[dict[str, Any]] = []
+    slot_labels = ("G1", "G2", "G3", "F1", "F2", "F3", "UTIL1", "UTIL2")
     for lineup in lineups:
         slots = _assign_dk_slots(lineup["players"])
         if slots is None:
@@ -3374,15 +3385,16 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             "Projected Ownership Sum": lineup["projected_ownership_sum"],
             "Expected Minutes Sum": round(float(expected_minutes_sum_value), 2),
             "Avg Minutes (Past 3 Games)": round(float(avg_minutes_last3_value), 2),
-            "G1": slots[0].get("Name + ID") or slots[0].get("Name"),
-            "G2": slots[1].get("Name + ID") or slots[1].get("Name"),
-            "G3": slots[2].get("Name + ID") or slots[2].get("Name"),
-            "F1": slots[3].get("Name + ID") or slots[3].get("Name"),
-            "F2": slots[4].get("Name + ID") or slots[4].get("Name"),
-            "F3": slots[5].get("Name + ID") or slots[5].get("Name"),
-            "UTIL1": slots[6].get("Name + ID") or slots[6].get("Name"),
-            "UTIL2": slots[7].get("Name + ID") or slots[7].get("Name"),
         }
+        for slot_label, player in zip(slot_labels, slots, strict=False):
+            row[slot_label] = player.get("Name + ID") or player.get("Name")
+            row[f"{slot_label} ID"] = str(player.get("ID") or "")
+            row[f"{slot_label} Team"] = str(player.get("TeamAbbrev") or "")
+            row[f"{slot_label} Position"] = str(player.get("Position") or player.get("PositionBase") or "")
+            row[f"{slot_label} Salary"] = _safe_num(player.get("Salary"), 0.0)
+            row[f"{slot_label} Projected Points"] = round(_safe_num(player.get("projected_dk_points"), 0.0), 2)
+            row[f"{slot_label} Ceiling Projection"] = _player_ceiling_projection_value(player)
+            row[f"{slot_label} Projected Ownership"] = round(_safe_num(player.get("projected_ownership"), 0.0), 2)
         lineup_model_label = _lineup_model_label_value(lineup)
         if lineup_model_label:
             row["Lineup Model"] = lineup_model_label
