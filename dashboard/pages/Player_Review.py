@@ -460,18 +460,28 @@ def _aggregate_player_variance(
     history_df: pd.DataFrame,
     *,
     value_col: str,
-    variance_col: str,
+    season_variance_col: str,
+    last5_variance_col: str,
 ) -> pd.DataFrame:
     daily = _build_metric_daily_frame(history_df, value_col=value_col)
     if daily.empty:
-        return pd.DataFrame(columns=["player_key", variance_col])
+        return pd.DataFrame(columns=["player_key", season_variance_col, last5_variance_col])
 
-    out = (
+    last5 = daily.groupby("player_key", sort=False, as_index=False).head(5).copy()
+
+    season = (
         daily.groupby("player_key", as_index=False)[value_col]
         .agg(lambda s: float(pd.to_numeric(s, errors="coerce").var(ddof=0)))
-        .rename(columns={value_col: variance_col})
+        .rename(columns={value_col: season_variance_col})
     )
-    out[variance_col] = pd.to_numeric(out[variance_col], errors="coerce").fillna(0.0)
+    recent = (
+        last5.groupby("player_key", as_index=False)[value_col]
+        .agg(lambda s: float(pd.to_numeric(s, errors="coerce").var(ddof=0)))
+        .rename(columns={value_col: last5_variance_col})
+    )
+    out = season.merge(recent, on="player_key", how="outer")
+    out[season_variance_col] = pd.to_numeric(out[season_variance_col], errors="coerce").fillna(0.0)
+    out[last5_variance_col] = pd.to_numeric(out[last5_variance_col], errors="coerce").fillna(0.0)
     return out
 
 
@@ -542,17 +552,20 @@ def build_player_review_table(
     fantasy_points_variance = _aggregate_player_variance(
         actual_history,
         value_col="actual_dk_points",
-        variance_col="Fantasy Points Variance",
+        season_variance_col="Fantasy Points Variance Season",
+        last5_variance_col="Fantasy Points Variance Last 5 Games",
     )
     minutes_variance = _aggregate_player_variance(
         actual_history,
         value_col="minutes",
-        variance_col="Minutes Variance",
+        season_variance_col="Minutes Variance Season",
+        last5_variance_col="Minutes Variance Last 5 Games",
     )
     ownership_variance = _aggregate_player_variance(
         projection_history,
         value_col="projected_ownership",
-        variance_col="Ownership Variance",
+        season_variance_col="Ownership Variance Season",
+        last5_variance_col="Ownership Variance Last 5 Games",
     )
 
     salary_source = actual_history if actual_history["salary"].notna().any() else projection_history
@@ -566,7 +579,8 @@ def build_player_review_table(
     salary_variance = _aggregate_player_variance(
         salary_source,
         value_col="salary",
-        variance_col="Salary Variance",
+        season_variance_col="Salary Variance Season",
+        last5_variance_col="Salary Variance Last 5 Games",
     )
     if "_unused_points_last5_sum" in points_season_summary.columns:
         points_season_summary = points_season_summary.drop(columns=["_unused_points_last5_sum"])
@@ -595,10 +609,14 @@ def build_player_review_table(
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
-        "Minutes Variance",
-        "Fantasy Points Variance",
-        "Ownership Variance",
-        "Salary Variance",
+        "Minutes Variance Season",
+        "Minutes Variance Last 5 Games",
+        "Fantasy Points Variance Season",
+        "Fantasy Points Variance Last 5 Games",
+        "Ownership Variance Season",
+        "Ownership Variance Last 5 Games",
+        "Salary Variance Season",
+        "Salary Variance Last 5 Games",
     ]:
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
@@ -618,10 +636,14 @@ def build_player_review_table(
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
-        "Minutes Variance",
-        "Fantasy Points Variance",
-        "Ownership Variance",
-        "Salary Variance",
+        "Minutes Variance Season",
+        "Minutes Variance Last 5 Games",
+        "Fantasy Points Variance Season",
+        "Fantasy Points Variance Last 5 Games",
+        "Ownership Variance Season",
+        "Ownership Variance Last 5 Games",
+        "Salary Variance Season",
+        "Salary Variance Last 5 Games",
     ]:
         if col in out.columns:
             out[col] = out[col].round(2)
@@ -783,10 +805,14 @@ all_players_df = all_players_df.sort_values(
     kind="stable",
 )
 all_players_show_cols = show_cols + [
-    "Minutes Variance",
-    "Fantasy Points Variance",
-    "Ownership Variance",
-    "Salary Variance",
+    "Minutes Variance Season",
+    "Minutes Variance Last 5 Games",
+    "Fantasy Points Variance Season",
+    "Fantasy Points Variance Last 5 Games",
+    "Ownership Variance Season",
+    "Ownership Variance Last 5 Games",
+    "Salary Variance Season",
+    "Salary Variance Last 5 Games",
 ]
 all_players_show_cols = [c for c in all_players_show_cols if c in all_players_df.columns]
 st.dataframe(all_players_df[all_players_show_cols], hide_index=True, use_container_width=True)
