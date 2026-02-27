@@ -636,6 +636,37 @@ def _aggregate_player_metric(
     return season.merge(recent, on="player_key", how="outer")
 
 
+def _aggregate_metric_sample_counts(
+    history_df: pd.DataFrame,
+    *,
+    value_col: str,
+    season_count_col: str,
+    last5_count_col: str,
+) -> pd.DataFrame:
+    daily = _build_metric_daily_frame(history_df, value_col=value_col)
+    if daily.empty:
+        return pd.DataFrame(columns=["player_key", season_count_col, last5_count_col])
+    last5 = daily.groupby("player_key", sort=False, as_index=False).head(5).copy()
+    season_counts = (
+        daily.groupby("player_key", as_index=False)[value_col]
+        .count()
+        .rename(columns={value_col: season_count_col})
+    )
+    recent_counts = (
+        last5.groupby("player_key", as_index=False)[value_col]
+        .count()
+        .rename(columns={value_col: last5_count_col})
+    )
+    return season_counts.merge(recent_counts, on="player_key", how="outer")
+
+
+def _variance_or_na(series: pd.Series, min_samples: int = 2) -> float | Any:
+    vals = pd.to_numeric(series, errors="coerce").dropna()
+    if int(len(vals)) < int(max(1, min_samples)):
+        return pd.NA
+    return float(vals.var(ddof=0))
+
+
 def _aggregate_player_variance(
     history_df: pd.DataFrame,
     *,
@@ -651,23 +682,25 @@ def _aggregate_player_variance(
 
     season = (
         daily.groupby("player_key", as_index=False)[value_col]
-        .agg(lambda s: float(pd.to_numeric(s, errors="coerce").var(ddof=0)))
+        .agg(_variance_or_na)
         .rename(columns={value_col: season_variance_col})
     )
     recent = (
         last5.groupby("player_key", as_index=False)[value_col]
-        .agg(lambda s: float(pd.to_numeric(s, errors="coerce").var(ddof=0)))
+        .agg(_variance_or_na)
         .rename(columns={value_col: last5_variance_col})
     )
     out = season.merge(recent, on="player_key", how="outer")
-    out[season_variance_col] = pd.to_numeric(out[season_variance_col], errors="coerce").fillna(0.0)
-    out[last5_variance_col] = pd.to_numeric(out[last5_variance_col], errors="coerce").fillna(0.0)
+    out[season_variance_col] = pd.to_numeric(out[season_variance_col], errors="coerce")
+    out[last5_variance_col] = pd.to_numeric(out[last5_variance_col], errors="coerce")
     return out
 
 
 def build_player_review_table(
     actual_player_history_df: pd.DataFrame,
     player_totals_df: pd.DataFrame,
+    *,
+    dfs_only: bool = True,
 ) -> tuple[pd.DataFrame, list[str], dict[str, bool]]:
     actual_history = _build_player_history_frame(actual_player_history_df)
     projection_history = _build_player_history_frame(player_totals_df)
@@ -681,6 +714,22 @@ def build_player_review_table(
         projection_history_by_name = projection_history_by_name.loc[
             projection_history_by_name["player_key"].astype(str).str.strip() != ""
         ].copy()
+    projection_key_set = set(
+        projection_history["player_key"].astype(str).str.strip().loc[
+            projection_history["player_key"].astype(str).str.strip() != ""
+        ].tolist()
+    )
+    projection_name_set = set(
+        _name_key_series(
+            projection_history["player_name"]
+            if "player_name" in projection_history.columns
+            else pd.Series(dtype=str)
+        )
+        .astype(str)
+        .str.strip()
+        .loc[lambda s: s != ""]
+        .tolist()
+    )
 
     identity_frames: list[pd.DataFrame] = []
     for frame in [actual_history, projection_history]:
@@ -693,6 +742,18 @@ def build_player_review_table(
         return pd.DataFrame(), [], meta
 
     identity = pd.concat(identity_frames, ignore_index=True)
+    if dfs_only and (projection_key_set or projection_name_set):
+        identity["_name_key"] = _name_key_series(
+            identity["player_name"] if "player_name" in identity.columns else pd.Series("", index=identity.index)
+        )
+        keep_mask = identity["player_key"].astype(str).isin(projection_key_set) | identity["_name_key"].astype(str).isin(
+            projection_name_set
+        )
+        identity = identity.loc[keep_mask].copy()
+        identity = identity.drop(columns=["_name_key"], errors="ignore")
+    if identity.empty:
+        meta = {"has_points": False, "has_ownership": False, "has_salary": False}
+        return pd.DataFrame(), [], meta
     identity["review_date"] = pd.to_datetime(identity.get("review_date"), errors="coerce")
     identity["_sort_date"] = identity["review_date"]
     identity["_sort_ord"] = pd.to_numeric(identity.get("row_order"), errors="coerce").fillna(0.0)
@@ -746,6 +807,18 @@ def build_player_review_table(
         last5_col="Average Ownership Last 5 Games",
         agg_mode="mean",
     )
+    ownership_counts = _aggregate_metric_sample_counts(
+        projection_history,
+        value_col="projected_ownership",
+        season_count_col="Ownership Games Season",
+        last5_count_col="Ownership Games Last 5 Window",
+    )
+    ownership_counts_by_name = _aggregate_metric_sample_counts(
+        projection_history_by_name,
+        value_col="projected_ownership",
+        season_count_col="Ownership Games Season",
+        last5_count_col="Ownership Games Last 5 Window",
+    )
     fantasy_points_variance = _aggregate_player_variance(
         actual_history,
         value_col="actual_dk_points",
@@ -798,6 +871,7 @@ def build_player_review_table(
     out = out.merge(points_avg_summary, on="player_key", how="left")
     out = out.merge(points_median_summary, on="player_key", how="left")
     out = out.merge(ownership_summary, on="player_key", how="left")
+    out = out.merge(ownership_counts, on="player_key", how="left")
     out = out.merge(salary_summary, on="player_key", how="left")
     out = out.merge(minutes_variance, on="player_key", how="left")
     out = out.merge(fantasy_points_variance, on="player_key", how="left")
@@ -844,6 +918,24 @@ def build_player_review_table(
             var_last5_fill = pd.to_numeric(out.get("_name_own_var_last5"), errors="coerce")
             out["Ownership Variance Last 5 Games"] = var_last5_base.where(var_last5_base.notna(), var_last5_fill)
 
+    if not ownership_counts_by_name.empty:
+        own_count_name = ownership_counts_by_name.rename(
+            columns={
+                "player_key": "_name_key",
+                "Ownership Games Season": "_name_own_games_season",
+                "Ownership Games Last 5 Window": "_name_own_games_last5",
+            }
+        )
+        out = out.merge(own_count_name, on="_name_key", how="left")
+        if "Ownership Games Season" in out.columns:
+            season_cnt_base = pd.to_numeric(out["Ownership Games Season"], errors="coerce")
+            season_cnt_fill = pd.to_numeric(out.get("_name_own_games_season"), errors="coerce")
+            out["Ownership Games Season"] = season_cnt_base.where(season_cnt_base.notna(), season_cnt_fill)
+        if "Ownership Games Last 5 Window" in out.columns:
+            last5_cnt_base = pd.to_numeric(out["Ownership Games Last 5 Window"], errors="coerce")
+            last5_cnt_fill = pd.to_numeric(out.get("_name_own_games_last5"), errors="coerce")
+            out["Ownership Games Last 5 Window"] = last5_cnt_base.where(last5_cnt_base.notna(), last5_cnt_fill)
+
     for col in [
         "Total Fantasy Points Season",
         "Average Fantasy Points Per Game Last 5",
@@ -857,6 +949,8 @@ def build_player_review_table(
         "Fantasy Points Variance Last 5 Games",
         "Ownership Variance Season",
         "Ownership Variance Last 5 Games",
+        "Ownership Games Season",
+        "Ownership Games Last 5 Window",
         "Salary Variance Season",
         "Salary Variance Last 5 Games",
     ]:
@@ -893,6 +987,9 @@ def build_player_review_table(
     out["Player Name"] = out["Player Name"].astype(str).str.strip()
     out["Team"] = out["Team"].astype(str).str.strip().str.upper()
     out["Position"] = out["Position"].astype(str).str.strip().str.upper()
+    for cnt_col in ["Ownership Games Season", "Ownership Games Last 5 Window"]:
+        if cnt_col in out.columns:
+            out[cnt_col] = pd.to_numeric(out[cnt_col], errors="coerce").round(0).astype("Int64")
     out = out.drop(
         columns=[
             "_name_key",
@@ -900,6 +997,8 @@ def build_player_review_table(
             "_name_avg_own_last5",
             "_name_own_var_season",
             "_name_own_var_last5",
+            "_name_own_games_season",
+            "_name_own_games_last5",
         ],
         errors="ignore",
     )
@@ -938,6 +1037,13 @@ with st.sidebar:
     end_date = st.date_input("End Date", value=default_end, key="player_review_end_date")
     bucket_name = st.text_input("GCS Bucket", value=default_bucket, key="player_review_bucket")
     gcp_project = st.text_input("GCP Project (optional)", value=default_project, key="player_review_project")
+    player_universe_mode = st.selectbox(
+        "Player Universe",
+        options=["DFS-Relevant Only", "All Tracked Players"],
+        index=0,
+        key="player_review_universe_mode",
+        help="DFS-Relevant Only keeps players that appear in projections/ownership/DK slate sources.",
+    )
     st.caption("This page refreshes automatically when settings change.")
     if st.button("Clear Cached Results", key="clear_player_review_cache"):
         st.cache_data.clear()
@@ -1031,6 +1137,7 @@ if dates_scanned > 0 and actual_days_found < dates_scanned:
 player_review_df, player_review_teams, player_review_meta = build_player_review_table(
     actual_player_history_df=actual_history_df,
     player_totals_df=player_totals_df,
+    dfs_only=str(player_universe_mode).strip().lower().startswith("dfs"),
 )
 
 if player_review_df.empty or not player_review_teams:
@@ -1039,6 +1146,43 @@ if player_review_df.empty or not player_review_teams:
         "This page needs projection snapshots and at least one valid player mapping."
     )
     st.stop()
+
+universe_label = "DFS-Relevant Only" if str(player_universe_mode).strip().lower().startswith("dfs") else "All Tracked Players"
+st.caption(f"Universe: {universe_label}")
+coverage_cols = [c for c in ["Average Ownership Season", "Average DK Salary This Season"] if c in player_review_df.columns]
+if coverage_cols:
+    total_players = int(len(player_review_df))
+    own_count = (
+        int(pd.to_numeric(player_review_df.get("Average Ownership Season"), errors="coerce").notna().sum())
+        if "Average Ownership Season" in coverage_cols
+        else 0
+    )
+    sal_count = (
+        int(pd.to_numeric(player_review_df.get("Average DK Salary This Season"), errors="coerce").notna().sum())
+        if "Average DK Salary This Season" in coverage_cols
+        else 0
+    )
+    c1, c2, c3 = st.columns(3)
+    c1.metric("Players in Table", total_players)
+    c2.metric("Ownership Coverage", f"{(100.0 * own_count / float(max(1, total_players))):.1f}%")
+    c3.metric("Salary Coverage", f"{(100.0 * sal_count / float(max(1, total_players))):.1f}%")
+
+if all(col in player_review_df.columns for col in ["Average Ownership Season", "Average Ownership Last 5 Games"]):
+    own_season = pd.to_numeric(player_review_df["Average Ownership Season"], errors="coerce")
+    own_last5 = pd.to_numeric(player_review_df["Average Ownership Last 5 Games"], errors="coerce")
+    own_valid = own_season.notna() & own_last5.notna()
+    same_mask = own_valid & ((own_season - own_last5).abs() <= 1e-9)
+    low_sample_count = 0
+    if "Ownership Games Season" in player_review_df.columns:
+        low_sample_count = int(
+            (pd.to_numeric(player_review_df["Ownership Games Season"], errors="coerce").fillna(0) <= 5).sum()
+        )
+    if int(own_valid.sum()) > 0:
+        st.caption(
+            "Ownership sanity check: "
+            f"{int(same_mask.sum())}/{int(own_valid.sum())} players have identical season vs last-5 ownership averages; "
+            f"{low_sample_count} player rows have <=5 ownership game-days."
+        )
 
 selected_team = st.selectbox("Team", options=player_review_teams, index=0, key="player_review_team_select")
 past5_points_mode = st.selectbox(
@@ -1091,6 +1235,8 @@ all_players_df = all_players_df.sort_values(
     kind="stable",
 )
 all_players_show_cols = show_cols + [
+    "Ownership Games Season",
+    "Ownership Games Last 5 Window",
     "Minutes Variance Season",
     "Minutes Variance Last 5 Games",
     "Fantasy Points Variance Season",

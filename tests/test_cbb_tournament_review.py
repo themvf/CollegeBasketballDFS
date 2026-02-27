@@ -8,6 +8,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
     detect_contest_standings_upload,
+    extract_actual_ownership_from_standings,
     normalize_contest_standings_frame,
     parse_lineup_players,
     score_generated_lineups_against_actuals,
@@ -133,6 +134,32 @@ def test_normalize_contest_standings_imputes_rank_from_points() -> None:
     assert float(by_entry.loc["a", "Rank"]) == 2.0
     assert float(by_entry.loc["a", "rank_from_file"]) == 99.0
     assert float(by_entry.loc["a", "rank_from_points"]) == 2.0
+
+
+def test_normalize_contest_standings_maps_player_name_and_percent_drafted_columns() -> None:
+    raw = pd.DataFrame(
+        [
+            {
+                "rank": 1,
+                "entryid": "x1",
+                "entryname": "user1",
+                "points": 150.0,
+                "lineup": "F Alpha One",
+                "Player Name": "Alpha One",
+                "% Drafted": "12.5%",
+            },
+        ]
+    )
+    out = normalize_contest_standings_frame(raw)
+    assert "Player" in out.columns
+    assert "%Drafted" in out.columns
+    assert str(out.iloc[0]["Player"]) == "Alpha One"
+    assert round(float(out.iloc[0]["%Drafted"]), 2) == 12.5
+
+    own = extract_actual_ownership_from_standings(out)
+    assert len(own) == 1
+    assert str(own.iloc[0]["player_name"]) == "Alpha One"
+    assert round(float(own.iloc[0]["actual_ownership"]), 2) == 12.5
 
 
 def test_build_field_entries_and_players_builds_salary_left() -> None:
