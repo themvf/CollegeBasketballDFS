@@ -39,8 +39,12 @@ PROJECTED_OWNERSHIP_ALIASES = (
     "own_pct",
     "own%",
     "ownership",
+    "projected_ownership_v1",
+)
+ACTUAL_OWNERSHIP_ALIASES = (
     "actual_ownership",
     "actual ownership",
+    "actualownership",
     "field_ownership",
     "field ownership",
     "field_ownership_pct",
@@ -48,7 +52,12 @@ PROJECTED_OWNERSHIP_ALIASES = (
     "pct_drafted",
     "pct drafted",
     "drafted",
-    "projected_ownership_v1",
+)
+OWNERSHIP_SOURCE_ALIASES = (
+    "source_kind",
+    "source",
+    "ownership_source",
+    "dataset_source",
 )
 PROJECTED_POINTS_ALIASES = (
     "projected_dk_points",
@@ -188,6 +197,7 @@ def load_projection_player_totals_dataset(
                 projection_rows += int(len(projection_df))
                 projection_df = projection_df.copy()
                 projection_df["review_date"] = d.isoformat()
+                projection_df["source_kind"] = "projection_snapshot"
                 day_frames.append(projection_df)
 
         try:
@@ -217,6 +227,7 @@ def load_projection_player_totals_dataset(
                 ownership_rows_from_standings += int(len(ownership_df))
             ownership_df = ownership_df.copy()
             ownership_df["review_date"] = d.isoformat()
+            ownership_df["source_kind"] = ownership_source or "ownership_snapshot"
             day_frames.append(ownership_df)
 
         try:
@@ -233,6 +244,7 @@ def load_projection_player_totals_dataset(
                 dk_slate_rows += int(len(dk_slate_df))
                 dk_slate_df = dk_slate_df.copy()
                 dk_slate_df["review_date"] = d.isoformat()
+                dk_slate_df["source_kind"] = "dk_slate"
                 day_frames.append(dk_slate_df)
 
         frames.extend(day_frames)
@@ -479,6 +491,8 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
         "actual_dk_points",
         "projected_dk_points",
         "projected_ownership",
+        "actual_ownership",
+        "source_kind",
         "salary",
     ]
     if df is None or df.empty:
@@ -508,7 +522,9 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     )
     points_col = _resolve_column_alias(work, ("actual_dk_points", "actual dk points", "final_dk_points", "dk_points"))
     projected_points_col = _resolve_column_alias(work, PROJECTED_POINTS_ALIASES)
-    ownership_col = _resolve_column_alias(work, PROJECTED_OWNERSHIP_ALIASES)
+    projected_ownership_col = _resolve_column_alias(work, PROJECTED_OWNERSHIP_ALIASES)
+    actual_ownership_col = _resolve_column_alias(work, ACTUAL_OWNERSHIP_ALIASES)
+    source_kind_col = _resolve_column_alias(work, OWNERSHIP_SOURCE_ALIASES)
 
     out = pd.DataFrame(index=work.index)
     out["player_id"] = work[id_col] if id_col else ""
@@ -526,7 +542,11 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["projected_dk_points"] = (
         pd.to_numeric(work[projected_points_col], errors="coerce") if projected_points_col else pd.NA
     )
-    out["projected_ownership"] = _coerce_ownership_series(work[ownership_col]) if ownership_col else pd.NA
+    out["projected_ownership"] = (
+        _coerce_ownership_series(work[projected_ownership_col]) if projected_ownership_col else pd.NA
+    )
+    out["actual_ownership"] = _coerce_ownership_series(work[actual_ownership_col]) if actual_ownership_col else pd.NA
+    out["source_kind"] = work[source_kind_col] if source_kind_col else ""
     out["row_order"] = pd.RangeIndex(start=0, stop=len(out), step=1)
 
     out["player_id"] = out["player_id"].where(~out["player_id"].str.lower().isin(NULLISH_TEXT_VALUES), "")
@@ -539,6 +559,7 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["player_id_key"] = out["player_id"].map(_norm_text_key)
     out["team"] = out["team"].replace({"NAN": "", "NONE": "", "NULL": ""})
     out["position"] = out["position"].replace({"NAN": "", "NONE": "", "NULL": ""})
+    out["source_kind"] = out["source_kind"].astype(str).str.strip().str.lower()
 
     out["player_key"] = ""
 
@@ -576,6 +597,14 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out.loc[missing_key & has_name_key, "player_key"] = "name:" + out.loc[missing_key & has_name_key, "player_name_key"]
     out = out.loc[out["player_key"] != ""].copy()
     out["review_date"] = pd.to_datetime(out["review_date"], errors="coerce")
+
+    source_is_contest = out["source_kind"].astype(str).str.contains("contest", regex=False)
+    if bool(source_is_contest.any()):
+        contest_missing_actual = source_is_contest & out["actual_ownership"].isna() & out["projected_ownership"].notna()
+        out.loc[contest_missing_actual, "actual_ownership"] = out.loc[contest_missing_actual, "projected_ownership"]
+    source_not_contest = ~source_is_contest
+    non_contest_missing_proj = source_not_contest & out["projected_ownership"].isna() & out["actual_ownership"].notna()
+    out.loc[non_contest_missing_proj, "projected_ownership"] = out.loc[non_contest_missing_proj, "actual_ownership"]
 
     return out[cols].copy()
 
@@ -834,31 +863,57 @@ def build_player_review_table(
         last5_col="Average Projected Fantasy Points Last 5",
         agg_mode="mean",
     )
-    ownership_summary = _aggregate_player_metric(
+    projected_ownership_summary = _aggregate_player_metric(
         projection_history,
         value_col="projected_ownership",
-        season_col="Average Ownership Season",
-        last5_col="Average Ownership Last 5 Games",
+        season_col="Average Projected Ownership Season",
+        last5_col="Average Projected Ownership Last 5 Games",
         agg_mode="mean",
     )
-    ownership_summary_by_name = _aggregate_player_metric(
+    projected_ownership_summary_by_name = _aggregate_player_metric(
         projection_history_by_name,
         value_col="projected_ownership",
-        season_col="Average Ownership Season",
-        last5_col="Average Ownership Last 5 Games",
+        season_col="Average Projected Ownership Season",
+        last5_col="Average Projected Ownership Last 5 Games",
         agg_mode="mean",
     )
-    ownership_counts = _aggregate_metric_sample_counts(
+    projected_ownership_counts = _aggregate_metric_sample_counts(
         projection_history,
         value_col="projected_ownership",
-        season_count_col="Ownership Games Season",
-        last5_count_col="Ownership Games Last 5 Window",
+        season_count_col="Projected Ownership Games Season",
+        last5_count_col="Projected Ownership Games Last 5 Window",
     )
-    ownership_counts_by_name = _aggregate_metric_sample_counts(
+    projected_ownership_counts_by_name = _aggregate_metric_sample_counts(
         projection_history_by_name,
         value_col="projected_ownership",
-        season_count_col="Ownership Games Season",
-        last5_count_col="Ownership Games Last 5 Window",
+        season_count_col="Projected Ownership Games Season",
+        last5_count_col="Projected Ownership Games Last 5 Window",
+    )
+    actual_ownership_summary = _aggregate_player_metric(
+        projection_history,
+        value_col="actual_ownership",
+        season_col="Average Actual Ownership Season",
+        last5_col="Average Actual Ownership Last 5 Games",
+        agg_mode="mean",
+    )
+    actual_ownership_summary_by_name = _aggregate_player_metric(
+        projection_history_by_name,
+        value_col="actual_ownership",
+        season_col="Average Actual Ownership Season",
+        last5_col="Average Actual Ownership Last 5 Games",
+        agg_mode="mean",
+    )
+    actual_ownership_counts = _aggregate_metric_sample_counts(
+        projection_history,
+        value_col="actual_ownership",
+        season_count_col="Actual Ownership Games Season",
+        last5_count_col="Actual Ownership Games Last 5 Window",
+    )
+    actual_ownership_counts_by_name = _aggregate_metric_sample_counts(
+        projection_history_by_name,
+        value_col="actual_ownership",
+        season_count_col="Actual Ownership Games Season",
+        last5_count_col="Actual Ownership Games Last 5 Window",
     )
     fantasy_points_variance = _aggregate_player_variance(
         actual_history,
@@ -912,8 +967,10 @@ def build_player_review_table(
     out = out.merge(points_avg_summary, on="player_key", how="left")
     out = out.merge(points_median_summary, on="player_key", how="left")
     out = out.merge(projected_points_summary, on="player_key", how="left")
-    out = out.merge(ownership_summary, on="player_key", how="left")
-    out = out.merge(ownership_counts, on="player_key", how="left")
+    out = out.merge(projected_ownership_summary, on="player_key", how="left")
+    out = out.merge(actual_ownership_summary, on="player_key", how="left")
+    out = out.merge(projected_ownership_counts, on="player_key", how="left")
+    out = out.merge(actual_ownership_counts, on="player_key", how="left")
     out = out.merge(salary_summary, on="player_key", how="left")
     out = out.merge(minutes_variance, on="player_key", how="left")
     out = out.merge(fantasy_points_variance, on="player_key", how="left")
@@ -944,23 +1001,49 @@ def build_player_review_table(
             proj_last5_fill = pd.to_numeric(out.get("_name_avg_proj_pts_last5"), errors="coerce")
             out["Average Projected Fantasy Points Last 5"] = proj_last5_base.where(proj_last5_base.notna(), proj_last5_fill)
 
-    if not ownership_summary_by_name.empty:
-        own_name = ownership_summary_by_name.rename(
+    if not projected_ownership_summary_by_name.empty:
+        proj_own_name = projected_ownership_summary_by_name.rename(
             columns={
                 "player_key": "_name_key",
-                "Average Ownership Season": "_name_avg_own_season",
-                "Average Ownership Last 5 Games": "_name_avg_own_last5",
+                "Average Projected Ownership Season": "_name_avg_proj_own_season",
+                "Average Projected Ownership Last 5 Games": "_name_avg_proj_own_last5",
             }
         )
-        out = out.merge(own_name, on="_name_key", how="left")
-        if "Average Ownership Season" in out.columns:
-            season_base = pd.to_numeric(out["Average Ownership Season"], errors="coerce")
-            season_fill = pd.to_numeric(out.get("_name_avg_own_season"), errors="coerce")
-            out["Average Ownership Season"] = season_base.where(season_base.notna(), season_fill)
-        if "Average Ownership Last 5 Games" in out.columns:
-            last5_base = pd.to_numeric(out["Average Ownership Last 5 Games"], errors="coerce")
-            last5_fill = pd.to_numeric(out.get("_name_avg_own_last5"), errors="coerce")
-            out["Average Ownership Last 5 Games"] = last5_base.where(last5_base.notna(), last5_fill)
+        out = out.merge(proj_own_name, on="_name_key", how="left")
+        if "Average Projected Ownership Season" in out.columns:
+            proj_own_season_base = pd.to_numeric(out["Average Projected Ownership Season"], errors="coerce")
+            proj_own_season_fill = pd.to_numeric(out.get("_name_avg_proj_own_season"), errors="coerce")
+            out["Average Projected Ownership Season"] = proj_own_season_base.where(
+                proj_own_season_base.notna(), proj_own_season_fill
+            )
+        if "Average Projected Ownership Last 5 Games" in out.columns:
+            proj_own_last5_base = pd.to_numeric(out["Average Projected Ownership Last 5 Games"], errors="coerce")
+            proj_own_last5_fill = pd.to_numeric(out.get("_name_avg_proj_own_last5"), errors="coerce")
+            out["Average Projected Ownership Last 5 Games"] = proj_own_last5_base.where(
+                proj_own_last5_base.notna(), proj_own_last5_fill
+            )
+
+    if not actual_ownership_summary_by_name.empty:
+        actual_own_name = actual_ownership_summary_by_name.rename(
+            columns={
+                "player_key": "_name_key",
+                "Average Actual Ownership Season": "_name_avg_actual_own_season",
+                "Average Actual Ownership Last 5 Games": "_name_avg_actual_own_last5",
+            }
+        )
+        out = out.merge(actual_own_name, on="_name_key", how="left")
+        if "Average Actual Ownership Season" in out.columns:
+            actual_own_season_base = pd.to_numeric(out["Average Actual Ownership Season"], errors="coerce")
+            actual_own_season_fill = pd.to_numeric(out.get("_name_avg_actual_own_season"), errors="coerce")
+            out["Average Actual Ownership Season"] = actual_own_season_base.where(
+                actual_own_season_base.notna(), actual_own_season_fill
+            )
+        if "Average Actual Ownership Last 5 Games" in out.columns:
+            actual_own_last5_base = pd.to_numeric(out["Average Actual Ownership Last 5 Games"], errors="coerce")
+            actual_own_last5_fill = pd.to_numeric(out.get("_name_avg_actual_own_last5"), errors="coerce")
+            out["Average Actual Ownership Last 5 Games"] = actual_own_last5_base.where(
+                actual_own_last5_base.notna(), actual_own_last5_fill
+            )
 
     if not ownership_variance_by_name.empty:
         own_var_name = ownership_variance_by_name.rename(
@@ -980,23 +1063,66 @@ def build_player_review_table(
             var_last5_fill = pd.to_numeric(out.get("_name_own_var_last5"), errors="coerce")
             out["Ownership Variance Last 5 Games"] = var_last5_base.where(var_last5_base.notna(), var_last5_fill)
 
-    if not ownership_counts_by_name.empty:
-        own_count_name = ownership_counts_by_name.rename(
+    if not projected_ownership_counts_by_name.empty:
+        proj_own_count_name = projected_ownership_counts_by_name.rename(
             columns={
                 "player_key": "_name_key",
-                "Ownership Games Season": "_name_own_games_season",
-                "Ownership Games Last 5 Window": "_name_own_games_last5",
+                "Projected Ownership Games Season": "_name_proj_own_games_season",
+                "Projected Ownership Games Last 5 Window": "_name_proj_own_games_last5",
             }
         )
-        out = out.merge(own_count_name, on="_name_key", how="left")
-        if "Ownership Games Season" in out.columns:
-            season_cnt_base = pd.to_numeric(out["Ownership Games Season"], errors="coerce")
-            season_cnt_fill = pd.to_numeric(out.get("_name_own_games_season"), errors="coerce")
-            out["Ownership Games Season"] = season_cnt_base.where(season_cnt_base.notna(), season_cnt_fill)
-        if "Ownership Games Last 5 Window" in out.columns:
-            last5_cnt_base = pd.to_numeric(out["Ownership Games Last 5 Window"], errors="coerce")
-            last5_cnt_fill = pd.to_numeric(out.get("_name_own_games_last5"), errors="coerce")
-            out["Ownership Games Last 5 Window"] = last5_cnt_base.where(last5_cnt_base.notna(), last5_cnt_fill)
+        out = out.merge(proj_own_count_name, on="_name_key", how="left")
+        if "Projected Ownership Games Season" in out.columns:
+            proj_season_cnt_base = pd.to_numeric(out["Projected Ownership Games Season"], errors="coerce")
+            proj_season_cnt_fill = pd.to_numeric(out.get("_name_proj_own_games_season"), errors="coerce")
+            out["Projected Ownership Games Season"] = proj_season_cnt_base.where(
+                proj_season_cnt_base.notna(), proj_season_cnt_fill
+            )
+        if "Projected Ownership Games Last 5 Window" in out.columns:
+            proj_last5_cnt_base = pd.to_numeric(out["Projected Ownership Games Last 5 Window"], errors="coerce")
+            proj_last5_cnt_fill = pd.to_numeric(out.get("_name_proj_own_games_last5"), errors="coerce")
+            out["Projected Ownership Games Last 5 Window"] = proj_last5_cnt_base.where(
+                proj_last5_cnt_base.notna(), proj_last5_cnt_fill
+            )
+
+    if not actual_ownership_counts_by_name.empty:
+        actual_own_count_name = actual_ownership_counts_by_name.rename(
+            columns={
+                "player_key": "_name_key",
+                "Actual Ownership Games Season": "_name_actual_own_games_season",
+                "Actual Ownership Games Last 5 Window": "_name_actual_own_games_last5",
+            }
+        )
+        out = out.merge(actual_own_count_name, on="_name_key", how="left")
+        if "Actual Ownership Games Season" in out.columns:
+            actual_season_cnt_base = pd.to_numeric(out["Actual Ownership Games Season"], errors="coerce")
+            actual_season_cnt_fill = pd.to_numeric(out.get("_name_actual_own_games_season"), errors="coerce")
+            out["Actual Ownership Games Season"] = actual_season_cnt_base.where(
+                actual_season_cnt_base.notna(), actual_season_cnt_fill
+            )
+        if "Actual Ownership Games Last 5 Window" in out.columns:
+            actual_last5_cnt_base = pd.to_numeric(out["Actual Ownership Games Last 5 Window"], errors="coerce")
+            actual_last5_cnt_fill = pd.to_numeric(out.get("_name_actual_own_games_last5"), errors="coerce")
+            out["Actual Ownership Games Last 5 Window"] = actual_last5_cnt_base.where(
+                actual_last5_cnt_base.notna(), actual_last5_cnt_fill
+            )
+
+    proj_own_season = pd.to_numeric(out.get("Average Projected Ownership Season"), errors="coerce")
+    actual_own_season = pd.to_numeric(out.get("Average Actual Ownership Season"), errors="coerce")
+    out["Average Ownership Season"] = proj_own_season.where(proj_own_season.notna(), actual_own_season)
+    proj_own_last5 = pd.to_numeric(out.get("Average Projected Ownership Last 5 Games"), errors="coerce")
+    actual_own_last5 = pd.to_numeric(out.get("Average Actual Ownership Last 5 Games"), errors="coerce")
+    out["Average Ownership Last 5 Games"] = proj_own_last5.where(proj_own_last5.notna(), actual_own_last5)
+    proj_own_games_season = pd.to_numeric(out.get("Projected Ownership Games Season"), errors="coerce")
+    actual_own_games_season = pd.to_numeric(out.get("Actual Ownership Games Season"), errors="coerce")
+    out["Ownership Games Season"] = proj_own_games_season.where(
+        proj_own_games_season.notna(), actual_own_games_season
+    )
+    proj_own_games_last5 = pd.to_numeric(out.get("Projected Ownership Games Last 5 Window"), errors="coerce")
+    actual_own_games_last5 = pd.to_numeric(out.get("Actual Ownership Games Last 5 Window"), errors="coerce")
+    out["Ownership Games Last 5 Window"] = proj_own_games_last5.where(
+        proj_own_games_last5.notna(), actual_own_games_last5
+    )
 
     for col in [
         "Total Fantasy Points Season",
@@ -1004,6 +1130,10 @@ def build_player_review_table(
         "Median Fantasy Points Per Game Last 5",
         "Average Projected Fantasy Points Season",
         "Average Projected Fantasy Points Last 5",
+        "Average Projected Ownership Season",
+        "Average Projected Ownership Last 5 Games",
+        "Average Actual Ownership Season",
+        "Average Actual Ownership Last 5 Games",
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
@@ -1013,6 +1143,10 @@ def build_player_review_table(
         "Fantasy Points Variance Last 5 Games",
         "Ownership Variance Season",
         "Ownership Variance Last 5 Games",
+        "Projected Ownership Games Season",
+        "Projected Ownership Games Last 5 Window",
+        "Actual Ownership Games Season",
+        "Actual Ownership Games Last 5 Window",
         "Ownership Games Season",
         "Ownership Games Last 5 Window",
         "Salary Variance Season",
@@ -1035,6 +1169,10 @@ def build_player_review_table(
         "Median Fantasy Points Per Game Last 5",
         "Average Projected Fantasy Points Season",
         "Average Projected Fantasy Points Last 5",
+        "Average Projected Ownership Season",
+        "Average Projected Ownership Last 5 Games",
+        "Average Actual Ownership Season",
+        "Average Actual Ownership Last 5 Games",
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
@@ -1053,7 +1191,14 @@ def build_player_review_table(
     out["Player Name"] = out["Player Name"].astype(str).str.strip()
     out["Team"] = out["Team"].astype(str).str.strip().str.upper()
     out["Position"] = out["Position"].astype(str).str.strip().str.upper()
-    for cnt_col in ["Ownership Games Season", "Ownership Games Last 5 Window"]:
+    for cnt_col in [
+        "Projected Ownership Games Season",
+        "Projected Ownership Games Last 5 Window",
+        "Actual Ownership Games Season",
+        "Actual Ownership Games Last 5 Window",
+        "Ownership Games Season",
+        "Ownership Games Last 5 Window",
+    ]:
         if cnt_col in out.columns:
             out[cnt_col] = pd.to_numeric(out[cnt_col], errors="coerce").round(0).astype("Int64")
     out = out.drop(
@@ -1061,12 +1206,16 @@ def build_player_review_table(
             "_name_key",
             "_name_avg_proj_pts_season",
             "_name_avg_proj_pts_last5",
-            "_name_avg_own_season",
-            "_name_avg_own_last5",
+            "_name_avg_proj_own_season",
+            "_name_avg_proj_own_last5",
+            "_name_avg_actual_own_season",
+            "_name_avg_actual_own_last5",
             "_name_own_var_season",
             "_name_own_var_last5",
-            "_name_own_games_season",
-            "_name_own_games_last5",
+            "_name_proj_own_games_season",
+            "_name_proj_own_games_last5",
+            "_name_actual_own_games_season",
+            "_name_actual_own_games_last5",
         ],
         errors="ignore",
     )
@@ -1082,8 +1231,21 @@ def build_player_review_table(
         "has_points": bool(points_season_summary["Total Fantasy Points Season"].notna().any())
         if not points_season_summary.empty
         else False,
-        "has_ownership": bool(pd.to_numeric(out.get("Average Ownership Season"), errors="coerce").notna().any())
-        if not out.empty and "Average Ownership Season" in out.columns
+        "has_projected_ownership": bool(
+            pd.to_numeric(out.get("Average Projected Ownership Season"), errors="coerce").notna().any()
+        )
+        if not out.empty and "Average Projected Ownership Season" in out.columns
+        else False,
+        "has_actual_ownership": bool(
+            pd.to_numeric(out.get("Average Actual Ownership Season"), errors="coerce").notna().any()
+        )
+        if not out.empty and "Average Actual Ownership Season" in out.columns
+        else False,
+        "has_ownership": bool(
+            pd.to_numeric(out.get("Average Ownership Season"), errors="coerce").notna().any()
+            or pd.to_numeric(out.get("Average Projected Ownership Season"), errors="coerce").notna().any()
+        )
+        if not out.empty
         else False,
         "has_salary": bool(salary_summary["Average DK Salary This Season"].notna().any()) if not salary_summary.empty else False,
         "has_projected_points": bool(
@@ -1261,9 +1423,19 @@ if coverage_cols:
     for metric_col, (label, value) in zip(coverage_metric_cols, coverage_metrics):
         metric_col.metric(label, value)
 
-if all(col in player_review_df.columns for col in ["Average Ownership Season", "Average Ownership Last 5 Games"]):
-    own_season = pd.to_numeric(player_review_df["Average Ownership Season"], errors="coerce")
-    own_last5 = pd.to_numeric(player_review_df["Average Ownership Last 5 Games"], errors="coerce")
+ownership_sanity_season_col = (
+    "Average Projected Ownership Season"
+    if "Average Projected Ownership Season" in player_review_df.columns
+    else "Average Ownership Season"
+)
+ownership_sanity_last5_col = (
+    "Average Projected Ownership Last 5 Games"
+    if "Average Projected Ownership Last 5 Games" in player_review_df.columns
+    else "Average Ownership Last 5 Games"
+)
+if all(col in player_review_df.columns for col in [ownership_sanity_season_col, ownership_sanity_last5_col]):
+    own_season = pd.to_numeric(player_review_df[ownership_sanity_season_col], errors="coerce")
+    own_last5 = pd.to_numeric(player_review_df[ownership_sanity_last5_col], errors="coerce")
     own_valid = own_season.notna() & own_last5.notna()
     same_mask = own_valid & ((own_season - own_last5).abs() <= 1e-9)
     low_sample_count = 0
@@ -1274,7 +1446,8 @@ if all(col in player_review_df.columns for col in ["Average Ownership Season", "
     if int(own_valid.sum()) > 0:
         st.caption(
             "Ownership sanity check: "
-            f"{int(same_mask.sum())}/{int(own_valid.sum())} players have identical season vs last-5 ownership averages; "
+            f"{int(same_mask.sum())}/{int(own_valid.sum())} players have identical season vs last-5 ownership averages "
+            f"({ownership_sanity_season_col} vs {ownership_sanity_last5_col}); "
             f"{low_sample_count} player rows have <=5 ownership game-days."
         )
 
@@ -1329,7 +1502,27 @@ projected_points_options = [
     for c in ["Average Projected Fantasy Points Season", "Average Projected Fantasy Points Last 5"]
     if c in player_review_df.columns
 ]
-if "Average Ownership Season" not in player_review_df.columns or not projected_points_options:
+projected_ownership_season_col = (
+    "Average Projected Ownership Season"
+    if "Average Projected Ownership Season" in player_review_df.columns
+    else "Average Ownership Season"
+)
+projected_ownership_last5_col = (
+    "Average Projected Ownership Last 5 Games"
+    if "Average Projected Ownership Last 5 Games" in player_review_df.columns
+    else "Average Ownership Last 5 Games"
+)
+projected_ownership_games_season_col = (
+    "Projected Ownership Games Season"
+    if "Projected Ownership Games Season" in player_review_df.columns
+    else "Ownership Games Season"
+)
+projected_ownership_games_last5_col = (
+    "Projected Ownership Games Last 5 Window"
+    if "Projected Ownership Games Last 5 Window" in player_review_df.columns
+    else "Ownership Games Last 5 Window"
+)
+if projected_ownership_season_col not in player_review_df.columns or not projected_points_options:
     st.info("This diagnostic needs projected points and ownership columns from projection snapshots.")
 else:
     d1, d2, d3, d4 = st.columns(4)
@@ -1371,8 +1564,8 @@ else:
             own_diag_source["Team"].astype(str).str.strip().str.upper() == str(selected_team).strip().upper()
         ].copy()
     own_diag_source[own_diag_points_col] = pd.to_numeric(own_diag_source[own_diag_points_col], errors="coerce")
-    own_diag_source["Average Ownership Season"] = pd.to_numeric(
-        own_diag_source["Average Ownership Season"], errors="coerce"
+    own_diag_source[projected_ownership_season_col] = pd.to_numeric(
+        own_diag_source[projected_ownership_season_col], errors="coerce"
     )
     if "Average DK Salary This Season" in own_diag_source.columns:
         own_diag_source["Average DK Salary This Season"] = pd.to_numeric(
@@ -1380,12 +1573,12 @@ else:
         )
     own_diag_df = own_diag_source.loc[
         own_diag_source[own_diag_points_col].notna()
-        & own_diag_source["Average Ownership Season"].notna()
+        & own_diag_source[projected_ownership_season_col].notna()
         & (own_diag_source[own_diag_points_col] >= float(own_diag_min_points))
-        & (own_diag_source["Average Ownership Season"] <= float(own_diag_max_own))
+        & (own_diag_source[projected_ownership_season_col] <= float(own_diag_max_own))
     ].copy()
     own_diag_df = own_diag_df.sort_values(
-        [own_diag_points_col, "Average Ownership Season", "Player Name"],
+        [own_diag_points_col, projected_ownership_season_col, "Player Name"],
         ascending=[False, True, True],
         kind="stable",
     )
@@ -1397,9 +1590,11 @@ else:
     if own_diag_df.empty:
         st.info("No players matched the current projected-points and ownership thresholds.")
     else:
-        corr = own_diag_df[[own_diag_points_col, "Average Ownership Season"]].corr(method="spearman").iloc[0, 1]
+        corr = own_diag_df[[own_diag_points_col, projected_ownership_season_col]].corr(method="spearman").iloc[0, 1]
         if pd.notna(corr):
-            st.caption(f"Spearman correlation ({own_diag_points_col} vs ownership): {float(corr):.3f}")
+            st.caption(
+                f"Spearman correlation ({own_diag_points_col} vs {projected_ownership_season_col}): {float(corr):.3f}"
+            )
         fig, ax = plt.subplots(figsize=(10, 5.5))
         salary_vals = (
             pd.to_numeric(own_diag_df.get("Average DK Salary This Season"), errors="coerce")
@@ -1409,7 +1604,7 @@ else:
         if not salary_vals.empty and salary_vals.notna().any():
             scatter = ax.scatter(
                 own_diag_df[own_diag_points_col],
-                own_diag_df["Average Ownership Season"],
+                own_diag_df[projected_ownership_season_col],
                 c=salary_vals,
                 cmap="viridis",
                 alpha=0.68,
@@ -1421,7 +1616,7 @@ else:
         else:
             ax.scatter(
                 own_diag_df[own_diag_points_col],
-                own_diag_df["Average Ownership Season"],
+                own_diag_df[projected_ownership_season_col],
                 color="#1f77b4",
                 alpha=0.68,
                 s=36,
@@ -1448,9 +1643,12 @@ else:
             .agg(
                 Players=("Player Name", "count"),
                 AvgProjectedPoints=(own_diag_points_col, "mean"),
-                AvgOwnershipSeason=("Average Ownership Season", "mean"),
-                MedianOwnershipSeason=("Average Ownership Season", "median"),
-                Under10OwnPct=("Average Ownership Season", lambda s: float((pd.to_numeric(s, errors="coerce") < 10.0).mean() * 100.0)),
+                AvgOwnershipSeason=(projected_ownership_season_col, "mean"),
+                MedianOwnershipSeason=(projected_ownership_season_col, "median"),
+                Under10OwnPct=(
+                    projected_ownership_season_col,
+                    lambda s: float((pd.to_numeric(s, errors="coerce") < 10.0).mean() * 100.0),
+                ),
             )
             .rename(
                 columns={
@@ -1477,13 +1675,13 @@ else:
             "Player Name",
             "Position",
             own_diag_points_col,
-            "Average Ownership Season",
-            "Average Ownership Last 5 Games",
+            projected_ownership_season_col,
+            projected_ownership_last5_col,
             "Average DK Salary This Season",
             "Total Fantasy Points Season",
             past5_points_col,
-            "Ownership Games Season",
-            "Ownership Games Last 5 Window",
+            projected_ownership_games_season_col,
+            projected_ownership_games_last5_col,
         ]
         own_diag_cols = [c for c in own_diag_cols if c in own_diag_df.columns]
         st.dataframe(own_diag_df[own_diag_cols], hide_index=True, use_container_width=True)
@@ -1493,6 +1691,237 @@ else:
             file_name=f"player_review_projected_points_vs_ownership_{start_date.isoformat()}_{end_date.isoformat()}.csv",
             mime="text/csv",
             key="download_player_review_projected_points_vs_ownership_csv",
+        )
+
+st.subheader("Ownership Accuracy: Projected vs Actual")
+actual_ownership_season_col = (
+    "Average Actual Ownership Season"
+    if "Average Actual Ownership Season" in player_review_df.columns
+    else ""
+)
+actual_ownership_games_season_col = (
+    "Actual Ownership Games Season"
+    if "Actual Ownership Games Season" in player_review_df.columns
+    else ""
+)
+if (
+    not projected_points_options
+    or projected_ownership_season_col not in player_review_df.columns
+    or actual_ownership_season_col == ""
+):
+    st.info(
+        "This section needs both projected ownership and actual ownership history "
+        "(actual ownership is loaded from Tournament Review contest standings)."
+    )
+else:
+    a1, a2, a3, a4, a5 = st.columns(5)
+    own_acc_scope = a1.selectbox(
+        "Scope",
+        options=["All Teams", "Selected Team"],
+        index=0,
+        key="player_review_own_acc_scope",
+    )
+    own_acc_points_col = a2.selectbox(
+        "Projected Points Window",
+        options=projected_points_options,
+        index=0,
+        key="player_review_own_acc_points_window",
+    )
+    own_acc_min_points = float(
+        a3.number_input(
+            "Min Projected Points",
+            min_value=0.0,
+            value=15.0,
+            step=0.5,
+            key="player_review_own_acc_min_points",
+        )
+    )
+    own_acc_min_proj_own = float(
+        a4.number_input(
+            "Min Projected Own %",
+            min_value=0.0,
+            max_value=100.0,
+            value=0.0,
+            step=0.5,
+            key="player_review_own_acc_min_proj_own",
+        )
+    )
+    own_acc_top_n = int(
+        a5.number_input(
+            "Top Miss Rows",
+            min_value=5,
+            max_value=200,
+            value=40,
+            step=5,
+            key="player_review_own_acc_top_n",
+        )
+    )
+
+    own_acc_df = player_review_df.copy()
+    if str(own_acc_scope).strip().lower() == "selected team":
+        own_acc_df = own_acc_df.loc[
+            own_acc_df["Team"].astype(str).str.strip().str.upper() == str(selected_team).strip().upper()
+        ].copy()
+    for col in [
+        own_acc_points_col,
+        projected_ownership_season_col,
+        actual_ownership_season_col,
+        "Average DK Salary This Season",
+        projected_ownership_games_season_col,
+        actual_ownership_games_season_col,
+    ]:
+        if col and col in own_acc_df.columns:
+            own_acc_df[col] = pd.to_numeric(own_acc_df[col], errors="coerce")
+
+    own_acc_df = own_acc_df.loc[
+        own_acc_df[own_acc_points_col].notna()
+        & own_acc_df[projected_ownership_season_col].notna()
+        & own_acc_df[actual_ownership_season_col].notna()
+        & (own_acc_df[own_acc_points_col] >= float(own_acc_min_points))
+        & (own_acc_df[projected_ownership_season_col] >= float(own_acc_min_proj_own))
+    ].copy()
+    own_acc_df["_own_delta"] = (
+        own_acc_df[actual_ownership_season_col] - own_acc_df[projected_ownership_season_col]
+    )
+    own_acc_df["_own_abs_delta"] = own_acc_df["_own_delta"].abs()
+    own_acc_df = own_acc_df.sort_values("_own_abs_delta", ascending=False, kind="stable").reset_index(drop=True)
+
+    st.metric("Players with Projected+Actual Ownership", int(len(own_acc_df)))
+    if own_acc_df.empty:
+        st.info("No players matched the current filters.")
+    else:
+        mae = float(pd.to_numeric(own_acc_df["_own_abs_delta"], errors="coerce").mean())
+        bias = float(pd.to_numeric(own_acc_df["_own_delta"], errors="coerce").mean())
+        spearman = own_acc_df[[projected_ownership_season_col, actual_ownership_season_col]].corr(method="spearman").iloc[0, 1]
+        m1, m2, m3 = st.columns(3)
+        m1.metric("Ownership MAE", f"{mae:.2f}")
+        m2.metric("Ownership Bias (Actual - Projected)", f"{bias:.2f}")
+        m3.metric("Ownership Rank Spearman", f"{float(spearman):.3f}" if pd.notna(spearman) else "N/A")
+
+        fig_acc, ax_acc = plt.subplots(figsize=(7.5, 7.0))
+        points_color = pd.to_numeric(own_acc_df.get(own_acc_points_col), errors="coerce")
+        scatter_acc = ax_acc.scatter(
+            own_acc_df[projected_ownership_season_col],
+            own_acc_df[actual_ownership_season_col],
+            c=points_color,
+            cmap="viridis",
+            alpha=0.72,
+            s=40,
+            edgecolors="none",
+        )
+        min_bound = float(
+            min(
+                pd.to_numeric(own_acc_df[projected_ownership_season_col], errors="coerce").min(),
+                pd.to_numeric(own_acc_df[actual_ownership_season_col], errors="coerce").min(),
+            )
+        )
+        max_bound = float(
+            max(
+                pd.to_numeric(own_acc_df[projected_ownership_season_col], errors="coerce").max(),
+                pd.to_numeric(own_acc_df[actual_ownership_season_col], errors="coerce").max(),
+            )
+        )
+        bound_min = max(0.0, min_bound)
+        bound_max = max(1.0, max_bound)
+        ax_acc.plot([bound_min, bound_max], [bound_min, bound_max], linestyle="--", color="#555555", linewidth=1.4)
+        ax_acc.set_xlabel("Average Projected Ownership Season (%)")
+        ax_acc.set_ylabel("Average Actual Ownership Season (%)")
+        ax_acc.grid(alpha=0.2)
+        cbar_acc = fig_acc.colorbar(scatter_acc, ax=ax_acc)
+        cbar_acc.set_label(own_acc_points_col)
+        st.pyplot(fig_acc, use_container_width=True)
+        plt.close(fig_acc)
+
+        decile_labels = pd.qcut(
+            own_acc_df[projected_ownership_season_col],
+            q=10,
+            labels=False,
+            duplicates="drop",
+        )
+        own_acc_df["_proj_own_decile"] = decile_labels
+        decile_df = own_acc_df.loc[own_acc_df["_proj_own_decile"].notna()].copy()
+        if decile_df.empty:
+            st.info("Projected ownership has too few distinct values to compute deciles.")
+        else:
+            decile_df["_proj_own_decile"] = decile_df["_proj_own_decile"].astype(int) + 1
+            decile_summary = (
+                decile_df.groupby("_proj_own_decile", as_index=False)
+                .agg(
+                    Players=("Player Name", "count"),
+                    AvgProjectedOwnership=(projected_ownership_season_col, "mean"),
+                    AvgActualOwnership=(actual_ownership_season_col, "mean"),
+                    AvgDelta=("_own_delta", "mean"),
+                    MAE=("_own_abs_delta", "mean"),
+                )
+                .rename(
+                    columns={
+                        "_proj_own_decile": "Projected Own Decile",
+                        "AvgProjectedOwnership": "Avg Projected Own (%)",
+                        "AvgActualOwnership": "Avg Actual Own (%)",
+                        "AvgDelta": "Avg Delta (Actual - Projected)",
+                        "MAE": "MAE",
+                    }
+                )
+            )
+            if projected_ownership_games_season_col and projected_ownership_games_season_col in decile_df.columns:
+                decile_summary["Avg Projected Samples"] = (
+                    decile_df.groupby("_proj_own_decile")[projected_ownership_games_season_col].mean().values
+                )
+            if actual_ownership_games_season_col and actual_ownership_games_season_col in decile_df.columns:
+                decile_summary["Avg Actual Samples"] = (
+                    decile_df.groupby("_proj_own_decile")[actual_ownership_games_season_col].mean().values
+                )
+            for col in decile_summary.columns:
+                if col != "Projected Own Decile":
+                    decile_summary[col] = pd.to_numeric(decile_summary[col], errors="coerce").round(2)
+            st.caption("Calibration table by projected ownership decile")
+            st.dataframe(decile_summary, hide_index=True, use_container_width=True)
+
+        miss_df = own_acc_df.head(int(own_acc_top_n)).copy()
+        miss_cols = [
+            "Team",
+            "Player Name",
+            "Position",
+            own_acc_points_col,
+            projected_ownership_season_col,
+            actual_ownership_season_col,
+            "_own_delta",
+            "_own_abs_delta",
+            projected_ownership_games_season_col,
+            actual_ownership_games_season_col,
+            "Average DK Salary This Season",
+            "Total Fantasy Points Season",
+        ]
+        miss_cols = [c for c in miss_cols if c in miss_df.columns]
+        miss_view = miss_df[miss_cols].rename(
+            columns={
+                projected_ownership_season_col: "Avg Projected Own (%)",
+                actual_ownership_season_col: "Avg Actual Own (%)",
+                "_own_delta": "Delta (Actual - Projected)",
+                "_own_abs_delta": "Abs Delta",
+                own_acc_points_col: own_acc_points_col,
+                projected_ownership_games_season_col: "Projected Own Samples",
+                actual_ownership_games_season_col: "Actual Own Samples",
+            }
+        )
+        for col in [
+            "Avg Projected Own (%)",
+            "Avg Actual Own (%)",
+            "Delta (Actual - Projected)",
+            "Abs Delta",
+            "Average DK Salary This Season",
+            "Total Fantasy Points Season",
+        ]:
+            if col in miss_view.columns:
+                miss_view[col] = pd.to_numeric(miss_view[col], errors="coerce").round(2)
+        st.caption(f"Biggest ownership misses (top {int(own_acc_top_n)} by absolute error)")
+        st.dataframe(miss_view, hide_index=True, use_container_width=True)
+        st.download_button(
+            "Download Ownership Misses CSV",
+            data=miss_view.to_csv(index=False),
+            file_name=f"player_review_ownership_misses_{start_date.isoformat()}_{end_date.isoformat()}.csv",
+            mime="text/csv",
+            key="download_player_review_ownership_misses_csv",
         )
 
 st.subheader("Low-Owned High-Scoring Targets")
@@ -1614,6 +2043,12 @@ if not bool(player_review_meta.get("has_points")):
     st.caption("Note: Total fantasy points are unavailable because no matched actual DK points were found.")
 if not bool(player_review_meta.get("has_ownership")):
     st.caption("Note: Ownership columns are unavailable because projection ownership values were not found.")
+if not bool(player_review_meta.get("has_projected_ownership")):
+    st.caption("Note: Projected ownership averages are unavailable for this range.")
+if not bool(player_review_meta.get("has_actual_ownership")):
+    st.caption(
+        "Note: Actual ownership averages are unavailable; upload Tournament Review contest standings for this range."
+    )
 if not bool(player_review_meta.get("has_salary")):
     st.caption("Note: Average DK salary is unavailable because salary values were not found.")
 if not bool(player_review_meta.get("has_projected_points")):
