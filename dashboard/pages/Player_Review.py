@@ -360,10 +360,15 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
             missing_team = (out["team"] == "") & (out["player_name_key"] != "")
             out.loc[missing_team, "team"] = out.loc[missing_team, "player_name_key"].map(team_map).fillna("")
 
-    has_id_key = out["player_id_key"] != ""
-    # Prefer player ID to merge projection and actual rows even when team text differs.
-    out.loc[has_id_key, "player_key"] = "id:" + out.loc[has_id_key, "player_id_key"]
     has_name_key = out["player_name_key"] != ""
+    has_id_key = out["player_id_key"] != ""
+    # Prefer an ID+name composite to avoid accidental collisions when source "id" is non-player scoped.
+    out.loc[has_id_key & has_name_key, "player_key"] = (
+        "id:" + out.loc[has_id_key & has_name_key, "player_id_key"] + "|name:"
+        + out.loc[has_id_key & has_name_key, "player_name_key"]
+    )
+    missing_key = out["player_key"] == ""
+    out.loc[missing_key & has_id_key, "player_key"] = "id:" + out.loc[missing_key & has_id_key, "player_id_key"]
     has_team = out["team"] != ""
     missing_key = out["player_key"] == ""
     out.loc[missing_key & has_name_key & has_team, "player_key"] = (
