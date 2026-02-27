@@ -230,6 +230,28 @@ def normalize_contest_standings_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     }
     out = out.rename(columns={c: rename_map.get(str(c).strip().lower(), c) for c in out.columns})
 
+    # DK exports vary in column formatting (e.g., "% Drafted", "Player Name").
+    player_col = _resolve_column_alias(out, ("player", "player_name", "player name", "name", "athlete"))
+    if player_col and player_col in out.columns:
+        out["Player"] = out[player_col]
+    drafted_col = _resolve_column_alias(
+        out,
+        (
+            "%drafted",
+            "% drafted",
+            "drafted",
+            "pctdrafted",
+            "pct drafted",
+            "ownership",
+            "actual ownership",
+            "actual_ownership",
+            "field ownership",
+            "field_ownership",
+        ),
+    )
+    if drafted_col and drafted_col in out.columns:
+        out["%Drafted"] = out[drafted_col]
+
     for col in ["Rank", "EntryId", "EntryName", "Points", "Lineup", "Player", "%Drafted"]:
         if col not in out.columns:
             out[col] = ""

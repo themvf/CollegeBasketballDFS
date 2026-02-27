@@ -19,6 +19,10 @@ if str(SRC) not in sys.path:
 from college_basketball_dfs.cbb_backfill import iter_dates, season_start_for_date
 from college_basketball_dfs.cbb_gcs import CbbGcsStore, build_storage_client
 from college_basketball_dfs.cbb_ncaa import prior_day
+from college_basketball_dfs.cbb_tournament_review import (
+    extract_actual_ownership_from_standings,
+    normalize_contest_standings_frame,
+)
 
 
 PROJECTED_OWNERSHIP_ALIASES = (
@@ -67,6 +71,60 @@ def _resolve_credential_json_b64() -> str | None:
     return os.getenv("GCP_SERVICE_ACCOUNT_JSON_B64") or _secret("gcp_service_account_json_b64")
 
 
+def _read_contest_standings_ownership_for_date(store: CbbGcsStore, slate_date: date) -> pd.DataFrame:
+    prefix = f"{store.contest_standings_prefix}/{slate_date.isoformat()}_"
+    try:
+        blob_names = sorted(
+            {
+                str(blob.name or "")
+                for blob in store.bucket.list_blobs(prefix=prefix)
+                if str(blob.name or "").lower().endswith(".csv")
+            }
+        )
+    except Exception:
+        return pd.DataFrame()
+    if not blob_names:
+        return pd.DataFrame()
+
+    own_frames: list[pd.DataFrame] = []
+    for blob_name in blob_names:
+        try:
+            csv_text = store.bucket.blob(blob_name).download_as_text(encoding="utf-8")
+        except Exception:
+            continue
+        if not csv_text or not csv_text.strip():
+            continue
+        try:
+            standings_df = pd.read_csv(io.StringIO(csv_text))
+        except Exception:
+            continue
+        if standings_df.empty:
+            continue
+        normalized = normalize_contest_standings_frame(standings_df)
+        extracted = extract_actual_ownership_from_standings(normalized)
+        if extracted.empty:
+            continue
+        one = extracted.rename(columns={"player_name": "Name"}).copy()
+        one["Name"] = one["Name"].astype(str).str.strip()
+        one["actual_ownership"] = pd.to_numeric(one.get("actual_ownership"), errors="coerce")
+        one = one.loc[(one["Name"] != "") & one["actual_ownership"].notna(), ["Name", "actual_ownership"]]
+        if one.empty:
+            continue
+        own_frames.append(one)
+
+    if not own_frames:
+        return pd.DataFrame()
+
+    out = pd.concat(own_frames, ignore_index=True)
+    out = (
+        out.groupby("Name", as_index=False)["actual_ownership"]
+        .mean()
+        .sort_values("Name", kind="stable")
+        .reset_index(drop=True)
+    )
+    return out
+
+
 @st.cache_data(ttl=900, show_spinner=False)
 def load_projection_player_totals_dataset(
     bucket_name: str,
@@ -90,6 +148,8 @@ def load_projection_player_totals_dataset(
     dk_slate_days = 0
     projection_rows = 0
     ownership_rows = 0
+    ownership_rows_from_standings = 0
+    ownership_days_from_standings = 0
     dk_slate_rows = 0
 
     for d in dates:
@@ -112,17 +172,30 @@ def load_projection_player_totals_dataset(
             ownership_csv = store.read_ownership_csv(d)
         except Exception:
             ownership_csv = ""
+        ownership_df = pd.DataFrame()
+        ownership_source = ""
         if ownership_csv and ownership_csv.strip():
             try:
                 ownership_df = pd.read_csv(io.StringIO(ownership_csv))
             except Exception:
                 ownership_df = pd.DataFrame()
             if not ownership_df.empty:
-                ownership_days += 1
-                ownership_rows += int(len(ownership_df))
-                ownership_df = ownership_df.copy()
-                ownership_df["review_date"] = d.isoformat()
-                day_frames.append(ownership_df)
+                ownership_source = "ownership_csv"
+
+        if ownership_df.empty:
+            ownership_df = _read_contest_standings_ownership_for_date(store, d)
+            if not ownership_df.empty:
+                ownership_source = "contest_standings"
+
+        if not ownership_df.empty:
+            ownership_days += 1
+            ownership_rows += int(len(ownership_df))
+            if ownership_source == "contest_standings":
+                ownership_days_from_standings += 1
+                ownership_rows_from_standings += int(len(ownership_df))
+            ownership_df = ownership_df.copy()
+            ownership_df["review_date"] = d.isoformat()
+            day_frames.append(ownership_df)
 
         try:
             dk_slate_csv = store.read_dk_slate_csv(d)
@@ -147,9 +220,11 @@ def load_projection_player_totals_dataset(
             "dates_scanned": int(len(dates)),
             "projection_days_found": 0,
             "ownership_days_found": 0,
+            "ownership_days_from_standings": 0,
             "dk_slate_days_found": 0,
             "projection_rows": 0,
             "ownership_rows": 0,
+            "ownership_rows_from_standings": 0,
             "dk_slate_rows": 0,
             "combined_rows": 0,
         }
@@ -159,9 +234,11 @@ def load_projection_player_totals_dataset(
         "dates_scanned": int(len(dates)),
         "projection_days_found": int(projection_days),
         "ownership_days_found": int(ownership_days),
+        "ownership_days_from_standings": int(ownership_days_from_standings),
         "dk_slate_days_found": int(dk_slate_days),
         "projection_rows": int(projection_rows),
         "ownership_rows": int(ownership_rows),
+        "ownership_rows_from_standings": int(ownership_rows_from_standings),
         "dk_slate_rows": int(dk_slate_rows),
         "combined_rows": int(len(out)),
     }
@@ -348,6 +425,14 @@ def _first_nonempty(series: pd.Series) -> str:
         if text and text.lower() not in NULLISH_TEXT_VALUES:
             return text
     return ""
+
+
+def _name_key_series(series: pd.Series) -> pd.Series:
+    text = series.astype(str).str.strip()
+    loose = text.map(_norm_text_key_loose)
+    strict = text.map(_norm_text_key)
+    out = loose.where(loose != "", strict)
+    return out.fillna("")
 
 
 def _coerce_ownership_series(series: pd.Series) -> pd.Series:
@@ -586,6 +671,16 @@ def build_player_review_table(
 ) -> tuple[pd.DataFrame, list[str], dict[str, bool]]:
     actual_history = _build_player_history_frame(actual_player_history_df)
     projection_history = _build_player_history_frame(player_totals_df)
+    projection_history_by_name = projection_history.copy()
+    if not projection_history_by_name.empty:
+        projection_history_by_name["player_key"] = _name_key_series(
+            projection_history_by_name["player_name"]
+            if "player_name" in projection_history_by_name.columns
+            else pd.Series("", index=projection_history_by_name.index)
+        )
+        projection_history_by_name = projection_history_by_name.loc[
+            projection_history_by_name["player_key"].astype(str).str.strip() != ""
+        ].copy()
 
     identity_frames: list[pd.DataFrame] = []
     for frame in [actual_history, projection_history]:
@@ -644,6 +739,13 @@ def build_player_review_table(
         last5_col="Average Ownership Last 5 Games",
         agg_mode="mean",
     )
+    ownership_summary_by_name = _aggregate_player_metric(
+        projection_history_by_name,
+        value_col="projected_ownership",
+        season_col="Average Ownership Season",
+        last5_col="Average Ownership Last 5 Games",
+        agg_mode="mean",
+    )
     fantasy_points_variance = _aggregate_player_variance(
         actual_history,
         value_col="actual_dk_points",
@@ -658,6 +760,12 @@ def build_player_review_table(
     )
     ownership_variance = _aggregate_player_variance(
         projection_history,
+        value_col="projected_ownership",
+        season_variance_col="Ownership Variance Season",
+        last5_variance_col="Ownership Variance Last 5 Games",
+    )
+    ownership_variance_by_name = _aggregate_player_variance(
+        projection_history_by_name,
         value_col="projected_ownership",
         season_variance_col="Ownership Variance Season",
         last5_variance_col="Ownership Variance Last 5 Games",
@@ -696,6 +804,45 @@ def build_player_review_table(
     out = out.merge(ownership_variance, on="player_key", how="left")
     out = out.merge(salary_variance, on="player_key", how="left")
     out = out.rename(columns={"player_name": "Player Name", "position": "Position", "team": "Team"})
+    out["_name_key"] = _name_key_series(
+        out["Player Name"] if "Player Name" in out.columns else pd.Series("", index=out.index)
+    )
+
+    if not ownership_summary_by_name.empty:
+        own_name = ownership_summary_by_name.rename(
+            columns={
+                "player_key": "_name_key",
+                "Average Ownership Season": "_name_avg_own_season",
+                "Average Ownership Last 5 Games": "_name_avg_own_last5",
+            }
+        )
+        out = out.merge(own_name, on="_name_key", how="left")
+        if "Average Ownership Season" in out.columns:
+            season_base = pd.to_numeric(out["Average Ownership Season"], errors="coerce")
+            season_fill = pd.to_numeric(out.get("_name_avg_own_season"), errors="coerce")
+            out["Average Ownership Season"] = season_base.where(season_base.notna(), season_fill)
+        if "Average Ownership Last 5 Games" in out.columns:
+            last5_base = pd.to_numeric(out["Average Ownership Last 5 Games"], errors="coerce")
+            last5_fill = pd.to_numeric(out.get("_name_avg_own_last5"), errors="coerce")
+            out["Average Ownership Last 5 Games"] = last5_base.where(last5_base.notna(), last5_fill)
+
+    if not ownership_variance_by_name.empty:
+        own_var_name = ownership_variance_by_name.rename(
+            columns={
+                "player_key": "_name_key",
+                "Ownership Variance Season": "_name_own_var_season",
+                "Ownership Variance Last 5 Games": "_name_own_var_last5",
+            }
+        )
+        out = out.merge(own_var_name, on="_name_key", how="left")
+        if "Ownership Variance Season" in out.columns:
+            var_season_base = pd.to_numeric(out["Ownership Variance Season"], errors="coerce")
+            var_season_fill = pd.to_numeric(out.get("_name_own_var_season"), errors="coerce")
+            out["Ownership Variance Season"] = var_season_base.where(var_season_base.notna(), var_season_fill)
+        if "Ownership Variance Last 5 Games" in out.columns:
+            var_last5_base = pd.to_numeric(out["Ownership Variance Last 5 Games"], errors="coerce")
+            var_last5_fill = pd.to_numeric(out.get("_name_own_var_last5"), errors="coerce")
+            out["Ownership Variance Last 5 Games"] = var_last5_base.where(var_last5_base.notna(), var_last5_fill)
 
     for col in [
         "Total Fantasy Points Season",
@@ -746,6 +893,16 @@ def build_player_review_table(
     out["Player Name"] = out["Player Name"].astype(str).str.strip()
     out["Team"] = out["Team"].astype(str).str.strip().str.upper()
     out["Position"] = out["Position"].astype(str).str.strip().str.upper()
+    out = out.drop(
+        columns=[
+            "_name_key",
+            "_name_avg_own_season",
+            "_name_avg_own_last5",
+            "_name_own_var_season",
+            "_name_own_var_last5",
+        ],
+        errors="ignore",
+    )
     out = out.loc[out["Player Name"] != ""].copy()
     out = out.sort_values(
         ["Team", "Total Fantasy Points Season", "Player Name"],
@@ -758,8 +915,8 @@ def build_player_review_table(
         "has_points": bool(points_season_summary["Total Fantasy Points Season"].notna().any())
         if not points_season_summary.empty
         else False,
-        "has_ownership": bool(ownership_summary["Average Ownership Season"].notna().any())
-        if not ownership_summary.empty
+        "has_ownership": bool(pd.to_numeric(out.get("Average Ownership Season"), errors="coerce").notna().any())
+        if not out.empty and "Average Ownership Season" in out.columns
         else False,
         "has_salary": bool(salary_summary["Average DK Salary This Season"].notna().any()) if not salary_summary.empty else False,
     }
@@ -829,6 +986,12 @@ if int(player_totals_meta.get("ownership_rows") or 0) or int(player_totals_meta.
         f"Supplemental source rows loaded - Ownership: {int(player_totals_meta.get('ownership_rows') or 0)}, "
         f"DK Slate: {int(player_totals_meta.get('dk_slate_rows') or 0)}."
     )
+ownership_rows_from_standings = int(player_totals_meta.get("ownership_rows_from_standings") or 0)
+if ownership_rows_from_standings > 0:
+    st.caption(
+        "Ownership fallback rows from Tournament Review contest standings: "
+        f"{ownership_rows_from_standings}."
+    )
 
 dates_scanned = int(player_totals_meta.get("dates_scanned") or actual_history_meta.get("dates_scanned") or 0)
 projection_days = int(player_totals_meta.get("projection_days_found") or 0)
@@ -839,11 +1002,19 @@ if dates_scanned > 0 and projection_days < dates_scanned:
         "Player Review now combines projections + ownership + DK slate files to fill missing columns."
     )
 ownership_days = int(player_totals_meta.get("ownership_days_found") or 0)
+ownership_days_from_standings = int(player_totals_meta.get("ownership_days_from_standings") or 0)
 if dates_scanned > 0 and ownership_days < dates_scanned:
-    st.info(
-        f"Ownership files were found for {ownership_days} of {dates_scanned} scanned dates "
-        f"({start_date.isoformat()} to {end_date.isoformat()})."
-    )
+    if ownership_days_from_standings > 0:
+        st.info(
+            f"Ownership datasets were found for {ownership_days} of {dates_scanned} scanned dates "
+            f"({start_date.isoformat()} to {end_date.isoformat()}); "
+            f"{ownership_days_from_standings} day(s) came from Tournament Review contest standings."
+        )
+    else:
+        st.info(
+            f"Ownership files were found for {ownership_days} of {dates_scanned} scanned dates "
+            f"({start_date.isoformat()} to {end_date.isoformat()})."
+        )
 dk_slate_days = int(player_totals_meta.get("dk_slate_days_found") or 0)
 if dates_scanned > 0 and dk_slate_days < dates_scanned:
     st.info(
