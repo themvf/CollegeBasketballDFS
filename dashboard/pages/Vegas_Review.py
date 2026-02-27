@@ -8,7 +8,6 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -1086,6 +1085,21 @@ def _render_projection_actual_lollipop(
     lc1.metric("Players Plotted", int(len(plot_df)))
     lc2.metric("MAE (Plotted)", f"{mae:.2f}")
     lc3.metric("Mean Error (Actual - Proj)", f"{mean_error:.2f}")
+
+    try:
+        import matplotlib.pyplot as plt
+    except ModuleNotFoundError:
+        st.warning("`matplotlib` is not installed. Showing table fallback for projected vs actual rows.")
+        fallback_cols = [
+            "player_label",
+            "projected_points",
+            "actual_dk_points",
+            "point_error",
+            "abs_point_error",
+        ]
+        fallback_cols = [c for c in fallback_cols if c in plot_df.columns]
+        st.dataframe(plot_df[fallback_cols], hide_index=True, use_container_width=True)
+        return
 
     y_pos = list(range(len(plot_df)))
     fig_h = max(4.0, (0.33 * float(len(plot_df))) + 1.2)
