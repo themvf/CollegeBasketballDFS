@@ -1394,56 +1394,6 @@ else:
             sort_mode=sort_mode,
         )
 
-st.subheader("Player Review")
-st.caption(
-    "Select a team to review player-level fantasy totals, ownership trends, and average DK salary "
-    "for the selected date window."
-)
-player_review_df, player_review_teams, player_review_meta = build_player_review_table(
-    projection_actual_df=projection_actual_df,
-    player_totals_df=player_totals_df,
-)
-if player_review_df.empty or not player_review_teams:
-    st.info(
-        "Player review rows are unavailable in this date range. "
-        "This section needs projection snapshots and/or projection-vs-actual rows."
-    )
-else:
-    selected_player_review_team = st.selectbox(
-        "Team",
-        options=player_review_teams,
-        index=0,
-        key="vegas_player_review_team",
-    )
-    player_team_view_df = player_review_df.loc[
-        player_review_df["Team"].astype(str).str.strip().str.upper() == str(selected_player_review_team).strip().upper()
-    ].copy()
-    show_cols = [
-        "Player Name",
-        "Position",
-        "Total Fantasy Points Season",
-        "Total Fantasy Points Last 5 Games",
-        "Average Ownership Season",
-        "Average Ownership Last 5 Games",
-        "Average DK Salary This Season",
-    ]
-    show_cols = [c for c in show_cols if c in player_team_view_df.columns]
-    if player_team_view_df.empty:
-        st.info("No player rows found for the selected team in this date range.")
-    else:
-        player_team_view_df = player_team_view_df.sort_values(
-            ["Total Fantasy Points Season", "Player Name"],
-            ascending=[False, True],
-            kind="stable",
-        )
-        st.dataframe(player_team_view_df[show_cols], hide_index=True, use_container_width=True)
-    if not bool(player_review_meta.get("has_points")):
-        st.caption("Note: Total fantasy points are unavailable because no matched actual DK points were found.")
-    if not bool(player_review_meta.get("has_ownership")):
-        st.caption("Note: Ownership columns are unavailable because projection ownership values were not found.")
-    if not bool(player_review_meta.get("has_salary")):
-        st.caption("Note: Average DK salary is unavailable because salary values were not found.")
-
 st.subheader("Game/Odds Join Audit")
 st.caption(
     "Audit mapping quality and data availability used to connect slate rows to game-level odds/tail features. "
