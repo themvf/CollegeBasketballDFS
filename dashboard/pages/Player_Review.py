@@ -378,7 +378,8 @@ def _aggregate_player_metric(
     )
     last5 = work.groupby("player_key", sort=False, as_index=False).head(5).copy()
 
-    if agg_mode == "mean":
+    mode = str(agg_mode or "").strip().lower()
+    if mode == "mean":
         season = (
             work.groupby("player_key", as_index=False)[value_col]
             .mean(numeric_only=True)
@@ -387,6 +388,17 @@ def _aggregate_player_metric(
         recent = (
             last5.groupby("player_key", as_index=False)[value_col]
             .mean(numeric_only=True)
+            .rename(columns={value_col: last5_col})
+        )
+    elif mode == "median":
+        season = (
+            work.groupby("player_key", as_index=False)[value_col]
+            .median(numeric_only=True)
+            .rename(columns={value_col: season_col})
+        )
+        recent = (
+            last5.groupby("player_key", as_index=False)[value_col]
+            .median(numeric_only=True)
             .rename(columns={value_col: last5_col})
         )
     else:
@@ -440,12 +452,26 @@ def build_player_review_table(
         .copy()
     )
 
-    points_summary = _aggregate_player_metric(
+    points_season_summary = _aggregate_player_metric(
         actual_history,
         value_col="actual_dk_points",
         season_col="Total Fantasy Points Season",
-        last5_col="Total Fantasy Points Last 5 Games",
+        last5_col="_unused_points_last5_sum",
         agg_mode="sum",
+    )
+    points_avg_summary = _aggregate_player_metric(
+        actual_history,
+        value_col="actual_dk_points",
+        season_col="_unused_points_season_avg",
+        last5_col="Average Fantasy Points Per Game Last 5",
+        agg_mode="mean",
+    )
+    points_median_summary = _aggregate_player_metric(
+        actual_history,
+        value_col="actual_dk_points",
+        season_col="_unused_points_season_median",
+        last5_col="Median Fantasy Points Per Game Last 5",
+        agg_mode="median",
     )
     ownership_summary = _aggregate_player_metric(
         projection_history,
@@ -463,17 +489,26 @@ def build_player_review_table(
         last5_col="_unused_last5_salary",
         agg_mode="mean",
     )
+    if "_unused_points_last5_sum" in points_season_summary.columns:
+        points_season_summary = points_season_summary.drop(columns=["_unused_points_last5_sum"])
+    if "_unused_points_season_avg" in points_avg_summary.columns:
+        points_avg_summary = points_avg_summary.drop(columns=["_unused_points_season_avg"])
     if "_unused_last5_salary" in salary_summary.columns:
         salary_summary = salary_summary.drop(columns=["_unused_last5_salary"])
+    if "_unused_points_season_median" in points_median_summary.columns:
+        points_median_summary = points_median_summary.drop(columns=["_unused_points_season_median"])
 
-    out = identity_summary.merge(points_summary, on="player_key", how="left")
+    out = identity_summary.merge(points_season_summary, on="player_key", how="left")
+    out = out.merge(points_avg_summary, on="player_key", how="left")
+    out = out.merge(points_median_summary, on="player_key", how="left")
     out = out.merge(ownership_summary, on="player_key", how="left")
     out = out.merge(salary_summary, on="player_key", how="left")
     out = out.rename(columns={"player_name": "Player Name", "position": "Position", "team": "Team"})
 
     for col in [
         "Total Fantasy Points Season",
-        "Total Fantasy Points Last 5 Games",
+        "Average Fantasy Points Per Game Last 5",
+        "Median Fantasy Points Per Game Last 5",
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
@@ -481,13 +516,18 @@ def build_player_review_table(
         if col in out.columns:
             out[col] = pd.to_numeric(out[col], errors="coerce")
 
-    for col in ["Total Fantasy Points Season", "Total Fantasy Points Last 5 Games"]:
+    for col in [
+        "Total Fantasy Points Season",
+        "Average Fantasy Points Per Game Last 5",
+        "Median Fantasy Points Per Game Last 5",
+    ]:
         if col in out.columns:
             out[col] = out[col].fillna(0.0)
 
     for col in [
         "Total Fantasy Points Season",
-        "Total Fantasy Points Last 5 Games",
+        "Average Fantasy Points Per Game Last 5",
+        "Median Fantasy Points Per Game Last 5",
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
@@ -507,7 +547,9 @@ def build_player_review_table(
 
     team_options = sorted([str(x).strip().upper() for x in out["Team"].dropna().unique().tolist() if str(x).strip()])
     meta = {
-        "has_points": bool(points_summary["Total Fantasy Points Season"].notna().any()) if not points_summary.empty else False,
+        "has_points": bool(points_season_summary["Total Fantasy Points Season"].notna().any())
+        if not points_season_summary.empty
+        else False,
         "has_ownership": bool(ownership_summary["Average Ownership Season"].notna().any())
         if not ownership_summary.empty
         else False,
@@ -588,15 +630,25 @@ if player_review_df.empty or not player_review_teams:
     st.stop()
 
 selected_team = st.selectbox("Team", options=player_review_teams, index=0, key="player_review_team_select")
+past5_points_mode = st.selectbox(
+    "Past-5 Fantasy Points Mode",
+    options=["Average", "Median"],
+    index=0,
+    key="player_review_past5_points_mode",
+)
+past5_points_col = (
+    "Median Fantasy Points Per Game Last 5" if str(past5_points_mode).strip().lower() == "median" else "Average Fantasy Points Per Game Last 5"
+)
 team_df = player_review_df.loc[
     player_review_df["Team"].astype(str).str.strip().str.upper() == str(selected_team).strip().upper()
 ].copy()
 
 show_cols = [
+    "Team",
     "Player Name",
     "Position",
     "Total Fantasy Points Season",
-    "Total Fantasy Points Last 5 Games",
+    past5_points_col,
     "Average Ownership Season",
     "Average Ownership Last 5 Games",
     "Average DK Salary This Season",
@@ -607,8 +659,8 @@ if team_df.empty:
     st.info("No player rows found for the selected team in this date range.")
 else:
     team_df = team_df.sort_values(
-        ["Total Fantasy Points Season", "Player Name"],
-        ascending=[False, True],
+        ["Total Fantasy Points Season", past5_points_col, "Player Name"],
+        ascending=[False, False, True],
         kind="stable",
     )
     st.dataframe(team_df[show_cols], hide_index=True, use_container_width=True)
@@ -619,6 +671,22 @@ else:
         mime="text/csv",
         key="download_player_review_csv",
     )
+
+st.subheader("All Players")
+all_players_df = player_review_df.copy()
+all_players_df = all_players_df.sort_values(
+    ["Total Fantasy Points Season", past5_points_col, "Team", "Player Name"],
+    ascending=[False, False, True, True],
+    kind="stable",
+)
+st.dataframe(all_players_df[show_cols], hide_index=True, use_container_width=True)
+st.download_button(
+    "Download All Players Review CSV",
+    data=all_players_df[show_cols].to_csv(index=False),
+    file_name=f"player_review_all_teams_{start_date.isoformat()}_{end_date.isoformat()}.csv",
+    mime="text/csv",
+    key="download_player_review_all_players_csv",
+)
 
 if not bool(player_review_meta.get("has_points")):
     st.caption("Note: Total fantasy points are unavailable because no matched actual DK points were found.")
