@@ -8,6 +8,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import matplotlib.pyplot as plt
 import pandas as pd
 import streamlit as st
 
@@ -48,6 +49,27 @@ PROJECTED_OWNERSHIP_ALIASES = (
     "pct drafted",
     "drafted",
     "projected_ownership_v1",
+)
+PROJECTED_POINTS_ALIASES = (
+    "projected_dk_points",
+    "projected dk points",
+    "projected_points",
+    "projected points",
+    "projection",
+    "projection_points",
+    "projection points",
+    "proj_points",
+    "proj points",
+    "dk_projection",
+    "dk projection",
+    "blended_projection",
+    "blended projection",
+    "our_dk_projection",
+    "our dk projection",
+    "our_projection",
+    "our projection",
+    "vegas_dk_projection",
+    "vegas dk projection",
 )
 NULLISH_TEXT_VALUES = {"", "nan", "none", "null"}
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
@@ -455,6 +477,7 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
         "row_order",
         "minutes",
         "actual_dk_points",
+        "projected_dk_points",
         "projected_ownership",
         "salary",
     ]
@@ -484,6 +507,7 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
         ),
     )
     points_col = _resolve_column_alias(work, ("actual_dk_points", "actual dk points", "final_dk_points", "dk_points"))
+    projected_points_col = _resolve_column_alias(work, PROJECTED_POINTS_ALIASES)
     ownership_col = _resolve_column_alias(work, PROJECTED_OWNERSHIP_ALIASES)
 
     out = pd.DataFrame(index=work.index)
@@ -499,6 +523,9 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["salary"] = pd.to_numeric(work[salary_col], errors="coerce") if salary_col else pd.NA
     out["minutes"] = pd.to_numeric(work[minutes_col], errors="coerce") if minutes_col else pd.NA
     out["actual_dk_points"] = pd.to_numeric(work[points_col], errors="coerce") if points_col else pd.NA
+    out["projected_dk_points"] = (
+        pd.to_numeric(work[projected_points_col], errors="coerce") if projected_points_col else pd.NA
+    )
     out["projected_ownership"] = _coerce_ownership_series(work[ownership_col]) if ownership_col else pd.NA
     out["row_order"] = pd.RangeIndex(start=0, stop=len(out), step=1)
 
@@ -793,6 +820,20 @@ def build_player_review_table(
         last5_col="Median Fantasy Points Per Game Last 5",
         agg_mode="median",
     )
+    projected_points_summary = _aggregate_player_metric(
+        projection_history,
+        value_col="projected_dk_points",
+        season_col="Average Projected Fantasy Points Season",
+        last5_col="Average Projected Fantasy Points Last 5",
+        agg_mode="mean",
+    )
+    projected_points_summary_by_name = _aggregate_player_metric(
+        projection_history_by_name,
+        value_col="projected_dk_points",
+        season_col="Average Projected Fantasy Points Season",
+        last5_col="Average Projected Fantasy Points Last 5",
+        agg_mode="mean",
+    )
     ownership_summary = _aggregate_player_metric(
         projection_history,
         value_col="projected_ownership",
@@ -870,6 +911,7 @@ def build_player_review_table(
     out = identity_summary.merge(points_season_summary, on="player_key", how="left")
     out = out.merge(points_avg_summary, on="player_key", how="left")
     out = out.merge(points_median_summary, on="player_key", how="left")
+    out = out.merge(projected_points_summary, on="player_key", how="left")
     out = out.merge(ownership_summary, on="player_key", how="left")
     out = out.merge(ownership_counts, on="player_key", how="left")
     out = out.merge(salary_summary, on="player_key", how="left")
@@ -881,6 +923,26 @@ def build_player_review_table(
     out["_name_key"] = _name_key_series(
         out["Player Name"] if "Player Name" in out.columns else pd.Series("", index=out.index)
     )
+
+    if not projected_points_summary_by_name.empty:
+        proj_name = projected_points_summary_by_name.rename(
+            columns={
+                "player_key": "_name_key",
+                "Average Projected Fantasy Points Season": "_name_avg_proj_pts_season",
+                "Average Projected Fantasy Points Last 5": "_name_avg_proj_pts_last5",
+            }
+        )
+        out = out.merge(proj_name, on="_name_key", how="left")
+        if "Average Projected Fantasy Points Season" in out.columns:
+            proj_season_base = pd.to_numeric(out["Average Projected Fantasy Points Season"], errors="coerce")
+            proj_season_fill = pd.to_numeric(out.get("_name_avg_proj_pts_season"), errors="coerce")
+            out["Average Projected Fantasy Points Season"] = proj_season_base.where(
+                proj_season_base.notna(), proj_season_fill
+            )
+        if "Average Projected Fantasy Points Last 5" in out.columns:
+            proj_last5_base = pd.to_numeric(out["Average Projected Fantasy Points Last 5"], errors="coerce")
+            proj_last5_fill = pd.to_numeric(out.get("_name_avg_proj_pts_last5"), errors="coerce")
+            out["Average Projected Fantasy Points Last 5"] = proj_last5_base.where(proj_last5_base.notna(), proj_last5_fill)
 
     if not ownership_summary_by_name.empty:
         own_name = ownership_summary_by_name.rename(
@@ -940,6 +1002,8 @@ def build_player_review_table(
         "Total Fantasy Points Season",
         "Average Fantasy Points Per Game Last 5",
         "Median Fantasy Points Per Game Last 5",
+        "Average Projected Fantasy Points Season",
+        "Average Projected Fantasy Points Last 5",
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
@@ -969,6 +1033,8 @@ def build_player_review_table(
         "Total Fantasy Points Season",
         "Average Fantasy Points Per Game Last 5",
         "Median Fantasy Points Per Game Last 5",
+        "Average Projected Fantasy Points Season",
+        "Average Projected Fantasy Points Last 5",
         "Average Ownership Season",
         "Average Ownership Last 5 Games",
         "Average DK Salary This Season",
@@ -993,6 +1059,8 @@ def build_player_review_table(
     out = out.drop(
         columns=[
             "_name_key",
+            "_name_avg_proj_pts_season",
+            "_name_avg_proj_pts_last5",
             "_name_avg_own_season",
             "_name_avg_own_last5",
             "_name_own_var_season",
@@ -1018,6 +1086,11 @@ def build_player_review_table(
         if not out.empty and "Average Ownership Season" in out.columns
         else False,
         "has_salary": bool(salary_summary["Average DK Salary This Season"].notna().any()) if not salary_summary.empty else False,
+        "has_projected_points": bool(
+            pd.to_numeric(out.get("Average Projected Fantasy Points Season"), errors="coerce").notna().any()
+        )
+        if not out.empty and "Average Projected Fantasy Points Season" in out.columns
+        else False,
     }
     return out, team_options, meta
 
@@ -1149,7 +1222,15 @@ if player_review_df.empty or not player_review_teams:
 
 universe_label = "DFS-Relevant Only" if str(player_universe_mode).strip().lower().startswith("dfs") else "All Tracked Players"
 st.caption(f"Universe: {universe_label}")
-coverage_cols = [c for c in ["Average Ownership Season", "Average DK Salary This Season"] if c in player_review_df.columns]
+coverage_cols = [
+    c
+    for c in [
+        "Average Ownership Season",
+        "Average DK Salary This Season",
+        "Average Projected Fantasy Points Season",
+    ]
+    if c in player_review_df.columns
+]
 if coverage_cols:
     total_players = int(len(player_review_df))
     own_count = (
@@ -1162,10 +1243,23 @@ if coverage_cols:
         if "Average DK Salary This Season" in coverage_cols
         else 0
     )
-    c1, c2, c3 = st.columns(3)
-    c1.metric("Players in Table", total_players)
-    c2.metric("Ownership Coverage", f"{(100.0 * own_count / float(max(1, total_players))):.1f}%")
-    c3.metric("Salary Coverage", f"{(100.0 * sal_count / float(max(1, total_players))):.1f}%")
+    proj_count = (
+        int(pd.to_numeric(player_review_df.get("Average Projected Fantasy Points Season"), errors="coerce").notna().sum())
+        if "Average Projected Fantasy Points Season" in coverage_cols
+        else 0
+    )
+    coverage_metrics = [
+        ("Players in Table", str(total_players)),
+        ("Ownership Coverage", f"{(100.0 * own_count / float(max(1, total_players))):.1f}%"),
+        ("Salary Coverage", f"{(100.0 * sal_count / float(max(1, total_players))):.1f}%"),
+    ]
+    if "Average Projected Fantasy Points Season" in coverage_cols:
+        coverage_metrics.append(
+            ("Projected Points Coverage", f"{(100.0 * proj_count / float(max(1, total_players))):.1f}%")
+        )
+    coverage_metric_cols = st.columns(len(coverage_metrics))
+    for metric_col, (label, value) in zip(coverage_metric_cols, coverage_metrics):
+        metric_col.metric(label, value)
 
 if all(col in player_review_df.columns for col in ["Average Ownership Season", "Average Ownership Last 5 Games"]):
     own_season = pd.to_numeric(player_review_df["Average Ownership Season"], errors="coerce")
@@ -1204,6 +1298,8 @@ show_cols = [
     "Position",
     "Total Fantasy Points Season",
     past5_points_col,
+    "Average Projected Fantasy Points Season",
+    "Average Projected Fantasy Points Last 5",
     "Average Ownership Season",
     "Average Ownership Last 5 Games",
     "Average DK Salary This Season",
@@ -1226,6 +1322,178 @@ else:
         mime="text/csv",
         key="download_player_review_csv",
     )
+
+st.subheader("Ownership Calibration: Projected Points vs Projected Ownership")
+projected_points_options = [
+    c
+    for c in ["Average Projected Fantasy Points Season", "Average Projected Fantasy Points Last 5"]
+    if c in player_review_df.columns
+]
+if "Average Ownership Season" not in player_review_df.columns or not projected_points_options:
+    st.info("This diagnostic needs projected points and ownership columns from projection snapshots.")
+else:
+    d1, d2, d3, d4 = st.columns(4)
+    own_diag_scope = d1.selectbox(
+        "Scope",
+        options=["All Teams", "Selected Team"],
+        index=0,
+        key="player_review_own_diag_scope",
+    )
+    own_diag_points_col = d2.selectbox(
+        "Projected Points Window",
+        options=projected_points_options,
+        index=0,
+        key="player_review_own_diag_points_window",
+    )
+    own_diag_min_points = float(
+        d3.number_input(
+            "Min Projected Points",
+            min_value=0.0,
+            value=15.0,
+            step=0.5,
+            key="player_review_own_diag_min_points",
+        )
+    )
+    own_diag_max_own = float(
+        d4.number_input(
+            "Max Avg Ownership %",
+            min_value=0.0,
+            max_value=100.0,
+            value=100.0,
+            step=0.5,
+            key="player_review_own_diag_max_own",
+        )
+    )
+
+    own_diag_source = player_review_df.copy()
+    if str(own_diag_scope).strip().lower() == "selected team":
+        own_diag_source = own_diag_source.loc[
+            own_diag_source["Team"].astype(str).str.strip().str.upper() == str(selected_team).strip().upper()
+        ].copy()
+    own_diag_source[own_diag_points_col] = pd.to_numeric(own_diag_source[own_diag_points_col], errors="coerce")
+    own_diag_source["Average Ownership Season"] = pd.to_numeric(
+        own_diag_source["Average Ownership Season"], errors="coerce"
+    )
+    if "Average DK Salary This Season" in own_diag_source.columns:
+        own_diag_source["Average DK Salary This Season"] = pd.to_numeric(
+            own_diag_source["Average DK Salary This Season"], errors="coerce"
+        )
+    own_diag_df = own_diag_source.loc[
+        own_diag_source[own_diag_points_col].notna()
+        & own_diag_source["Average Ownership Season"].notna()
+        & (own_diag_source[own_diag_points_col] >= float(own_diag_min_points))
+        & (own_diag_source["Average Ownership Season"] <= float(own_diag_max_own))
+    ].copy()
+    own_diag_df = own_diag_df.sort_values(
+        [own_diag_points_col, "Average Ownership Season", "Player Name"],
+        ascending=[False, True, True],
+        kind="stable",
+    )
+    st.caption(
+        "Each point is a player-level average from projection snapshots. "
+        "Use this to see whether ownership is scaling appropriately with your projected points."
+    )
+    st.metric("Players in Diagnostic", int(len(own_diag_df)))
+    if own_diag_df.empty:
+        st.info("No players matched the current projected-points and ownership thresholds.")
+    else:
+        corr = own_diag_df[[own_diag_points_col, "Average Ownership Season"]].corr(method="spearman").iloc[0, 1]
+        if pd.notna(corr):
+            st.caption(f"Spearman correlation ({own_diag_points_col} vs ownership): {float(corr):.3f}")
+        fig, ax = plt.subplots(figsize=(10, 5.5))
+        salary_vals = (
+            pd.to_numeric(own_diag_df.get("Average DK Salary This Season"), errors="coerce")
+            if "Average DK Salary This Season" in own_diag_df.columns
+            else pd.Series(dtype=float)
+        )
+        if not salary_vals.empty and salary_vals.notna().any():
+            scatter = ax.scatter(
+                own_diag_df[own_diag_points_col],
+                own_diag_df["Average Ownership Season"],
+                c=salary_vals,
+                cmap="viridis",
+                alpha=0.68,
+                s=36,
+                edgecolors="none",
+            )
+            cbar = fig.colorbar(scatter, ax=ax)
+            cbar.set_label("Avg DK Salary")
+        else:
+            ax.scatter(
+                own_diag_df[own_diag_points_col],
+                own_diag_df["Average Ownership Season"],
+                color="#1f77b4",
+                alpha=0.68,
+                s=36,
+                edgecolors="none",
+            )
+        ax.set_xlabel(own_diag_points_col)
+        ax.set_ylabel("Average Ownership Season (%)")
+        ax.grid(alpha=0.2)
+        st.pyplot(fig, use_container_width=True)
+        plt.close(fig)
+
+        tier_bins = [0.0, 10.0, 15.0, 20.0, 25.0, 30.0, 40.0, float("inf")]
+        tier_labels = ["<10", "10-15", "15-20", "20-25", "25-30", "30-40", "40+"]
+        own_diag_df = own_diag_df.copy()
+        own_diag_df["Projected Points Tier"] = pd.cut(
+            own_diag_df[own_diag_points_col],
+            bins=tier_bins,
+            labels=tier_labels,
+            include_lowest=True,
+            right=False,
+        )
+        tier_summary = (
+            own_diag_df.groupby("Projected Points Tier", observed=False, as_index=False)
+            .agg(
+                Players=("Player Name", "count"),
+                AvgProjectedPoints=(own_diag_points_col, "mean"),
+                AvgOwnershipSeason=("Average Ownership Season", "mean"),
+                MedianOwnershipSeason=("Average Ownership Season", "median"),
+                Under10OwnPct=("Average Ownership Season", lambda s: float((pd.to_numeric(s, errors="coerce") < 10.0).mean() * 100.0)),
+            )
+            .rename(
+                columns={
+                    "AvgProjectedPoints": "Avg Projected Points",
+                    "AvgOwnershipSeason": "Avg Ownership Season (%)",
+                    "MedianOwnershipSeason": "Median Ownership Season (%)",
+                    "Under10OwnPct": "Players Under 10% Own",
+                }
+            )
+        )
+        tier_summary = tier_summary.loc[tier_summary["Players"] > 0].copy()
+        for col in [
+            "Avg Projected Points",
+            "Avg Ownership Season (%)",
+            "Median Ownership Season (%)",
+            "Players Under 10% Own",
+        ]:
+            tier_summary[col] = pd.to_numeric(tier_summary[col], errors="coerce").round(2)
+        st.caption("Ownership distribution by projected-points tier")
+        st.dataframe(tier_summary, hide_index=True, use_container_width=True)
+
+        own_diag_cols = [
+            "Team",
+            "Player Name",
+            "Position",
+            own_diag_points_col,
+            "Average Ownership Season",
+            "Average Ownership Last 5 Games",
+            "Average DK Salary This Season",
+            "Total Fantasy Points Season",
+            past5_points_col,
+            "Ownership Games Season",
+            "Ownership Games Last 5 Window",
+        ]
+        own_diag_cols = [c for c in own_diag_cols if c in own_diag_df.columns]
+        st.dataframe(own_diag_df[own_diag_cols], hide_index=True, use_container_width=True)
+        st.download_button(
+            "Download Projected Points vs Ownership CSV",
+            data=own_diag_df[own_diag_cols].to_csv(index=False),
+            file_name=f"player_review_projected_points_vs_ownership_{start_date.isoformat()}_{end_date.isoformat()}.csv",
+            mime="text/csv",
+            key="download_player_review_projected_points_vs_ownership_csv",
+        )
 
 st.subheader("Low-Owned High-Scoring Targets")
 if not all(col in player_review_df.columns for col in [past5_points_col, "Average Ownership Season"]):
@@ -1348,3 +1616,5 @@ if not bool(player_review_meta.get("has_ownership")):
     st.caption("Note: Ownership columns are unavailable because projection ownership values were not found.")
 if not bool(player_review_meta.get("has_salary")):
     st.caption("Note: Average DK salary is unavailable because salary values were not found.")
+if not bool(player_review_meta.get("has_projected_points")):
+    st.caption("Note: Projected fantasy points are unavailable because projection point columns were not found.")
