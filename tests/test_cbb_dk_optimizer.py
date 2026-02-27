@@ -6,6 +6,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     apply_model_profile_adjustments,
     apply_projection_uncertainty_adjustment,
     apply_projection_calibration,
+    apply_false_chalk_discount,
     apply_minutes_shock_override,
     apply_chalk_ceiling_guardrail,
     apply_ownership_surprise_guardrails,
@@ -15,6 +16,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     enrich_lineups_minutes_from_pool,
     generate_lineups,
     lineups_summary_frame,
+    normalize_projected_ownership_total,
     normalize_injuries_frame,
     ownership_salary_bucket_key,
     projection_salary_bucket_key,
@@ -732,6 +734,38 @@ def test_apply_ownership_surprise_guardrails_raises_triggered_rows() -> None:
     assert float(adjusted.loc[0, "ownership_guardrail_delta"]) > 0.0
 
 
+def test_apply_false_chalk_discount_shrinks_unsupported_high_ownership_and_normalizes_total() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["projected_ownership"] = 12.0
+    pool["ownership_chalk_surge_score"] = 35.0
+    pool["ownership_confidence"] = 0.25
+    pool["field_ownership_pct"] = 6.0
+    pool["minutes_shock_boost_pct"] = 0.0
+    pool["value_per_1k"] = pd.to_numeric(pool.get("value_per_1k"), errors="coerce").fillna(4.0)
+
+    pool.loc[0, "projected_ownership"] = 28.0
+    pool.loc[0, "ownership_chalk_surge_score"] = 24.0
+    pool.loc[0, "ownership_confidence"] = 0.10
+    pool.loc[0, "field_ownership_pct"] = 3.0
+
+    pool.loc[1, "projected_ownership"] = 28.0
+    pool.loc[1, "ownership_chalk_surge_score"] = 95.0
+    pool.loc[1, "ownership_confidence"] = 0.95
+    pool.loc[1, "field_ownership_pct"] = 42.0
+    pool.loc[1, "projected_dk_points"] = float(pd.to_numeric(pool["projected_dk_points"], errors="coerce").max()) + 5.0
+
+    starting_total = float(pd.to_numeric(pool["projected_ownership"], errors="coerce").sum())
+    pool["ownership_target_total"] = starting_total
+    discounted = apply_false_chalk_discount(pool)
+    normalized = normalize_projected_ownership_total(discounted, target_total=starting_total)
+
+    assert bool(normalized.loc[0, "false_chalk_discount_flag"]) is True
+    assert float(normalized.loc[0, "false_chalk_discount_delta"]) > 0.0
+    assert float(normalized.loc[0, "projected_ownership"]) < 28.0
+    assert float(normalized.loc[0, "false_chalk_discount_delta"]) > float(normalized.loc[1, "false_chalk_discount_delta"])
+    assert abs(float(pd.to_numeric(normalized["projected_ownership"], errors="coerce").sum()) - starting_total) <= 1.0
+
+
 def test_apply_model_profile_adjustments_standout_capture_boosts_focus_candidates() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
     scored = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
@@ -753,6 +787,35 @@ def test_apply_model_profile_adjustments_standout_capture_boosts_focus_candidate
     adjusted = apply_model_profile_adjustments(scored, model_profile="standout_capture_v1")
     assert "model_profile_bonus" in adjusted.columns
     assert "model_profile_focus_flag" in adjusted.columns
+    assert float(adjusted.loc[0, "model_profile_bonus"]) > 0.0
+    assert bool(adjusted.loc[0, "model_profile_focus_flag"]) is True
+    assert float(adjusted.loc[0, "objective_score"]) > float(scored.loc[0, "objective_score"])
+
+
+def test_apply_model_profile_adjustments_tail_spike_pairs_boosts_variance_candidates() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    scored = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
+    scored["projected_ownership"] = 16.0
+    scored["game_tail_score"] = 48.0
+    scored["game_tail_to_ownership_pct"] = 0.35
+    scored["leverage_score"] = pd.to_numeric(scored.get("leverage_score"), errors="coerce").fillna(8.0)
+    scored["game_volatility_score"] = 0.28
+    scored["stack_anchor_focus_flag"] = False
+    scored["minutes_shock_boost_pct"] = 3.0
+    scored["projection_uncertainty_score"] = 0.12
+    scored["dnp_risk_score"] = 0.10
+
+    scored.loc[0, "projected_ownership"] = 8.0
+    scored.loc[0, "game_tail_score"] = 97.0
+    scored.loc[0, "game_tail_to_ownership_pct"] = 0.93
+    scored.loc[0, "leverage_score"] = float(pd.to_numeric(scored["leverage_score"], errors="coerce").fillna(0.0).max()) + 5.0
+    scored.loc[0, "game_volatility_score"] = 0.88
+    scored.loc[0, "stack_anchor_focus_flag"] = True
+    scored.loc[0, "minutes_shock_boost_pct"] = 11.0
+    scored.loc[0, "projection_uncertainty_score"] = 0.05
+    scored.loc[0, "dnp_risk_score"] = 0.05
+
+    adjusted = apply_model_profile_adjustments(scored, model_profile="tail_spike_pairs")
     assert float(adjusted.loc[0, "model_profile_bonus"]) > 0.0
     assert bool(adjusted.loc[0, "model_profile_focus_flag"]) is True
     assert float(adjusted.loc[0, "objective_score"]) > float(scored.loc[0, "objective_score"])
@@ -837,11 +900,13 @@ def test_generate_lineups_records_model_profile_in_payload() -> None:
 def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
     pool["projected_ownership"] = 28.0
+    pool["ownership_confidence"] = 0.0
     pool["game_tail_score"] = 40.0
     pool["leverage_score"] = pd.to_numeric(pool["projected_dk_points"], errors="coerce").fillna(0.0)
     low_own_ids = pool.head(4)["ID"].astype(str).tolist()
     pool.loc[pool["ID"].astype(str).isin(low_own_ids), "projected_ownership"] = 7.0
     pool.loc[pool["ID"].astype(str).isin(low_own_ids), "game_tail_score"] = 85.0
+    pool["ownership_target_total"] = float(pd.to_numeric(pool["projected_ownership"], errors="coerce").sum())
 
     requested_lineups = 12
     required_share = 60.0
@@ -858,9 +923,10 @@ def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:
     )
 
     assert len(lineups) == requested_lineups
-    assert warnings == []
+    assert any("Ownership reliability mitigation reduced low-owned forcing" in warning for warning in warnings)
     lineups_with_low_own = sum(1 for lineup in lineups if int(lineup.get("low_own_upside_count") or 0) >= 1)
-    min_expected = int(round((required_share / 100.0) * requested_lineups))
+    scaled_share = required_share * 0.35
+    min_expected = int(round((scaled_share / 100.0) * requested_lineups))
     assert lineups_with_low_own >= min_expected
 
 

@@ -416,6 +416,71 @@ def _allocate_ownership_with_cap(
     return alloc
 
 
+def _ownership_target_total_from_pool(pool_df: pd.DataFrame, fallback_total: float = 800.0) -> float:
+    raw = pool_df.get("ownership_target_total")
+    if isinstance(raw, pd.Series):
+        numeric = pd.to_numeric(raw, errors="coerce").dropna()
+        if not numeric.empty:
+            return max(0.0, float(numeric.iloc[0]))
+    else:
+        numeric = _safe_float(raw)
+        if numeric is not None:
+            return max(0.0, float(numeric))
+    return max(0.0, float(fallback_total))
+
+
+def _recompute_leverage_score(pool_df: pd.DataFrame) -> pd.DataFrame:
+    out = pool_df.copy()
+    if "projected_dk_points" in out.columns and "projected_ownership" in out.columns:
+        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
+        own = pd.to_numeric(out["projected_ownership"], errors="coerce").fillna(0.0)
+        out["leverage_score"] = (proj - (0.15 * own)).round(3)
+    return out
+
+
+def normalize_projected_ownership_total(
+    pool_df: pd.DataFrame,
+    target_total: float | None = None,
+    cap_per_player: float = 100.0,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty or "projected_ownership" not in out.columns:
+        return out
+
+    current = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    current_total = float(current.sum())
+    desired_total = _ownership_target_total_from_pool(out) if target_total is None else max(0.0, float(target_total))
+    out["ownership_total_pre_normalize"] = current_total
+    out["ownership_total_target"] = desired_total
+    if current_total <= 0.0 or desired_total <= 0.0:
+        out["ownership_normalization_scale"] = 1.0
+        return _recompute_leverage_score(out)
+
+    probs = current / current_total
+    normalized = _allocate_ownership_with_cap(
+        probs,
+        target_total=desired_total,
+        cap_per_player=cap_per_player,
+    )
+    norm_total = float(normalized.sum())
+    if norm_total > 0.0 and abs(norm_total - desired_total) > 1e-6:
+        normalized = normalized * (desired_total / norm_total)
+
+    out["ownership_normalization_scale"] = desired_total / current_total
+    out["ownership_total_post_normalize"] = float(normalized.sum())
+    out["projected_ownership"] = normalized.round(2)
+    return _recompute_leverage_score(out)
+
+
+def _ownership_reliability_for_pool(pool_df: pd.DataFrame, default_reliability: float = 0.50) -> float:
+    confidence = pd.to_numeric(pool_df.get("ownership_confidence"), errors="coerce")
+    if confidence is None or confidence.dropna().empty:
+        return max(0.35, min(0.60, float(default_reliability)))
+    median_conf = float(confidence.dropna().median())
+    reliability = 0.20 + (0.60 * median_conf)
+    return max(0.35, min(0.60, reliability))
+
+
 def build_player_pool(
     slate_df: pd.DataFrame,
     props_df: pd.DataFrame | None,
@@ -1259,6 +1324,45 @@ def apply_model_profile_adjustments(
         out["model_profile_focus_flag"] = focus_mask.astype(bool)
         return out
 
+    if profile_key == "tail_spike_pairs":
+        tail_to_own = _numeric_col("game_tail_to_ownership_pct").fillna(0.0).clip(0.0, 1.0)
+        leverage = _numeric_col("leverage_score").fillna(0.0)
+        leverage_pct = _rank_pct_series(leverage)
+        volatility = _numeric_col("game_volatility_score").fillna(0.0).clip(0.0, 1.0)
+        stack_focus = (
+            out.get("stack_anchor_focus_flag", pd.Series([False] * len(out), index=out.index))
+            .map(lambda x: 1.0 if bool(x) else 0.0)
+            .astype(float)
+        )
+        ownership_contrarian_edge = ((18.0 - ownership).clip(lower=0.0) / 18.0).clip(0.0, 1.0)
+        spike_signal = (
+            (0.28 * tail_pct)
+            + (0.18 * tail_to_own)
+            + (0.18 * leverage_pct)
+            + (0.14 * ownership_contrarian_edge)
+            + (0.10 * minutes_boost_pct)
+            + (0.07 * volatility)
+            + (0.05 * stack_focus)
+        ).clip(0.0, 1.0)
+        tail_norm = (tail_score / 100.0).clip(0.0, 1.0)
+        contrarian_shock = (
+            (0.55 * ownership_contrarian_edge * tail_norm)
+            + (0.45 * ((surge / 100.0) * tail_to_own))
+        ).clip(0.0, 1.0)
+        profile_bonus = (
+            (4.4 * spike_signal)
+            + (2.5 * contrarian_shock)
+            - (2.3 * risk_penalty)
+        ).clip(lower=-1.8, upper=7.0)
+        focus_mask = (
+            ((spike_signal >= 0.62) | (contrarian_shock >= 0.36))
+            & (risk_penalty <= 0.75)
+        )
+        out["objective_score"] = (objective + profile_bonus).clip(lower=0.01)
+        out["model_profile_bonus"] = profile_bonus.round(4)
+        out["model_profile_focus_flag"] = focus_mask.astype(bool)
+        return out
+
     if profile_key == "chalk_value_capture_v1":
         stack_pop_norm = (team_stack_popularity / 100.0).clip(0.0, 1.0)
         tier_value_norm = ((tier_value_z + 3.5) / 7.0).clip(0.0, 1.0)
@@ -1439,11 +1543,77 @@ def apply_ownership_surprise_guardrails(
     out["ownership_guardrail_floor"] = implied_floor.round(3)
     out["ownership_guardrail_delta"] = (guardrail_ownership - proj_own).round(3)
     out["projected_ownership"] = guardrail_ownership.round(2)
+    return _recompute_leverage_score(out)
 
-    if "projected_dk_points" in out.columns:
-        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
-        out["leverage_score"] = (proj - (0.15 * out["projected_ownership"])).round(3)
-    return out
+
+def apply_false_chalk_discount(
+    pool_df: pd.DataFrame,
+    projected_ownership_floor: float = 14.0,
+    max_discount_pct: float = 0.42,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    projected_ownership = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce")
+    salary = pd.to_numeric(out.get("Salary"), errors="coerce")
+    value = pd.to_numeric(out.get("value_per_1k"), errors="coerce")
+    surge = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    field_own = pd.to_numeric(
+        out.get("field_ownership_pct", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
+    confidence = pd.to_numeric(
+        out.get("ownership_confidence", pd.Series([0.50] * len(out), index=out.index)),
+        errors="coerce",
+    ).fillna(0.50).clip(lower=0.0, upper=1.0)
+    minutes_boost = pd.to_numeric(out.get("minutes_shock_boost_pct"), errors="coerce").fillna(0.0).clip(lower=0.0)
+
+    proj_pct = _rank_pct_series(projection)
+    value_pct = _rank_pct_series(value)
+    field_pct = _rank_pct_series(field_own)
+    if float(minutes_boost.max()) > 0.0:
+        minutes_pct = (minutes_boost / float(minutes_boost.max())).clip(lower=0.0, upper=1.0)
+    else:
+        minutes_pct = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    surge_norm = (surge / 100.0).clip(lower=0.0, upper=1.0)
+    mid_salary_bias = (1.0 - ((salary - 6700.0).abs() / 4200.0)).clip(lower=0.0, upper=1.0).fillna(0.0)
+
+    support_score = (
+        (0.38 * proj_pct)
+        + (0.22 * surge_norm)
+        + (0.14 * field_pct)
+        + (0.12 * value_pct)
+        + (0.08 * minutes_pct)
+        + (0.06 * mid_salary_bias)
+    ).clip(lower=0.0, upper=1.0)
+
+    own_floor = max(0.0, float(projected_ownership_floor))
+    max_discount = max(0.0, min(0.80, float(max_discount_pct)))
+    high_own_pressure = ((projected_ownership - own_floor).clip(lower=0.0) / max(1.0, (32.0 - own_floor))).clip(0.0, 1.0)
+    support_gap = (1.0 - support_score).clip(lower=0.0, upper=1.0)
+    confidence_gap = (1.0 - confidence).clip(lower=0.0, upper=1.0)
+    false_chalk_risk = (
+        high_own_pressure
+        * support_gap
+        * (0.65 + (0.35 * confidence_gap))
+    ).clip(lower=0.0, upper=1.0)
+
+    baseline_ownership = float(projected_ownership.sum()) / float(max(1, len(out)))
+    adjusted_ownership = baseline_ownership + (
+        (projected_ownership - baseline_ownership)
+        * (1.0 - (max_discount * false_chalk_risk))
+    )
+    adjusted_ownership = adjusted_ownership.clip(lower=0.0, upper=100.0)
+
+    out["false_chalk_discount_score"] = false_chalk_risk.round(4)
+    out["false_chalk_discount_flag"] = (
+        (projected_ownership >= own_floor) & (false_chalk_risk >= 0.18)
+    ).astype(bool)
+    out["false_chalk_discount_delta"] = (projected_ownership - adjusted_ownership).round(3)
+    out["projected_ownership"] = adjusted_ownership.round(2)
+    return _recompute_leverage_score(out)
 
 
 def apply_projection_uncertainty_adjustment(
@@ -1641,11 +1811,7 @@ def apply_chalk_ceiling_guardrail(
     out["chalk_ceiling_guardrail_target"] = projected_floor.round(3)
     out["chalk_ceiling_guardrail_delta"] = (adjusted_ownership - projected_ownership).round(3)
     out["projected_ownership"] = adjusted_ownership.round(2)
-
-    if "projected_dk_points" in out.columns:
-        proj = pd.to_numeric(out["projected_dk_points"], errors="coerce").fillna(0.0)
-        out["leverage_score"] = (proj - (0.15 * out["projected_ownership"])).round(3)
-    return out
+    return _recompute_leverage_score(out)
 
 
 def apply_stack_anchor_bias(
@@ -2059,6 +2225,8 @@ def generate_lineups(
             ownership_floor_cap=ownership_guardrail_floor_cap,
         )
     calibrated = apply_chalk_ceiling_guardrail(calibrated)
+    calibrated = apply_false_chalk_discount(calibrated)
+    calibrated = normalize_projected_ownership_total(calibrated)
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = apply_stack_anchor_bias(scored)
     scored = apply_model_profile_adjustments(scored, model_profile=model_profile)
@@ -2090,13 +2258,32 @@ def generate_lineups(
     else:
         scored["preferred_game_flag"] = False
 
+    warnings: list[str] = []
+    ownership_reliability = _ownership_reliability_for_pool(scored)
     low_own_candidate_ids: set[str] = set()
-    low_own_exposure = max(0.0, min(100.0, float(low_own_bucket_exposure_pct)))
+    requested_low_own_exposure = max(0.0, min(100.0, float(low_own_bucket_exposure_pct)))
+    low_own_exposure = requested_low_own_exposure
     low_own_min_required = max(0, min(ROSTER_SIZE, int(low_own_bucket_min_per_lineup)))
+    requested_low_own_min_required = low_own_min_required
     low_own_ownership_cap_input = max(0.0, float(low_own_bucket_max_projected_ownership))
     low_own_projection_floor_input = max(0.0, float(low_own_bucket_min_projection))
     low_own_tail_floor_input = max(0.0, float(low_own_bucket_min_tail_score))
     low_own_bonus = max(0.0, float(low_own_bucket_objective_bonus))
+    if requested_low_own_exposure > 0.0:
+        low_own_exposure = max(0.0, min(100.0, requested_low_own_exposure * ownership_reliability))
+        if ownership_reliability < 0.55:
+            low_own_min_required = min(low_own_min_required, 1)
+        low_own_bonus = low_own_bonus * ownership_reliability
+        if (
+            abs(low_own_exposure - requested_low_own_exposure) > 1e-6
+            or low_own_min_required != requested_low_own_min_required
+        ):
+            warnings.append(
+                "Ownership reliability mitigation reduced low-owned forcing from "
+                f"{requested_low_own_exposure:.0f}% to {low_own_exposure:.0f}% "
+                f"(min per lineup {requested_low_own_min_required} -> {low_own_min_required}, "
+                f"slate reliability={ownership_reliability:.2f})."
+            )
     if low_own_exposure > 0.0:
         proj = pd.to_numeric(scored.get("projected_dk_points"), errors="coerce").fillna(0.0)
         own = pd.to_numeric(scored.get("projected_ownership"), errors="coerce").fillna(100.0)
@@ -2116,7 +2303,7 @@ def generate_lineups(
             8.0,
             min(low_own_projection_floor_input, dynamic_projection_floor if dynamic_projection_floor > 0.0 else low_own_projection_floor_input),
         )
-        effective_ownership_cap = max(low_own_ownership_cap_input, 14.0)
+        effective_ownership_cap = max(low_own_ownership_cap_input, 14.0 + (3.0 * (1.0 - ownership_reliability)))
         effective_tail_floor = min(low_own_tail_floor_input, 50.0)
         low_own_mask = (
             (own <= effective_ownership_cap)
@@ -2209,7 +2396,6 @@ def generate_lineups(
     exposure_counts: dict[str, int] = {str(p["ID"]): 0 for p in players}
     rng = random.Random(random_seed)
     lineups: list[dict[str, Any]] = []
-    warnings: list[str] = []
 
     if low_own_exposure > 0.0 and low_own_min_required > 0 and not low_own_candidate_ids:
         warnings.append(
