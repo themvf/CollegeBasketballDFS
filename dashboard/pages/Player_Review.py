@@ -34,6 +34,15 @@ PROJECTED_OWNERSHIP_ALIASES = (
     "own_pct",
     "own%",
     "ownership",
+    "actual_ownership",
+    "actual ownership",
+    "field_ownership",
+    "field ownership",
+    "field_ownership_pct",
+    "field ownership pct",
+    "pct_drafted",
+    "pct drafted",
+    "drafted",
     "projected_ownership_v1",
 )
 NULLISH_TEXT_VALUES = {"", "nan", "none", "null"}
@@ -77,40 +86,96 @@ def load_projection_player_totals_dataset(
     frames: list[pd.DataFrame] = []
     dates = iter_dates(start_date, end_date)
     projection_days = 0
+    ownership_days = 0
+    dk_slate_days = 0
+    projection_rows = 0
+    ownership_rows = 0
+    dk_slate_rows = 0
 
     for d in dates:
-        csv_text = store.read_projections_csv(d)
-        if not csv_text or not csv_text.strip():
-            continue
+        day_frames: list[pd.DataFrame] = []
+
+        projection_csv = store.read_projections_csv(d)
+        if projection_csv and projection_csv.strip():
+            try:
+                projection_df = pd.read_csv(io.StringIO(projection_csv))
+            except Exception:
+                projection_df = pd.DataFrame()
+            if not projection_df.empty:
+                projection_days += 1
+                projection_rows += int(len(projection_df))
+                projection_df = projection_df.copy()
+                projection_df["review_date"] = d.isoformat()
+                day_frames.append(projection_df)
+
         try:
-            df = pd.read_csv(io.StringIO(csv_text))
+            ownership_csv = store.read_ownership_csv(d)
         except Exception:
-            continue
-        if df.empty:
-            continue
-        projection_days += 1
-        df = df.copy()
-        df["review_date"] = d.isoformat()
-        frames.append(df)
+            ownership_csv = ""
+        if ownership_csv and ownership_csv.strip():
+            try:
+                ownership_df = pd.read_csv(io.StringIO(ownership_csv))
+            except Exception:
+                ownership_df = pd.DataFrame()
+            if not ownership_df.empty:
+                ownership_days += 1
+                ownership_rows += int(len(ownership_df))
+                ownership_df = ownership_df.copy()
+                ownership_df["review_date"] = d.isoformat()
+                day_frames.append(ownership_df)
+
+        try:
+            dk_slate_csv = store.read_dk_slate_csv(d)
+        except Exception:
+            dk_slate_csv = ""
+        if dk_slate_csv and dk_slate_csv.strip():
+            try:
+                dk_slate_df = pd.read_csv(io.StringIO(dk_slate_csv))
+            except Exception:
+                dk_slate_df = pd.DataFrame()
+            if not dk_slate_df.empty:
+                dk_slate_days += 1
+                dk_slate_rows += int(len(dk_slate_df))
+                dk_slate_df = dk_slate_df.copy()
+                dk_slate_df["review_date"] = d.isoformat()
+                day_frames.append(dk_slate_df)
+
+        frames.extend(day_frames)
 
     if not frames:
         return pd.DataFrame(), {
             "dates_scanned": int(len(dates)),
             "projection_days_found": 0,
+            "ownership_days_found": 0,
+            "dk_slate_days_found": 0,
             "projection_rows": 0,
+            "ownership_rows": 0,
+            "dk_slate_rows": 0,
+            "combined_rows": 0,
         }
 
     out = pd.concat(frames, ignore_index=True)
     return out, {
         "dates_scanned": int(len(dates)),
         "projection_days_found": int(projection_days),
-        "projection_rows": int(len(out)),
+        "ownership_days_found": int(ownership_days),
+        "dk_slate_days_found": int(dk_slate_days),
+        "projection_rows": int(projection_rows),
+        "ownership_rows": int(ownership_rows),
+        "dk_slate_rows": int(dk_slate_rows),
+        "combined_rows": int(len(out)),
     }
 
 
 def _build_actual_results_from_players_frame(players_df: pd.DataFrame) -> pd.DataFrame:
     if players_df is None or players_df.empty:
         return pd.DataFrame()
+
+    def _pick_col(candidates: tuple[str, ...]) -> str | None:
+        for col in candidates:
+            if col in players_df.columns:
+                return col
+        return None
 
     needed = [
         "player_id",
@@ -144,6 +209,20 @@ def _build_actual_results_from_players_frame(players_df: pd.DataFrame) -> pd.Dat
             "tpm": "actual_threes",
         }
     )
+    team_fallback_col = _pick_col(("team_abbrev", "TeamAbbrev", "team", "Team"))
+    if ("team_name" not in out.columns or out["team_name"].isna().all()) and team_fallback_col:
+        out["team_name"] = players_df[team_fallback_col]
+    position_col = _pick_col(("position", "Position", "roster_position", "Roster Position", "pos", "Pos"))
+    if position_col:
+        out["position"] = players_df[position_col]
+    else:
+        out["position"] = pd.NA
+    salary_col = _pick_col(("salary", "Salary", "dk_salary", "dk salary"))
+    if salary_col:
+        out["salary"] = pd.to_numeric(players_df[salary_col], errors="coerce")
+    else:
+        out["salary"] = pd.NA
+
     for col in [
         "actual_minutes",
         "actual_points",
@@ -298,9 +377,12 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
         return pd.DataFrame(columns=cols)
 
     work = df.copy()
-    id_col = _resolve_column_alias(work, ("ID", "id", "player_id", "playerid"))
-    name_col = _resolve_column_alias(work, ("Name", "name", "player_name", "player"))
-    team_col = _resolve_column_alias(work, ("TeamAbbrev", "team_abbrev", "team_name", "team", "Team"))
+    id_col = _resolve_column_alias(work, ("ID", "id", "player_id", "playerid", "dkid", "draftkingsid", "nameid"))
+    name_col = _resolve_column_alias(work, ("Name", "name", "player_name", "player", "athlete"))
+    team_col = _resolve_column_alias(
+        work,
+        ("TeamAbbrev", "team_abbrev", "teamabbr", "teamabbreviation", "team_name", "team", "Team"),
+    )
     position_col = _resolve_column_alias(work, ("Position", "position", "Roster Position", "roster_position", "Pos", "pos"))
     review_date_col = _resolve_column_alias(work, ("review_date", "review date", "slate_date", "game_date", "date"))
     salary_col = _resolve_column_alias(work, ("Salary", "salary", "dk_salary", "dk salary"))
@@ -321,6 +403,10 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
 
     out = pd.DataFrame(index=work.index)
     out["player_id"] = work[id_col] if id_col else ""
+    out["player_id"] = out["player_id"].astype(str).str.strip()
+    # Supports DK exports where "Name + ID" / "nameid" stores "Name (123456)".
+    parsed_id = out["player_id"].str.extract(r"\(([^()]+)\)\s*$")[0]
+    out["player_id"] = parsed_id.where(parsed_id.notna() & (parsed_id.astype(str).str.strip() != ""), out["player_id"])
     out["player_name"] = work[name_col] if name_col else ""
     out["team"] = work[team_col] if team_col else ""
     out["position"] = work[position_col] if position_col else ""
@@ -331,7 +417,6 @@ def _build_player_history_frame(df: pd.DataFrame) -> pd.DataFrame:
     out["projected_ownership"] = _coerce_ownership_series(work[ownership_col]) if ownership_col else pd.NA
     out["row_order"] = pd.RangeIndex(start=0, stop=len(out), step=1)
 
-    out["player_id"] = out["player_id"].astype(str).str.strip()
     out["player_id"] = out["player_id"].where(~out["player_id"].str.lower().isin(NULLISH_TEXT_VALUES), "")
     out["player_id"] = out["player_id"].str.replace(r"\.0+$", "", regex=True)
     out["player_name"] = out["player_name"].astype(str).str.strip()
@@ -730,12 +815,20 @@ with st.spinner("Loading projection snapshots and actual results from GCS..."):
         service_account_json_b64=cred_json_b64,
     )
 
-m1, m2, m3, m4, m5 = st.columns(5)
+m1, m2, m3, m4, m5, m6, m7 = st.columns(7)
 m1.metric("Dates Scanned", int(player_totals_meta.get("dates_scanned") or actual_history_meta.get("dates_scanned") or 0))
 m2.metric("Projection Days", int(player_totals_meta.get("projection_days_found") or 0))
-m3.metric("Actual Player Days", int(actual_history_meta.get("actual_days_found") or 0))
-m4.metric("Projection Rows", int(player_totals_meta.get("projection_rows") or 0))
-m5.metric("Actual Player Rows", int(actual_history_meta.get("actual_rows") or 0))
+m3.metric("Ownership Days", int(player_totals_meta.get("ownership_days_found") or 0))
+m4.metric("DK Slate Days", int(player_totals_meta.get("dk_slate_days_found") or 0))
+m5.metric("Actual Player Days", int(actual_history_meta.get("actual_days_found") or 0))
+m6.metric("Projection Rows", int(player_totals_meta.get("projection_rows") or 0))
+m7.metric("Actual Player Rows", int(actual_history_meta.get("actual_rows") or 0))
+
+if int(player_totals_meta.get("ownership_rows") or 0) or int(player_totals_meta.get("dk_slate_rows") or 0):
+    st.caption(
+        f"Supplemental source rows loaded - Ownership: {int(player_totals_meta.get('ownership_rows') or 0)}, "
+        f"DK Slate: {int(player_totals_meta.get('dk_slate_rows') or 0)}."
+    )
 
 dates_scanned = int(player_totals_meta.get("dates_scanned") or actual_history_meta.get("dates_scanned") or 0)
 projection_days = int(player_totals_meta.get("projection_days_found") or 0)
@@ -743,7 +836,19 @@ if dates_scanned > 0 and projection_days < dates_scanned:
     st.warning(
         f"Projection snapshots were found for {projection_days} of {dates_scanned} scanned dates "
         f"({start_date.isoformat()} to {end_date.isoformat()}). "
-        "Ownership and salary metrics are limited to available projection days."
+        "Player Review now combines projections + ownership + DK slate files to fill missing columns."
+    )
+ownership_days = int(player_totals_meta.get("ownership_days_found") or 0)
+if dates_scanned > 0 and ownership_days < dates_scanned:
+    st.info(
+        f"Ownership files were found for {ownership_days} of {dates_scanned} scanned dates "
+        f"({start_date.isoformat()} to {end_date.isoformat()})."
+    )
+dk_slate_days = int(player_totals_meta.get("dk_slate_days_found") or 0)
+if dates_scanned > 0 and dk_slate_days < dates_scanned:
+    st.info(
+        f"DK slate files were found for {dk_slate_days} of {dates_scanned} scanned dates "
+        f"({start_date.isoformat()} to {end_date.isoformat()})."
     )
 actual_days_found = int(actual_history_meta.get("actual_days_found") or 0)
 if dates_scanned > 0 and actual_days_found < dates_scanned:
