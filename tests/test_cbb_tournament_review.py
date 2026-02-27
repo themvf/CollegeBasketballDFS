@@ -5,6 +5,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_field_entries_and_players,
     build_player_exposure_comparison,
     build_projection_bias_heatmap,
+    build_segment_impact_table,
     build_top10_winner_gap_analysis,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
@@ -207,6 +208,44 @@ def test_build_projection_bias_heatmap_masks_low_sample_cells() -> None:
     assert int(samples.loc["C", "Stud (9.5k+)"]) == 3
     assert pd.isna(avg.loc["SF", "Mid (6.5k-8k)"])
     assert int(samples.loc["SF", "Mid (6.5k-8k)"]) == 1
+
+
+def test_build_segment_impact_table_applies_bias_correction_for_eligible_cells() -> None:
+    comp = pd.DataFrame(
+        [
+            {"Position": "PG", "Salary": 4800, "blend_error": 4.0},
+            {"Position": "PG", "Salary": 4900, "blend_error": 4.0},
+            {"Position": "PG", "Salary": 4700, "blend_error": 4.0},
+            {"Position": "SG", "Salary": 7600, "blend_error": -3.0},
+        ]
+    )
+    out = build_segment_impact_table(comp, error_col="blend_error", min_samples_per_cell=3)
+    assert not out.empty
+    pg = out.loc[out["segment"] == "PG | VALUE"]
+    assert not pg.empty
+    pg_row = pg.iloc[0]
+    assert int(pg_row["samples"]) == 3
+    assert round(float(pg_row["mae_pre"]), 2) == 4.0
+    assert round(float(pg_row["mae_post"]), 2) == 0.0
+    assert round(float(pg_row["mae_delta"]), 2) == -4.0
+    assert round(float(pg_row["bias_pre"]), 2) == 4.0
+    assert round(float(pg_row["bias_post"]), 2) == 0.0
+
+
+def test_build_segment_impact_table_leaves_under_sampled_cells_unchanged() -> None:
+    comp = pd.DataFrame(
+        [
+            {"Position": "C", "Salary": 9800, "blend_error": 5.0},
+            {"Position": "C", "Salary": 9800, "blend_error": 1.0},
+        ]
+    )
+    out = build_segment_impact_table(comp, error_col="blend_error", min_samples_per_cell=3)
+    assert not out.empty
+    row = out.iloc[0]
+    assert str(row["segment"]) == "C | STUD"
+    assert int(row["samples"]) == 2
+    assert round(float(row["mae_delta"]), 2) == 0.0
+    assert round(float(row["bias_post"]), 2) == round(float(row["bias_pre"]), 2)
 
 
 def test_build_field_entries_and_players_builds_salary_left() -> None:

@@ -17,6 +17,13 @@ DIAGNOSTIC_SALARY_BUCKET_LABELS = (
     "Upper (8k-9.5k)",
     "Stud (9.5k+)",
 )
+DIAGNOSTIC_SALARY_BUCKET_KEYS = {
+    "Value (<5k)": "VALUE",
+    "Low Mid (5k-6.5k)": "LOW_MID",
+    "Mid (6.5k-8k)": "MID",
+    "Upper (8k-9.5k)": "UPPER",
+    "Stud (9.5k+)": "STUD",
+}
 DIAGNOSTIC_POSITION_ORDER = ("PG", "SG", "SF", "PF", "C", "UNK")
 PROJECTED_OWNERSHIP_ALIASES = (
     "projected_ownership",
@@ -959,6 +966,84 @@ def build_projection_bias_heatmap(
         "samples_matrix_df": samples_matrix,
         "cells_df": grouped,
     }
+
+
+def build_segment_impact_table(
+    comparison_df: pd.DataFrame | None,
+    *,
+    error_col: str = "blend_error",
+    min_samples_per_cell: int = 1,
+) -> pd.DataFrame:
+    cols = [
+        "segment",
+        "samples",
+        "mae_pre",
+        "mae_post",
+        "mae_delta",
+        "bias_pre",
+        "bias_post",
+        "abs_bias_delta",
+    ]
+    if comparison_df is None or comparison_df.empty or error_col not in comparison_df.columns:
+        return pd.DataFrame(columns=cols)
+
+    work = comparison_df.copy()
+    work["error_value"] = pd.to_numeric(work.get(error_col), errors="coerce")
+    work["Salary"] = pd.to_numeric(work.get("Salary"), errors="coerce")
+    work["salary_bucket"] = work["Salary"].map(_salary_bucket_label)
+    work["salary_bucket_key"] = work["salary_bucket"].map(DIAGNOSTIC_SALARY_BUCKET_KEYS).fillna("")
+    work["primary_position"] = work.get("Position", pd.Series(dtype=str)).map(_primary_position_label)
+    work = work.loc[
+        work["error_value"].notna()
+        & (work["salary_bucket"].astype(str).str.strip() != "")
+        & (work["salary_bucket_key"].astype(str).str.strip() != "")
+    ].copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+
+    work["segment"] = work["primary_position"].astype(str) + " | " + work["salary_bucket_key"].astype(str)
+    grouped_pre = (
+        work.groupby("segment", as_index=False)
+        .agg(
+            samples=("error_value", "count"),
+            mae_pre=("error_value", lambda s: float(pd.to_numeric(s, errors="coerce").abs().mean())),
+            bias_pre=("error_value", "mean"),
+        )
+        .reset_index(drop=True)
+    )
+    grouped_pre["samples"] = pd.to_numeric(grouped_pre["samples"], errors="coerce").fillna(0).astype(int)
+    grouped_pre["mae_pre"] = pd.to_numeric(grouped_pre["mae_pre"], errors="coerce")
+    grouped_pre["bias_pre"] = pd.to_numeric(grouped_pre["bias_pre"], errors="coerce")
+
+    min_n = int(max(1, min_samples_per_cell))
+    eligible_bias = (
+        grouped_pre.loc[grouped_pre["samples"] >= min_n, ["segment", "bias_pre"]]
+        .set_index("segment")["bias_pre"]
+        .to_dict()
+    )
+    work["segment_bias_applied"] = work["segment"].map(eligible_bias).fillna(0.0)
+    work["post_error_value"] = pd.to_numeric(work["error_value"], errors="coerce") - pd.to_numeric(
+        work["segment_bias_applied"], errors="coerce"
+    )
+
+    grouped_post = (
+        work.groupby("segment", as_index=False)
+        .agg(
+            mae_post=("post_error_value", lambda s: float(pd.to_numeric(s, errors="coerce").abs().mean())),
+            bias_post=("post_error_value", "mean"),
+        )
+        .reset_index(drop=True)
+    )
+    grouped_post["mae_post"] = pd.to_numeric(grouped_post["mae_post"], errors="coerce")
+    grouped_post["bias_post"] = pd.to_numeric(grouped_post["bias_post"], errors="coerce")
+
+    out = grouped_pre.merge(grouped_post, on="segment", how="left")
+    out["mae_delta"] = pd.to_numeric(out["mae_post"], errors="coerce") - pd.to_numeric(out["mae_pre"], errors="coerce")
+    out["abs_bias_delta"] = (
+        pd.to_numeric(out["bias_post"], errors="coerce").abs() - pd.to_numeric(out["bias_pre"], errors="coerce").abs()
+    )
+    out = out.sort_values(["samples", "mae_pre"], ascending=[False, False], kind="stable").reset_index(drop=True)
+    return out[cols]
 
 
 def build_user_strategy_summary(entry_summary_df: pd.DataFrame) -> pd.DataFrame:

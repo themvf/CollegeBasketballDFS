@@ -54,6 +54,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_projection_bias_heatmap,
     build_projection_actual_comparison,
     build_projection_adjustment_factors,
+    build_segment_impact_table,
     build_top10_winner_gap_analysis,
     compare_phantom_entries_to_field,
     build_user_strategy_summary,
@@ -6243,6 +6244,33 @@ with tab_tournament_review:
                                     file_name=f"tournament_projection_bias_cells_{tr_date.isoformat()}_{tr_contest_id}.csv",
                                     mime="text/csv",
                                     key="download_tournament_projection_bias_cells_csv",
+                                )
+                            impact_df = build_segment_impact_table(
+                                proj_compare_view,
+                                error_col=error_col,
+                                min_samples_per_cell=diag_min_samples,
+                            )
+                            if not impact_df.empty:
+                                st.caption("Segment impact table (negative delta = improvement)")
+                                impact_show = impact_df.rename(
+                                    columns={
+                                        "segment": "Segment",
+                                        "samples": "Samples",
+                                        "mae_pre": "MAE Pre",
+                                        "mae_post": "MAE Post",
+                                        "mae_delta": "MAE Delta",
+                                        "bias_pre": "Bias Pre",
+                                        "bias_post": "Bias Post",
+                                        "abs_bias_delta": "Abs Bias Delta",
+                                    }
+                                )
+                                st.dataframe(impact_show, hide_index=True, use_container_width=True)
+                                st.download_button(
+                                    "Download Segment Impact CSV",
+                                    data=impact_show.to_csv(index=False),
+                                    file_name=f"tournament_segment_impact_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                                    mime="text/csv",
+                                    key="download_tournament_segment_impact_csv",
                                 )
 
                         adjust_df = build_projection_adjustment_factors(proj_compare_df)
