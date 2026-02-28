@@ -664,6 +664,154 @@ def _ownership_reliability_for_pool(pool_df: pd.DataFrame, default_reliability: 
     return max(0.35, min(0.60, reliability))
 
 
+def build_game_focus_summary(pool_df: pd.DataFrame) -> pd.DataFrame:
+    cols = [
+        "game_key",
+        "player_count",
+        "team_count",
+        "projected_points_sum",
+        "projected_points_mean",
+        "projected_ownership_mean",
+        "historical_ownership_mean",
+        "game_tail_score_mean",
+        "game_total_line",
+        "game_spread_abs",
+        "value_per_1k_mean",
+        "team_stack_popularity_mean",
+        "minutes_shock_boost_mean",
+        "cheap_value_rate",
+        "game_stack_focus_score",
+        "game_stack_focus_rank",
+        "game_stack_focus_flag",
+        "recommended_stack_size",
+    ]
+    if pool_df.empty or "game_key" not in pool_df.columns:
+        return pd.DataFrame(columns=cols)
+
+    work = pool_df.copy()
+    work["game_key"] = work["game_key"].astype(str).str.strip().str.upper()
+    work = work.loc[work["game_key"] != ""].copy()
+    if work.empty:
+        return pd.DataFrame(columns=cols)
+
+    work["projected_dk_points"] = pd.to_numeric(work.get("projected_dk_points"), errors="coerce")
+    work["projected_ownership"] = pd.to_numeric(work.get("projected_ownership"), errors="coerce")
+    work["historical_ownership_baseline"] = pd.to_numeric(work.get("historical_ownership_baseline"), errors="coerce")
+    work["game_tail_score"] = pd.to_numeric(work.get("game_tail_score"), errors="coerce")
+    work["game_total_line"] = pd.to_numeric(work.get("game_total_line"), errors="coerce")
+    work["game_spread_abs"] = pd.to_numeric(
+        work.get("game_spread_line", pd.Series([pd.NA] * len(work), index=work.index)),
+        errors="coerce",
+    ).abs()
+    work["value_per_1k"] = pd.to_numeric(work.get("value_per_1k"), errors="coerce")
+    work["team_stack_popularity_score"] = pd.to_numeric(work.get("team_stack_popularity_score"), errors="coerce")
+    work["minutes_shock_boost_pct"] = pd.to_numeric(work.get("minutes_shock_boost_pct"), errors="coerce")
+    work["Salary"] = pd.to_numeric(work.get("Salary"), errors="coerce")
+    work["_cheap_value_flag"] = (
+        (work["Salary"].fillna(99999.0) < 5500.0)
+        & (work["value_per_1k"].fillna(0.0) >= 4.6)
+    ).astype(float)
+    work["_player_id"] = work.get("ID", pd.Series(work.index, index=work.index)).astype(str)
+    work["_team_norm"] = work.get("TeamAbbrev", pd.Series([""] * len(work), index=work.index)).astype(str).str.strip().str.upper()
+
+    summary = (
+        work.groupby("game_key", as_index=False)
+        .agg(
+            player_count=("_player_id", "nunique"),
+            team_count=("_team_norm", lambda s: int(s.loc[s.astype(str).str.strip() != ""].nunique())),
+            projected_points_sum=("projected_dk_points", "sum"),
+            projected_points_mean=("projected_dk_points", "mean"),
+            projected_ownership_mean=("projected_ownership", "mean"),
+            historical_ownership_mean=("historical_ownership_baseline", "mean"),
+            game_tail_score_mean=("game_tail_score", "mean"),
+            game_total_line=("game_total_line", "median"),
+            game_spread_abs=("game_spread_abs", "median"),
+            value_per_1k_mean=("value_per_1k", "mean"),
+            team_stack_popularity_mean=("team_stack_popularity_score", "mean"),
+            minutes_shock_boost_mean=("minutes_shock_boost_pct", "mean"),
+            cheap_value_rate=("_cheap_value_flag", "mean"),
+        )
+    )
+    if summary.empty:
+        return pd.DataFrame(columns=cols)
+
+    projected_sum_pct = _rank_pct_series(summary["projected_points_sum"])
+    tail_pct = _rank_pct_series(summary["game_tail_score_mean"])
+    historical_pct = _rank_pct_series(summary["historical_ownership_mean"])
+    projected_own_pct = _rank_pct_series(summary["projected_ownership_mean"])
+    value_pct = _rank_pct_series(summary["value_per_1k_mean"])
+    team_stack_pct = _rank_pct_series(summary["team_stack_popularity_mean"])
+    cheap_value_pct = _rank_pct_series(summary["cheap_value_rate"])
+    minutes_pct = _rank_pct_series(summary["minutes_shock_boost_mean"])
+    total_pct = _rank_pct_series(summary["game_total_line"])
+    tight_spread_pct = pd.to_numeric(summary["game_spread_abs"], errors="coerce").rank(
+        method="average",
+        pct=True,
+        ascending=False,
+    ).fillna(0.0)
+    focus_score = (
+        (0.24 * projected_sum_pct)
+        + (0.17 * tail_pct)
+        + (0.14 * historical_pct)
+        + (0.11 * projected_own_pct)
+        + (0.10 * team_stack_pct)
+        + (0.09 * value_pct)
+        + (0.05 * cheap_value_pct)
+        + (0.04 * minutes_pct)
+        + (0.04 * total_pct)
+        + (0.02 * tight_spread_pct)
+    ).clip(lower=0.0, upper=1.0)
+    summary["game_stack_focus_score"] = (100.0 * focus_score).round(3)
+    summary = summary.sort_values(
+        ["game_stack_focus_score", "projected_points_sum", "game_tail_score_mean"],
+        ascending=[False, False, False],
+        kind="stable",
+    ).reset_index(drop=True)
+    summary["game_stack_focus_rank"] = summary.index + 1
+    summary["game_stack_focus_flag"] = summary["game_stack_focus_rank"] <= min(2, len(summary))
+    summary["recommended_stack_size"] = summary["team_count"].map(
+        lambda x: 3 if int(_safe_num(x, 0.0)) >= 2 else 2
+    ).astype(int)
+    return summary[cols]
+
+
+def recommended_focus_stack_settings(
+    pool_df: pd.DataFrame,
+    contest_type: str,
+    focus_game_count: int = 2,
+) -> dict[str, Any]:
+    summary = build_game_focus_summary(pool_df)
+    focus_count = max(0, int(focus_game_count))
+    if focus_count <= 0 or summary.empty:
+        return {
+            "preferred_game_keys": [],
+            "stack_lineup_pct": 0.0,
+            "min_players": 0,
+            "slate_game_count": 0,
+            "focus_summary": summary,
+        }
+
+    preferred_game_keys = summary.head(focus_count)["game_key"].astype(str).tolist()
+    slate_game_count = int(summary["game_key"].nunique())
+    contest_norm = str(contest_type or "").strip().lower()
+    if contest_norm == "cash":
+        stack_lineup_pct = 0.0
+    elif contest_norm == "small gpp":
+        stack_lineup_pct = 50.0
+    else:
+        stack_lineup_pct = 60.0
+    if slate_game_count > 0 and slate_game_count <= 4 and stack_lineup_pct > 0.0:
+        stack_lineup_pct = min(80.0, stack_lineup_pct + 10.0)
+    min_players = 0 if stack_lineup_pct <= 0.0 else (3 if slate_game_count <= 4 else 2)
+    return {
+        "preferred_game_keys": preferred_game_keys,
+        "stack_lineup_pct": float(stack_lineup_pct),
+        "min_players": int(min_players),
+        "slate_game_count": slate_game_count,
+        "focus_summary": summary,
+    }
+
+
 def build_player_pool(
     slate_df: pd.DataFrame,
     props_df: pd.DataFrame | None,
@@ -1332,6 +1480,26 @@ def build_player_pool(
     out["game_tail_score"] = (
         100.0 * ((0.45 * p12) + (0.25 * p8) + (0.15 * vol_pct) + (0.15 * ratio_pct))
     ).round(3)
+    game_focus_summary = build_game_focus_summary(out)
+    if not game_focus_summary.empty:
+        out = out.merge(
+            game_focus_summary[
+                [
+                    "game_key",
+                    "game_stack_focus_score",
+                    "game_stack_focus_rank",
+                    "game_stack_focus_flag",
+                    "recommended_stack_size",
+                ]
+            ],
+            on="game_key",
+            how="left",
+        )
+    else:
+        out["game_stack_focus_score"] = 0.0
+        out["game_stack_focus_rank"] = pd.NA
+        out["game_stack_focus_flag"] = False
+        out["recommended_stack_size"] = 2
 
     out["low_own_ceiling_flag"] = (
         (
@@ -1714,6 +1882,13 @@ def apply_ownership_surprise_guardrails(
     surge_score = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0)
     projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce")
     projection_rank = projection.rank(method="average", pct=True).fillna(0.0)
+    focus_score = pd.to_numeric(out.get("game_stack_focus_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    focus_flag = (
+        out.get("game_stack_focus_flag", pd.Series([False] * len(out), index=out.index))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
+    historical_baseline = pd.to_numeric(out.get("historical_ownership_baseline"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
 
     own_threshold = max(0.0, float(projected_ownership_threshold))
     surge_threshold = max(0.0, min(100.0, float(surge_score_threshold)))
@@ -1721,19 +1896,102 @@ def apply_ownership_surprise_guardrails(
     floor_base = max(0.0, float(ownership_floor_base))
     floor_cap = max(floor_base, float(ownership_floor_cap))
 
-    candidate_mask = (
+    base_candidate_mask = (
         (proj_own <= own_threshold)
         & (surge_score >= surge_threshold)
         & (projection_rank >= proj_rank_threshold)
     )
+    focus_candidate_mask = (
+        focus_flag
+        & (projection_rank >= max(0.35, proj_rank_threshold - 0.18))
+        & (focus_score >= 70.0)
+        & (historical_baseline >= max(floor_base, own_threshold))
+        & (proj_own <= max(own_threshold + 8.0, floor_base + 4.0))
+    )
+    candidate_mask = base_candidate_mask | focus_candidate_mask
     normalized_surge = ((surge_score - surge_threshold).clip(lower=0.0) / max(1.0, (100.0 - surge_threshold))).clip(0.0, 1.0)
-    implied_floor = (floor_base + (normalized_surge * (floor_cap - floor_base))).clip(lower=floor_base, upper=floor_cap)
-    guardrail_ownership = proj_own.where(~candidate_mask, proj_own.combine(implied_floor, max))
+    focus_norm = (focus_score / 100.0).clip(lower=0.0, upper=1.0)
+    hist_norm = (historical_baseline / max(1.0, floor_cap)).clip(lower=0.0, upper=1.0)
+    guardrail_strength = ((0.60 * normalized_surge) + (0.25 * focus_norm) + (0.15 * hist_norm)).clip(lower=0.0, upper=1.0)
+    implied_floor = (floor_base + (guardrail_strength * (floor_cap - floor_base))).clip(lower=floor_base, upper=floor_cap)
+    historical_floor = (historical_baseline * (0.88 + (0.12 * focus_norm))).clip(lower=0.0, upper=floor_cap)
+    guardrail_target = pd.concat([implied_floor, historical_floor], axis=1).max(axis=1)
+    guardrail_ownership = proj_own.where(~candidate_mask, proj_own.combine(guardrail_target, max))
 
     out["ownership_guardrail_flag"] = candidate_mask.map(lambda x: bool(x))
     out["ownership_guardrail_floor"] = implied_floor.round(3)
     out["ownership_guardrail_delta"] = (guardrail_ownership - proj_own).round(3)
     out["projected_ownership"] = guardrail_ownership.round(2)
+    return _recompute_leverage_score(out)
+
+
+def apply_focus_game_chalk_guardrail(
+    pool_df: pd.DataFrame,
+    projected_ownership_threshold: float = 18.0,
+    projection_rank_threshold: float = 0.45,
+    floor_base: float = 14.0,
+    floor_cap: float = 32.0,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    projected_ownership = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce")
+    projection_rank = projection.rank(method="average", pct=True).fillna(0.0)
+    focus_score = pd.to_numeric(out.get("game_stack_focus_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    focus_flag = (
+        out.get("game_stack_focus_flag", pd.Series([False] * len(out), index=out.index))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
+    historical_baseline = pd.to_numeric(out.get("historical_ownership_baseline"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    team_stack = pd.to_numeric(out.get("team_stack_popularity_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    surge = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    minutes_boost = pd.to_numeric(out.get("minutes_shock_boost_pct"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    if float(minutes_boost.max()) > 0.0:
+        minutes_norm = (minutes_boost / float(minutes_boost.max())).clip(lower=0.0, upper=1.0)
+    else:
+        minutes_norm = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+
+    focus_norm = (focus_score / 100.0).clip(lower=0.0, upper=1.0)
+    historical_norm = (historical_baseline / max(1.0, float(floor_cap))).clip(lower=0.0, upper=1.0)
+    team_stack_norm = (team_stack / 100.0).clip(lower=0.0, upper=1.0)
+    surge_norm = (surge / 100.0).clip(lower=0.0, upper=1.0)
+
+    support_score = (
+        (0.36 * focus_norm)
+        + (0.24 * historical_norm)
+        + (0.18 * team_stack_norm)
+        + (0.12 * surge_norm)
+        + (0.10 * minutes_norm)
+    ).clip(lower=0.0, upper=1.0)
+    candidate_mask = (
+        focus_flag
+        & (projection_rank >= max(0.0, min(1.0, float(projection_rank_threshold))))
+        & (historical_baseline >= floor_base)
+        & (projected_ownership <= max(0.0, float(projected_ownership_threshold)))
+    )
+    target_floor = (floor_base + (support_score * (max(floor_base, float(floor_cap)) - floor_base))).clip(lower=floor_base, upper=floor_cap)
+    historical_floor = (historical_baseline * (0.92 + (0.08 * focus_norm))).clip(lower=0.0, upper=floor_cap)
+    adjusted_ownership = projected_ownership.copy()
+    adjusted_ownership.loc[candidate_mask] = (
+        pd.concat(
+            [
+                projected_ownership.loc[candidate_mask],
+                target_floor.loc[candidate_mask],
+                historical_floor.loc[candidate_mask],
+            ],
+            axis=1,
+        )
+        .max(axis=1)
+        .clip(lower=0.0, upper=floor_cap)
+    )
+
+    out["focus_game_chalk_guardrail_flag"] = candidate_mask.astype(bool)
+    out["focus_game_chalk_guardrail_target"] = target_floor.round(3)
+    out["focus_game_chalk_guardrail_delta"] = (adjusted_ownership - projected_ownership).round(3)
+    out["projected_ownership"] = adjusted_ownership.round(2)
     return _recompute_leverage_score(out)
 
 
@@ -1760,24 +2018,30 @@ def apply_false_chalk_discount(
         errors="coerce",
     ).fillna(0.50).clip(lower=0.0, upper=1.0)
     minutes_boost = pd.to_numeric(out.get("minutes_shock_boost_pct"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    historical_baseline = pd.to_numeric(out.get("historical_ownership_baseline"), errors="coerce").fillna(0.0)
+    focus_score = pd.to_numeric(out.get("game_stack_focus_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
 
     proj_pct = _rank_pct_series(projection)
     value_pct = _rank_pct_series(value)
     field_pct = _rank_pct_series(field_own)
+    hist_pct = _rank_pct_series(historical_baseline)
     if float(minutes_boost.max()) > 0.0:
         minutes_pct = (minutes_boost / float(minutes_boost.max())).clip(lower=0.0, upper=1.0)
     else:
         minutes_pct = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
     surge_norm = (surge / 100.0).clip(lower=0.0, upper=1.0)
     mid_salary_bias = (1.0 - ((salary - 6700.0).abs() / 4200.0)).clip(lower=0.0, upper=1.0).fillna(0.0)
+    focus_norm = (focus_score / 100.0).clip(lower=0.0, upper=1.0)
 
     support_score = (
-        (0.38 * proj_pct)
-        + (0.22 * surge_norm)
-        + (0.14 * field_pct)
-        + (0.12 * value_pct)
+        (0.30 * proj_pct)
+        + (0.16 * surge_norm)
+        + (0.12 * field_pct)
+        + (0.10 * value_pct)
         + (0.08 * minutes_pct)
         + (0.06 * mid_salary_bias)
+        + (0.10 * hist_pct)
+        + (0.08 * focus_norm)
     ).clip(lower=0.0, upper=1.0)
 
     own_floor = max(0.0, float(projected_ownership_floor))
@@ -1942,24 +2206,30 @@ def apply_chalk_ceiling_guardrail(
         errors="coerce",
     )
     minutes_boost = pd.to_numeric(out.get("minutes_shock_boost_pct"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    historical_baseline = pd.to_numeric(out.get("historical_ownership_baseline"), errors="coerce").fillna(0.0)
+    focus_score = pd.to_numeric(out.get("game_stack_focus_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
 
     proj_pct = _rank_pct_series(projection)
     value_pct = _rank_pct_series(value)
     field_pct = _rank_pct_series(field_own)
+    hist_pct = _rank_pct_series(historical_baseline)
     surge_norm = (surge / 100.0).clip(lower=0.0, upper=1.0)
     if float(minutes_boost.max()) > 0.0:
         minutes_norm = (minutes_boost / float(minutes_boost.max())).clip(lower=0.0, upper=1.0)
     else:
         minutes_norm = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
     mid_salary_score = (1.0 - ((salary - 6500.0).abs() / 4000.0)).clip(lower=0.0, upper=1.0).fillna(0.0)
+    focus_norm = (focus_score / 100.0).clip(lower=0.0, upper=1.0)
 
     archetype_score = (
-        (0.34 * proj_pct)
-        + (0.20 * value_pct)
-        + (0.16 * surge_norm)
-        + (0.14 * minutes_norm)
-        + (0.10 * mid_salary_score)
-        + (0.06 * field_pct)
+        (0.30 * proj_pct)
+        + (0.18 * value_pct)
+        + (0.14 * surge_norm)
+        + (0.12 * minutes_norm)
+        + (0.08 * mid_salary_score)
+        + (0.08 * field_pct)
+        + (0.06 * hist_pct)
+        + (0.04 * focus_norm)
     ).clip(lower=0.0, upper=1.0)
 
     floor_min = max(0.0, float(min_floor))
@@ -2024,6 +2294,10 @@ def apply_stack_anchor_bias(
         return out
 
     game_norm = game_key.map(lambda x: str(x or "").strip().upper())
+    focus_score = pd.to_numeric(
+        out.get("game_stack_focus_score", pd.Series([pd.NA] * len(out), index=out.index)),
+        errors="coerce",
+    )
     totals = pd.to_numeric(
         out.get("game_total_line", pd.Series([pd.NA] * len(out), index=out.index)),
         errors="coerce",
@@ -2032,7 +2306,9 @@ def apply_stack_anchor_bias(
         out.get("game_tail_score", pd.Series([pd.NA] * len(out), index=out.index)),
         errors="coerce",
     ).fillna(0.0)
-    if totals.notna().any():
+    if focus_score.notna().any():
+        game_metric = focus_score.groupby(game_norm).mean()
+    elif totals.notna().any():
         game_metric = totals.groupby(game_norm).median()
     elif tail.notna().any():
         game_metric = tail.groupby(game_norm).mean()
@@ -2136,6 +2412,48 @@ def _stack_bonus_from_counts(game_counts: Counter[str]) -> float:
     return float(sum(max(0, n - 1) for n in game_counts.values()))
 
 
+def _preferred_game_stack_size(players: list[dict[str, Any]], preferred_games: set[str]) -> int:
+    if not players or not preferred_games:
+        return 0
+    counts: Counter[str] = Counter(
+        str(p.get("game_key") or "").strip().upper()
+        for p in players
+        if str(p.get("game_key") or "").strip().upper() in preferred_games
+    )
+    return int(max(counts.values(), default=0))
+
+
+def _preferred_game_stack_total(players: list[dict[str, Any]], preferred_games: set[str]) -> int:
+    if not players or not preferred_games:
+        return 0
+    return int(
+        sum(1 for p in players if str(p.get("game_key") or "").strip().upper() in preferred_games)
+    )
+
+
+def _can_still_hit_preferred_stack(
+    selected: list[dict[str, Any]],
+    candidate_game_key: str,
+    preferred_games: set[str],
+    required_count: int,
+    remaining_player_count_after_pick: int,
+) -> bool:
+    required = max(0, int(required_count))
+    if required <= 0 or not preferred_games:
+        return True
+    counts: Counter[str] = Counter(
+        str(p.get("game_key") or "").strip().upper()
+        for p in selected
+        if str(p.get("game_key") or "").strip().upper() in preferred_games
+    )
+    normalized_candidate = str(candidate_game_key or "").strip().upper()
+    if normalized_candidate in preferred_games:
+        counts[normalized_candidate] += 1
+    current_best = max(counts.values(), default=0)
+    possible_best = current_best + max(0, int(remaining_player_count_after_pick))
+    return bool(possible_best >= required)
+
+
 def _distributed_lineup_indices(
     total_lineups: int,
     target_count: int,
@@ -2234,6 +2552,7 @@ def _build_cluster_specs(
                 "projected": [],
                 "ownership": [],
                 "tail": [],
+                "focus": [],
                 "total": [],
                 "spread_abs": [],
             },
@@ -2241,6 +2560,7 @@ def _build_cluster_specs(
         bucket["projected"].append(_safe_num(p.get("projected_dk_points")))
         bucket["ownership"].append(_safe_num(p.get("projected_ownership")))
         bucket["tail"].append(_safe_num(p.get("game_tail_score")))
+        bucket["focus"].append(_safe_num(p.get("game_stack_focus_score")))
         total_line = _safe_float(p.get("game_total_line"))
         spread_line = _safe_float(p.get("game_spread_line"))
         if total_line is not None and not math.isnan(total_line):
@@ -2263,6 +2583,7 @@ def _build_cluster_specs(
         projected = values["projected"] or [0.0]
         ownership = values["ownership"] or [0.0]
         tail = values["tail"] or [0.0]
+        focus = values["focus"] or [0.0]
         totals = values["total"]
         spreads = values["spread_abs"]
         metric_rows.append(
@@ -2271,14 +2592,15 @@ def _build_cluster_specs(
                 "projected_mean": float(sum(projected) / len(projected)),
                 "ownership_mean": float(sum(ownership) / len(ownership)),
                 "tail_mean": float(sum(tail) / len(tail)),
+                "focus_mean": float(sum(focus) / len(focus)),
                 "total_mean": float(sum(totals) / len(totals)) if totals else 0.0,
                 "spread_abs_mean": float(sum(spreads) / len(spreads)) if spreads else 999.0,
             }
         )
 
     metrics = pd.DataFrame(metric_rows)
-    metrics["leverage_score"] = metrics["tail_mean"] - (0.35 * metrics["ownership_mean"])
-    metrics["contrarian_score"] = metrics["projected_mean"] - (0.5 * metrics["ownership_mean"])
+    metrics["leverage_score"] = metrics["tail_mean"] + (0.15 * metrics["focus_mean"]) - (0.35 * metrics["ownership_mean"])
+    metrics["contrarian_score"] = metrics["projected_mean"] + (0.10 * metrics["focus_mean"]) - (0.5 * metrics["ownership_mean"])
 
     unique_games = int(len(metrics))
     desired_clusters = max(1, int(math.ceil(float(num_lineups) / max(1, int(variants_per_cluster)))))
@@ -2286,19 +2608,19 @@ def _build_cluster_specs(
 
     pools: dict[str, list[str]] = {
         "high_total": (
-            metrics.sort_values(["total_mean", "projected_mean"], ascending=[False, False])["game_key"].tolist()
+            metrics.sort_values(["total_mean", "focus_mean", "projected_mean"], ascending=[False, False, False])["game_key"].tolist()
         ),
         "tight_spread": (
-            metrics.sort_values(["spread_abs_mean", "total_mean"], ascending=[True, False])["game_key"].tolist()
+            metrics.sort_values(["spread_abs_mean", "focus_mean", "total_mean"], ascending=[True, False, False])["game_key"].tolist()
         ),
         "tail_leverage": (
-            metrics.sort_values(["leverage_score", "tail_mean"], ascending=[False, False])["game_key"].tolist()
+            metrics.sort_values(["leverage_score", "focus_mean", "tail_mean"], ascending=[False, False, False])["game_key"].tolist()
         ),
         "contrarian": (
-            metrics.sort_values(["ownership_mean", "contrarian_score"], ascending=[True, False])["game_key"].tolist()
+            metrics.sort_values(["ownership_mean", "focus_mean", "contrarian_score"], ascending=[True, False, False])["game_key"].tolist()
         ),
         "balanced": (
-            metrics.sort_values(["projected_mean", "tail_mean"], ascending=[False, False])["game_key"].tolist()
+            metrics.sort_values(["focus_mean", "projected_mean", "tail_mean"], ascending=[False, False, False])["game_key"].tolist()
         ),
     }
     script_cycle = ["high_total", "tight_spread", "tail_leverage", "contrarian", "balanced"]
@@ -2372,6 +2694,9 @@ def generate_lineups(
     low_own_bucket_objective_bonus: float = 0.0,
     preferred_game_keys: list[str] | None = None,
     preferred_game_bonus: float = 0.0,
+    preferred_game_stack_lineup_pct: float = 0.0,
+    preferred_game_stack_min_players: int = 0,
+    auto_preferred_game_count: int = 2,
     ceiling_boost_lineup_pct: float = 0.0,
     ceiling_boost_stack_bonus: float = 0.0,
     ceiling_boost_salary_left_target: int | None = None,
@@ -2415,6 +2740,7 @@ def generate_lineups(
             ownership_floor_base=ownership_guardrail_floor_base,
             ownership_floor_cap=ownership_guardrail_floor_cap,
         )
+    calibrated = apply_focus_game_chalk_guardrail(calibrated)
     calibrated = apply_chalk_ceiling_guardrail(calibrated)
     calibrated = apply_false_chalk_discount(calibrated)
     calibrated = normalize_projected_ownership_total(calibrated)
@@ -2438,6 +2764,29 @@ def generate_lineups(
         if str(key or "").strip()
     }
     preferred_game_bonus_value = max(0.0, float(preferred_game_bonus))
+    preferred_game_stack_lineup_pct_value = max(0.0, min(100.0, float(preferred_game_stack_lineup_pct)))
+    preferred_game_stack_min_players_value = max(0, min(ROSTER_SIZE, int(preferred_game_stack_min_players)))
+    focus_settings = recommended_focus_stack_settings(
+        scored,
+        contest_type,
+        focus_game_count=max(0, int(auto_preferred_game_count)),
+    )
+    if (
+        not preferred_games
+        and max(0, int(auto_preferred_game_count)) > 0
+        and (
+            preferred_game_bonus_value > 0.0
+            or preferred_game_stack_lineup_pct_value > 0.0
+            or preferred_game_stack_min_players_value > 0
+        )
+    ):
+        preferred_games = {
+            str(key or "").strip().upper()
+            for key in (focus_settings.get("preferred_game_keys") or [])
+            if str(key or "").strip()
+        }
+    if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value <= 0:
+        preferred_game_stack_min_players_value = int(focus_settings.get("min_players") or 0)
     if preferred_games and preferred_game_bonus_value > 0.0 and "game_key" in scored.columns:
         scored["game_key_norm"] = scored["game_key"].map(lambda x: str(x or "").strip().upper().split(" ")[0])
         preferred_mask = scored["game_key_norm"].isin(preferred_games)
@@ -2450,6 +2799,12 @@ def generate_lineups(
         scored["preferred_game_flag"] = False
 
     warnings: list[str] = []
+    if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value > 0:
+        warnings.append(
+            "Focus-game stack guardrails active: "
+            f"{preferred_game_stack_lineup_pct_value:.0f}% of lineups require >= {preferred_game_stack_min_players_value} players "
+            f"from one of {', '.join(sorted(preferred_games))}."
+        )
     ownership_reliability = _ownership_reliability_for_pool(scored)
     low_own_candidate_ids: set[str] = set()
     requested_low_own_exposure = max(0.0, min(100.0, float(low_own_bucket_exposure_pct)))
@@ -2531,6 +2886,9 @@ def generate_lineups(
         scored["low_own_upside_flag"] = False
         scored["low_own_upside_v2_score"] = 0.0
 
+    if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value <= 0:
+        preferred_game_stack_min_players_value = 2
+
     min_salary_used = SALARY_CAP - int(max(0, max_salary_left if max_salary_left is not None else SALARY_CAP))
     salary_target = None if salary_left_target is None else max(0, min(SALARY_CAP, int(salary_left_target)))
     ceiling_salary_target = (
@@ -2604,6 +2962,21 @@ def generate_lineups(
             buckets=10,
         )
 
+    target_preferred_stack_lineups = int(round((preferred_game_stack_lineup_pct_value / 100.0) * float(num_lineups)))
+    target_preferred_stack_lineups = max(0, min(num_lineups, target_preferred_stack_lineups))
+    preferred_stack_required_indices: set[int] = set()
+    if (
+        target_preferred_stack_lineups > 0
+        and preferred_game_stack_min_players_value > 0
+        and preferred_games
+    ):
+        preferred_stack_required_indices = _distributed_lineup_indices(
+            total_lineups=num_lineups,
+            target_count=target_preferred_stack_lineups,
+            rng=rng,
+            buckets=10,
+        )
+
     ceiling_pct = max(0.0, min(100.0, float(ceiling_boost_lineup_pct)))
     target_ceiling_lineups = int(round((ceiling_pct / 100.0) * float(num_lineups)))
     target_ceiling_lineups = max(0, min(num_lineups, target_ceiling_lineups))
@@ -2653,9 +3026,16 @@ def generate_lineups(
         "ownership_chalk_surge_score",
         "ownership_chalk_surge_flag",
         "ownership_confidence",
+        "game_stack_focus_score",
+        "game_stack_focus_rank",
+        "game_stack_focus_flag",
+        "recommended_stack_size",
         "ownership_guardrail_flag",
         "ownership_guardrail_floor",
         "ownership_guardrail_delta",
+        "focus_game_chalk_guardrail_flag",
+        "focus_game_chalk_guardrail_target",
+        "focus_game_chalk_guardrail_delta",
         "chalk_ceiling_guardrail_flag",
         "chalk_ceiling_guardrail_target",
         "chalk_ceiling_guardrail_delta",
@@ -2705,6 +3085,8 @@ def generate_lineups(
             low_own_required_indices=low_own_required_indices,
             preferred_game_keys=preferred_games,
             preferred_game_bonus=preferred_game_bonus_value,
+            preferred_game_stack_min_players=preferred_game_stack_min_players_value,
+            preferred_stack_required_indices=preferred_stack_required_indices,
             ceiling_boost_indices=ceiling_boost_indices,
             ceiling_boost_stack_bonus=max(0.0, float(ceiling_boost_stack_bonus)),
             ceiling_boost_salary_left_target=ceiling_salary_target,
@@ -2716,6 +3098,11 @@ def generate_lineups(
             lineup_idx in low_own_required_indices
             and low_own_min_required > 0
             and bool(low_own_candidate_ids)
+        )
+        require_preferred_stack = (
+            lineup_idx in preferred_stack_required_indices
+            and preferred_game_stack_min_players_value > 0
+            and bool(preferred_games)
         )
         ceiling_boost_active = lineup_idx in ceiling_boost_indices
         active_salary_target = ceiling_salary_target if ceiling_boost_active else salary_target
@@ -2782,6 +3169,15 @@ def generate_lineups(
                         min_needed_after_pick = max(0, low_own_min_required - projected_low_own)
                         if min_needed_after_pick > rem_after_pick:
                             continue
+                    pick_game_key = str(p.get("game_key") or "").strip().upper()
+                    if require_preferred_stack and not _can_still_hit_preferred_stack(
+                        selected,
+                        pick_game_key,
+                        preferred_games,
+                        preferred_game_stack_min_players_value,
+                        rem_after_pick,
+                    ):
+                        continue
 
                     partial = selected + [p]
                     if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
@@ -2814,6 +3210,9 @@ def generate_lineups(
                 continue
             lineup_low_own_count = sum(1 for pid in current_ids if pid in low_own_candidate_ids)
             if require_low_own and lineup_low_own_count < low_own_min_required:
+                continue
+            preferred_stack_size = _preferred_game_stack_size(selected, preferred_games)
+            if require_preferred_stack and preferred_stack_size < preferred_game_stack_min_players_value:
                 continue
 
             selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
@@ -2873,6 +3272,8 @@ def generate_lineups(
         lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
         lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
         expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
+        preferred_game_player_count = _preferred_game_stack_total(best_lineup, preferred_games)
+        preferred_game_stack_size = _preferred_game_stack_size(best_lineup, preferred_games)
         pair_id = ((lineup_idx // 2) + 1) if spike_mode else None
         pair_role = ("A" if (lineup_idx % 2 == 0) else "B") if spike_mode else None
 
@@ -2893,6 +3294,11 @@ def generate_lineups(
                 "pair_id": pair_id,
                 "pair_role": pair_role,
                 "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_candidate_ids)),
+                "preferred_game_player_count": int(preferred_game_player_count),
+                "preferred_game_stack_size": int(preferred_game_stack_size),
+                "preferred_game_stack_met": bool(
+                    preferred_game_stack_min_players_value > 0 and preferred_game_stack_size >= preferred_game_stack_min_players_value
+                ),
                 "ceiling_boost_active": bool(ceiling_boost_active),
             }
         )
@@ -2925,6 +3331,8 @@ def _generate_lineups_cluster_mode(
     low_own_required_indices: set[int] | None = None,
     preferred_game_keys: set[str] | None = None,
     preferred_game_bonus: float = 0.0,
+    preferred_game_stack_min_players: int = 0,
+    preferred_stack_required_indices: set[int] | None = None,
     ceiling_boost_indices: set[int] | None = None,
     ceiling_boost_stack_bonus: float = 0.0,
     ceiling_boost_salary_left_target: int | None = None,
@@ -2948,6 +3356,8 @@ def _generate_lineups_cluster_mode(
     low_own_required_idx = {int(x) for x in (low_own_required_indices or set())}
     preferred_games = {str(x or "").strip().upper() for x in (preferred_game_keys or set()) if str(x or "").strip()}
     preferred_bonus = max(0.0, float(preferred_game_bonus))
+    preferred_stack_required = {int(x) for x in (preferred_stack_required_indices or set())}
+    preferred_stack_min = max(0, min(ROSTER_SIZE, int(preferred_game_stack_min_players)))
     ceiling_idx = {int(x) for x in (ceiling_boost_indices or set())}
     ceiling_stack_bonus = max(0.0, float(ceiling_boost_stack_bonus))
 
@@ -2999,6 +3409,11 @@ def _generate_lineups_cluster_mode(
                 lineup_global_idx in low_own_required_idx
                 and low_own_required > 0
                 and bool(low_own_ids)
+            )
+            require_preferred_stack = (
+                lineup_global_idx in preferred_stack_required
+                and preferred_stack_min > 0
+                and bool(preferred_games)
             )
             ceiling_boost_active = lineup_global_idx in ceiling_idx
             active_salary_target = ceiling_salary_target if ceiling_boost_active else salary_target
@@ -3070,6 +3485,14 @@ def _generate_lineups_cluster_mode(
                             low_own_needed_after_pick = max(0, low_own_required - projected_low_own)
                             if low_own_needed_after_pick > rem_after_pick:
                                 continue
+                        if require_preferred_stack and not _can_still_hit_preferred_stack(
+                            selected,
+                            pick_game_key,
+                            preferred_games,
+                            preferred_stack_min,
+                            rem_after_pick,
+                        ):
+                            continue
 
                         partial = selected + [p]
                         if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
@@ -3127,6 +3550,9 @@ def _generate_lineups_cluster_mode(
                     continue
                 lineup_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_ids)
                 if require_low_own and lineup_low_own_count < low_own_required:
+                    continue
+                preferred_stack_size = _preferred_game_stack_size(selected, preferred_games)
+                if require_preferred_stack and preferred_stack_size < preferred_stack_min:
                     continue
 
                 lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in selected))
@@ -3206,6 +3632,8 @@ def _generate_lineups_cluster_mode(
             lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
             lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
             expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
+            preferred_game_player_count = _preferred_game_stack_total(best_lineup, preferred_games)
+            preferred_game_stack_size = _preferred_game_stack_size(best_lineup, preferred_games)
             lineup_number = len(lineups) + 1
             if seed_lineup_id is None:
                 seed_lineup_id = lineup_number
@@ -3237,6 +3665,9 @@ def _generate_lineups_cluster_mode(
                 "stack_signature": _lineup_stack_signature(best_lineup),
                 "salary_texture_bucket": _salary_texture_bucket(SALARY_CAP - lineup_salary),
                 "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_ids)),
+                "preferred_game_player_count": int(preferred_game_player_count),
+                "preferred_game_stack_size": int(preferred_game_stack_size),
+                "preferred_game_stack_met": bool(preferred_stack_min > 0 and preferred_game_stack_size >= preferred_stack_min),
                 "ceiling_boost_active": bool(ceiling_boost_active),
             }
             lineups.append(lineup_payload)
@@ -3301,6 +3732,12 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Salary Texture"] = str(lineup.get("salary_texture_bucket"))
         if lineup.get("low_own_upside_count") is not None:
             row["Low-Own Upside Count"] = int(lineup.get("low_own_upside_count") or 0)
+        if lineup.get("preferred_game_player_count") is not None:
+            row["Preferred Game Players"] = int(lineup.get("preferred_game_player_count") or 0)
+        if lineup.get("preferred_game_stack_size") is not None:
+            row["Preferred Game Stack Size"] = int(lineup.get("preferred_game_stack_size") or 0)
+        if lineup.get("preferred_game_stack_met") is not None:
+            row["Preferred Game Stack Met"] = bool(lineup.get("preferred_game_stack_met"))
         if lineup.get("ceiling_boost_active") is not None:
             row["Ceiling Boost"] = bool(lineup.get("ceiling_boost_active"))
         rows.append(row)
@@ -3414,6 +3851,12 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Salary Texture"] = str(lineup.get("salary_texture_bucket"))
         if lineup.get("low_own_upside_count") is not None:
             row["Low-Own Upside Count"] = int(lineup.get("low_own_upside_count") or 0)
+        if lineup.get("preferred_game_player_count") is not None:
+            row["Preferred Game Players"] = int(lineup.get("preferred_game_player_count") or 0)
+        if lineup.get("preferred_game_stack_size") is not None:
+            row["Preferred Game Stack Size"] = int(lineup.get("preferred_game_stack_size") or 0)
+        if lineup.get("preferred_game_stack_met") is not None:
+            row["Preferred Game Stack Met"] = bool(lineup.get("preferred_game_stack_met"))
         if lineup.get("ceiling_boost_active") is not None:
             row["Ceiling Boost"] = bool(lineup.get("ceiling_boost_active"))
         rows.append(row)

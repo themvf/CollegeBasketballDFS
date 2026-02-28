@@ -36,6 +36,7 @@ from college_basketball_dfs.cbb_props_pipeline import run_cbb_props_pipeline
 from college_basketball_dfs.cbb_team_lookup import rows_from_payloads
 from college_basketball_dfs.cbb_dk_optimizer import (
     build_dk_upload_csv,
+    build_game_focus_summary,
     build_player_pool,
     enrich_lineups_minutes_from_pool,
     generate_lineups,
@@ -44,6 +45,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     normalize_injuries_frame,
     projection_role_bucket_key,
     projection_salary_bucket_key,
+    recommended_focus_stack_settings,
     remove_injured_players,
 )
 from college_basketball_dfs.cbb_tail_model import (
@@ -146,7 +148,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": False,
         "model_profile": "legacy_baseline",
-        "all_versions_weight": 0.15,
+        "all_versions_weight": 0.08,
         "gpp_overrides": {
             "salary_left_target": 260,
             "low_own_bucket_exposure_pct": 34.0,
@@ -156,6 +158,8 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "low_own_bucket_min_tail_score": 56.0,
             "low_own_bucket_objective_bonus": 1.2,
             "preferred_game_bonus": 0.8,
+            "preferred_game_stack_lineup_pct": 45.0,
+            "preferred_game_stack_min_players": 2,
             "ceiling_boost_lineup_pct": 32.0,
             "ceiling_boost_stack_bonus": 2.4,
             "ceiling_boost_salary_left_target": 150,
@@ -167,7 +171,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "spike",
         "include_tail_signals": True,
         "model_profile": "tail_spike_pairs",
-        "all_versions_weight": 0.35,
+        "all_versions_weight": 0.27,
         "gpp_overrides": {
             "salary_left_target": 420,
             "low_own_bucket_exposure_pct": 68.0,
@@ -177,6 +181,8 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "low_own_bucket_min_tail_score": 62.0,
             "low_own_bucket_objective_bonus": 2.0,
             "preferred_game_bonus": 1.3,
+            "preferred_game_stack_lineup_pct": 60.0,
+            "preferred_game_stack_min_players": 2,
             "ceiling_boost_lineup_pct": 70.0,
             "ceiling_boost_stack_bonus": 3.5,
             "ceiling_boost_salary_left_target": 230,
@@ -188,7 +194,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "standout_capture_v1",
-        "all_versions_weight": 0.20,
+        "all_versions_weight": 0.18,
         "gpp_overrides": {
             "salary_left_target": 340,
             "low_own_bucket_exposure_pct": 54.0,
@@ -198,6 +204,8 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "low_own_bucket_min_tail_score": 58.0,
             "low_own_bucket_objective_bonus": 1.7,
             "preferred_game_bonus": 1.1,
+            "preferred_game_stack_lineup_pct": 55.0,
+            "preferred_game_stack_min_players": 2,
             "ceiling_boost_lineup_pct": 52.0,
             "ceiling_boost_stack_bonus": 2.9,
             "ceiling_boost_salary_left_target": 190,
@@ -209,7 +217,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "chalk_value_capture_v1",
-        "all_versions_weight": 0.10,
+        "all_versions_weight": 0.12,
         "gpp_overrides": {
             "salary_left_target": 290,
             "low_own_bucket_exposure_pct": 32.0,
@@ -219,6 +227,8 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "low_own_bucket_min_tail_score": 55.0,
             "low_own_bucket_objective_bonus": 1.3,
             "preferred_game_bonus": 0.9,
+            "preferred_game_stack_lineup_pct": 60.0,
+            "preferred_game_stack_min_players": 3,
             "ceiling_boost_lineup_pct": 38.0,
             "ceiling_boost_stack_bonus": 2.5,
             "ceiling_boost_salary_left_target": 160,
@@ -230,7 +240,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "salary_efficiency_ceiling_v1",
-        "all_versions_weight": 0.20,
+        "all_versions_weight": 0.35,
         "gpp_overrides": {
             "salary_left_target": 370,
             "low_own_bucket_exposure_pct": 48.0,
@@ -240,6 +250,8 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "low_own_bucket_min_tail_score": 60.0,
             "low_own_bucket_objective_bonus": 1.6,
             "preferred_game_bonus": 1.1,
+            "preferred_game_stack_lineup_pct": 70.0,
+            "preferred_game_stack_min_players": 3,
             "ceiling_boost_lineup_pct": 66.0,
             "ceiling_boost_stack_bonus": 3.1,
             "ceiling_boost_salary_left_target": 210,
@@ -291,6 +303,8 @@ def _resolve_lineup_runtime_controls(
     low_own_bucket_min_tail_score: float,
     low_own_bucket_objective_bonus: float,
     preferred_game_bonus: float,
+    preferred_game_stack_lineup_pct: float,
+    preferred_game_stack_min_players: int,
     ceiling_boost_lineup_pct: float,
     ceiling_boost_stack_bonus: float,
     ceiling_boost_salary_left_target: int,
@@ -304,6 +318,8 @@ def _resolve_lineup_runtime_controls(
         "low_own_bucket_min_tail_score": float(low_own_bucket_min_tail_score),
         "low_own_bucket_objective_bonus": float(low_own_bucket_objective_bonus),
         "preferred_game_bonus": float(preferred_game_bonus),
+        "preferred_game_stack_lineup_pct": float(preferred_game_stack_lineup_pct),
+        "preferred_game_stack_min_players": int(preferred_game_stack_min_players),
         "ceiling_boost_lineup_pct": float(ceiling_boost_lineup_pct),
         "ceiling_boost_stack_bonus": float(ceiling_boost_stack_bonus),
         "ceiling_boost_salary_left_target": int(ceiling_boost_salary_left_target),
@@ -4341,7 +4357,16 @@ with tab_lineups:
 
     c5, c6, c7 = st.columns(3)
     if run_mode_key == "single":
-        default_model_index = 1 if _contest_is_gpp(contest_type) else 0
+        default_model_index = 0
+        if _contest_is_gpp(contest_type):
+            default_model_index = next(
+                (
+                    idx
+                    for idx, cfg in enumerate(LINEUP_MODEL_REGISTRY)
+                    if str(cfg.get("version_key") or "") == "salary_efficiency_ceiling_v1"
+                ),
+                0,
+            )
         lineup_model_label = c5.selectbox(
             "Lineup Model",
             options=[str(cfg["label"]) for cfg in LINEUP_MODEL_REGISTRY],
@@ -4753,6 +4778,96 @@ with tab_lineups:
                 st.warning("No players available after injury filtering. Check `Injuries` tab or slate date.")
             else:
                 pool_sorted = pool_df.sort_values("projected_dk_points", ascending=False).copy()
+                focus_settings = recommended_focus_stack_settings(pool_sorted, contest_type, focus_game_count=2)
+                focus_summary_df = focus_settings.get("focus_summary")
+                if not isinstance(focus_summary_df, pd.DataFrame):
+                    focus_summary_df = build_game_focus_summary(pool_sorted)
+                focus_summary_df = focus_summary_df.copy() if isinstance(focus_summary_df, pd.DataFrame) else pd.DataFrame()
+                st.markdown("**Slate Thesis Check**")
+                if focus_summary_df.empty:
+                    st.info("No game-focus summary available for this slate.")
+                    apply_focus_game_stack_guardrails = False
+                    focus_game_count = 0
+                    focus_game_stack_lineup_pct = 0.0
+                    focus_game_stack_min_players = 0
+                else:
+                    thesis_view = focus_summary_df.loc[
+                        :,
+                        [
+                            "game_key",
+                            "game_stack_focus_score",
+                            "projected_points_sum",
+                            "projected_ownership_mean",
+                            "historical_ownership_mean",
+                            "game_tail_score_mean",
+                            "game_total_line",
+                            "recommended_stack_size",
+                        ],
+                    ].copy()
+                    thesis_view = thesis_view.rename(
+                        columns={
+                            "game_key": "Game",
+                            "game_stack_focus_score": "Focus Score",
+                            "projected_points_sum": "Proj Sum",
+                            "projected_ownership_mean": "Proj Own Avg",
+                            "historical_ownership_mean": "Hist Own Avg",
+                            "game_tail_score_mean": "Tail Avg",
+                            "game_total_line": "Total",
+                            "recommended_stack_size": "Rec Stack",
+                        }
+                    )
+                    st.dataframe(thesis_view.head(6), hide_index=True, use_container_width=True)
+                    focus_default_pct = int(round(float(focus_settings.get("stack_lineup_pct") or 0.0)))
+                    focus_default_min_players = int(focus_settings.get("min_players") or 0)
+                    focus_default_games = max(1, min(3, int(len(focus_summary_df))))
+                    tg1, tg2, tg3, tg4 = st.columns(4)
+                    apply_focus_game_stack_guardrails = bool(
+                        tg1.checkbox(
+                            "Apply Focus-Game Stack Guardrails",
+                            value=bool(_contest_is_gpp(contest_type)),
+                            help="Requires a share of lineups to include an actual stack from the top focus games.",
+                        )
+                    )
+                    focus_game_count = int(
+                        tg2.slider(
+                            "Focus Games",
+                            min_value=1,
+                            max_value=max(1, min(6, int(len(focus_summary_df)))),
+                            value=focus_default_games,
+                            step=1,
+                            disabled=not apply_focus_game_stack_guardrails,
+                        )
+                    )
+                    focus_game_stack_lineup_pct = float(
+                        tg3.slider(
+                            "Focus-Game Stack Lineups %",
+                            min_value=0,
+                            max_value=100,
+                            value=focus_default_pct,
+                            step=5,
+                            disabled=not apply_focus_game_stack_guardrails,
+                        )
+                    )
+                    focus_game_stack_min_players = int(
+                        tg4.slider(
+                            "Focus-Game Min Players",
+                            min_value=2,
+                            max_value=4,
+                            value=max(2, min(4, focus_default_min_players or 2)),
+                            step=1,
+                            disabled=not apply_focus_game_stack_guardrails,
+                        )
+                    )
+                    selected_focus_games_preview = (
+                        focus_summary_df.head(max(1, focus_game_count))["game_key"].astype(str).tolist()
+                        if apply_focus_game_stack_guardrails
+                        else []
+                    )
+                    if selected_focus_games_preview:
+                        st.caption(
+                            "Auto focus games for this slate: "
+                            + ", ".join(f"`{g}`" for g in selected_focus_games_preview)
+                        )
                 player_labels = [
                     f"{row['Name']} ({row['TeamAbbrev']}) [{row['ID']}]"
                     for _, row in pool_sorted.iterrows()
@@ -4954,6 +5069,21 @@ with tab_lineups:
                                 f"(reason={str(game_agent_bias_meta.get('reason') or 'n/a')})."
                             )
 
+                    selected_preferred_game_keys: list[str] = []
+                    if apply_focus_game_stack_guardrails and not focus_summary_df.empty:
+                        selected_preferred_game_keys.extend(
+                            focus_summary_df.head(max(1, int(focus_game_count)))["game_key"].astype(str).tolist()
+                        )
+                    for key in list(game_agent_bias_meta.get("applied_game_keys") or []):
+                        norm_key = str(key or "").strip().upper()
+                        if norm_key and norm_key not in selected_preferred_game_keys:
+                            selected_preferred_game_keys.append(norm_key)
+                    if selected_preferred_game_keys:
+                        st.caption(
+                            "Preferred games for lineup construction: "
+                            + ", ".join(f"`{str(k).strip().upper()}`" for k in selected_preferred_game_keys)
+                        )
+
                     if run_mode_key == "all":
                         version_plan = [
                             _lineup_model_config(str(cfg["version_key"]), spike_max_pair_overlap)
@@ -5041,6 +5171,8 @@ with tab_lineups:
                             low_own_bucket_min_tail_score=low_own_bucket_min_tail_score,
                             low_own_bucket_objective_bonus=low_own_bucket_objective_bonus,
                             preferred_game_bonus=preferred_game_bonus,
+                            preferred_game_stack_lineup_pct=focus_game_stack_lineup_pct,
+                            preferred_game_stack_min_players=focus_game_stack_min_players,
                             ceiling_boost_lineup_pct=ceiling_boost_lineup_pct,
                             ceiling_boost_stack_bonus=ceiling_boost_stack_bonus,
                             ceiling_boost_salary_left_target=ceiling_boost_salary_left_target,
@@ -5049,6 +5181,7 @@ with tab_lineups:
                             st.caption(
                                 f"[{version_cfg['version_key']}] variance preset: "
                                 f"low_own={float(runtime_controls['low_own_bucket_exposure_pct']):.0f}%, "
+                                f"focus_stack={float(runtime_controls['preferred_game_stack_lineup_pct']):.0f}%/{int(runtime_controls['preferred_game_stack_min_players'])}, "
                                 f"ceiling={float(runtime_controls['ceiling_boost_lineup_pct']):.0f}%, "
                                 f"salary_left_target={int(runtime_controls['salary_left_target'])}"
                             )
@@ -5094,8 +5227,19 @@ with tab_lineups:
                             low_own_bucket_min_projection=float(runtime_controls["low_own_bucket_min_projection"]),
                             low_own_bucket_min_tail_score=float(runtime_controls["low_own_bucket_min_tail_score"]),
                             low_own_bucket_objective_bonus=float(runtime_controls["low_own_bucket_objective_bonus"]),
-                            preferred_game_keys=list(game_agent_bias_meta.get("applied_game_keys") or []),
+                            preferred_game_keys=selected_preferred_game_keys,
                             preferred_game_bonus=float(runtime_controls["preferred_game_bonus"]),
+                            preferred_game_stack_lineup_pct=(
+                                float(runtime_controls["preferred_game_stack_lineup_pct"])
+                                if apply_focus_game_stack_guardrails
+                                else 0.0
+                            ),
+                            preferred_game_stack_min_players=(
+                                int(runtime_controls["preferred_game_stack_min_players"])
+                                if apply_focus_game_stack_guardrails
+                                else 0
+                            ),
+                            auto_preferred_game_count=0,
                             ceiling_boost_lineup_pct=float(runtime_controls["ceiling_boost_lineup_pct"]),
                             ceiling_boost_stack_bonus=float(runtime_controls["ceiling_boost_stack_bonus"]),
                             ceiling_boost_salary_left_target=int(runtime_controls["ceiling_boost_salary_left_target"]),
@@ -5172,6 +5316,11 @@ with tab_lineups:
                             "low_own_bucket_min_tail_score": low_own_bucket_min_tail_score,
                             "low_own_bucket_objective_bonus": low_own_bucket_objective_bonus,
                             "preferred_game_bonus": preferred_game_bonus,
+                            "apply_focus_game_stack_guardrails": apply_focus_game_stack_guardrails,
+                            "focus_game_count": focus_game_count,
+                            "focus_game_stack_lineup_pct": focus_game_stack_lineup_pct,
+                            "focus_game_stack_min_players": focus_game_stack_min_players,
+                            "selected_preferred_game_keys": selected_preferred_game_keys,
                             "ceiling_boost_lineup_pct": ceiling_boost_lineup_pct,
                             "ceiling_boost_stack_bonus": ceiling_boost_stack_bonus,
                             "ceiling_boost_salary_left_target": ceiling_boost_salary_left_target,

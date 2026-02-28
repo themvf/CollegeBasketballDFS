@@ -3,6 +3,7 @@ from collections import Counter
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
+    apply_focus_game_chalk_guardrail,
     apply_model_profile_adjustments,
     apply_projection_uncertainty_adjustment,
     apply_projection_calibration,
@@ -758,12 +759,16 @@ def test_build_player_pool_ownership_surge_columns_present() -> None:
     assert "ownership_chalk_surge_score" in pool.columns
     assert "ownership_confidence" in pool.columns
     assert "ownership_leverage_shrink" in pool.columns
+    assert "game_stack_focus_score" in pool.columns
+    assert "game_stack_focus_flag" in pool.columns
     surge = pd.to_numeric(pool["ownership_chalk_surge_score"], errors="coerce")
     conf = pd.to_numeric(pool["ownership_confidence"], errors="coerce")
     shrink = pd.to_numeric(pool["ownership_leverage_shrink"], errors="coerce")
     assert surge.notna().all()
     assert conf.between(0, 1).all()
     assert shrink.between(0, 0.45).all()
+    assert pd.to_numeric(pool["game_stack_focus_score"], errors="coerce").ge(0.0).all()
+    assert bool(pool["game_stack_focus_flag"].astype(bool).any()) is True
 
 
 def test_apply_ownership_surprise_guardrails_raises_triggered_rows() -> None:
@@ -789,6 +794,38 @@ def test_apply_ownership_surprise_guardrails_raises_triggered_rows() -> None:
     assert bool(adjusted.loc[0, "ownership_guardrail_flag"]) is True
     assert float(adjusted.loc[0, "projected_ownership"]) > 6.0
     assert float(adjusted.loc[0, "ownership_guardrail_delta"]) > 0.0
+
+
+def test_apply_focus_game_chalk_guardrail_lifts_focus_game_candidates() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["projected_ownership"] = 10.0
+    pool["historical_ownership_baseline"] = 6.0
+    pool["team_stack_popularity_score"] = 30.0
+    pool["ownership_chalk_surge_score"] = 45.0
+    pool["minutes_shock_boost_pct"] = 0.0
+    pool["game_stack_focus_score"] = 20.0
+    pool["game_stack_focus_flag"] = False
+
+    pool.loc[0, "projected_ownership"] = 9.0
+    pool.loc[0, "historical_ownership_baseline"] = 24.0
+    pool.loc[0, "team_stack_popularity_score"] = 90.0
+    pool.loc[0, "ownership_chalk_surge_score"] = 88.0
+    pool.loc[0, "minutes_shock_boost_pct"] = 12.0
+    pool.loc[0, "game_stack_focus_score"] = 95.0
+    pool.loc[0, "game_stack_focus_flag"] = True
+
+    adjusted = apply_focus_game_chalk_guardrail(
+        pool,
+        projected_ownership_threshold=18.0,
+        projection_rank_threshold=0.0,
+        floor_base=14.0,
+        floor_cap=30.0,
+    )
+    assert "focus_game_chalk_guardrail_flag" in adjusted.columns
+    assert bool(adjusted.loc[0, "focus_game_chalk_guardrail_flag"]) is True
+    assert float(adjusted.loc[0, "projected_ownership"]) > 9.0
+    assert float(adjusted.loc[0, "focus_game_chalk_guardrail_delta"]) > 0.0
+    assert bool(adjusted.loc[1, "focus_game_chalk_guardrail_flag"]) is False
 
 
 def test_apply_false_chalk_discount_shrinks_unsupported_high_ownership_and_normalizes_total() -> None:
@@ -1018,6 +1055,30 @@ def test_generate_lineups_preferred_game_bonus_increases_preferred_exposure() ->
         / max(1, len(boosted_lineups))
     )
     assert boosted_avg >= base_avg
+
+
+def test_generate_lineups_preferred_game_stack_requirement_enforces_share() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    preferred_game = "CCC@DDD"
+    requested_lineups = 12
+    required_pct = 50.0
+
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=requested_lineups,
+        contest_type="Large GPP",
+        preferred_game_keys=[preferred_game],
+        preferred_game_bonus=1.5,
+        preferred_game_stack_lineup_pct=required_pct,
+        preferred_game_stack_min_players=3,
+        auto_preferred_game_count=0,
+        random_seed=13,
+    )
+
+    assert len(lineups) == requested_lineups
+    assert any("Focus-game stack guardrails active" in warning for warning in warnings)
+    met_count = sum(1 for lineup in lineups if bool(lineup.get("preferred_game_stack_met")))
+    assert met_count >= int(round((required_pct / 100.0) * requested_lineups))
 
 
 def test_generate_lineups_ceiling_boost_marks_expected_count() -> None:
