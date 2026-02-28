@@ -86,6 +86,11 @@ from college_basketball_dfs.cbb_ai_review import (
     build_market_correlation_ai_review_user_prompt,
     request_openai_review,
 )
+from college_basketball_dfs.cbb_rotowire import (
+    RotoWireClient,
+    flatten_slates as flatten_rotowire_slates,
+    normalize_players as normalize_rotowire_players,
+)
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 
 
@@ -109,6 +114,10 @@ def _resolve_credential_json_b64() -> str | None:
 
 def _resolve_odds_api_key() -> str | None:
     return os.getenv("THE_ODDS_API_KEY") or _secret("the_odds_api_key")
+
+
+def _resolve_rotowire_cookie() -> str | None:
+    return os.getenv("ROTOWIRE_COOKIE") or _secret("rotowire_cookie")
 
 
 ROLE_FILTER_OPTIONS = ["All", "Guard (G)", "Forward (F)"]
@@ -407,6 +416,17 @@ def _slate_key_from_label(value: object, default: str = "main") -> str:
     text = str(value or "").strip().lower()
     text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
     return text or default
+
+
+def _default_rotowire_slate_name(shared_label: object) -> str:
+    normalized = _slate_key_from_label(shared_label, default="")
+    mapping = {
+        "main": "All",
+        "full_day": "All",
+        "afternoon": "Afternoon",
+        "night": "Night",
+    }
+    return mapping.get(normalized, "")
 
 
 def _norm_name_key(value: object) -> str:
@@ -3154,6 +3174,43 @@ def load_actual_results_frame_for_date(
     return out
 
 
+@st.cache_data(ttl=300, show_spinner=False)
+def load_rotowire_slates_frame(
+    site_id: int,
+    cookie_header: str | None,
+) -> pd.DataFrame:
+    client = RotoWireClient(cookie_header=(cookie_header or None))
+    try:
+        catalog = client.fetch_slate_catalog(site_id=site_id)
+    finally:
+        client.close()
+    return flatten_rotowire_slates(catalog, site_id=site_id)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_rotowire_players_frame(
+    site_id: int,
+    slate_id: int,
+    slate_date: str | None,
+    contest_type: str | None,
+    slate_name: str | None,
+    cookie_header: str | None,
+) -> pd.DataFrame:
+    client = RotoWireClient(cookie_header=(cookie_header or None))
+    try:
+        raw_players = client.fetch_players(slate_id=int(slate_id))
+    finally:
+        client.close()
+    slate_row = {
+        "site_id": site_id,
+        "slate_id": int(slate_id),
+        "slate_date": slate_date,
+        "contest_type": contest_type,
+        "slate_name": slate_name,
+    }
+    return normalize_rotowire_players(raw_players, slate_row=slate_row)
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_contest_standings_frame(
     bucket_name: str,
@@ -3328,7 +3385,7 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
+tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_rotowire, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
     [
         "Game Data",
         "Prop Data",
@@ -3336,6 +3393,7 @@ tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_li
         "DK Slate",
         "Injuries",
         "Slate + Vegas",
+        "RotoWire Scraper",
         "Lineup Generator",
         "Projection Review",
         "Tournament Review",
@@ -4307,6 +4365,201 @@ with tab_slate_vegas:
                     )
         except Exception as exc:
             st.exception(exc)
+
+with tab_rotowire:
+    st.subheader("RotoWire Slate Export")
+    st.caption(
+        "Fetch RotoWire optimizer projections and expected minutes for a selected slate, "
+        "then download CSV or JSON."
+    )
+    rotowire_site_id = 1
+    default_rotowire_cookie = (_resolve_rotowire_cookie() or "").strip()
+    rw1, rw2, rw3 = st.columns(3)
+    rotowire_selected_date = rw1.date_input(
+        "RotoWire Slate Date",
+        value=game_selected_date,
+        key="rotowire_slate_date",
+    )
+    rotowire_contest_type = rw2.selectbox(
+        "Contest Type Filter",
+        options=["All", "Classic", "Showdown"],
+        index=1,
+        key="rotowire_contest_type",
+    )
+    rotowire_name_filter = rw3.text_input(
+        "Slate Name Filter",
+        value=_default_rotowire_slate_name(shared_slate_label),
+        key="rotowire_name_filter",
+        help="Optional substring match on slate name, for example: Night, Afternoon, or All.",
+    )
+    rotowire_cookie_header = st.text_input(
+        "RotoWire Cookie Header (optional)",
+        value=default_rotowire_cookie,
+        type="password",
+        key="rotowire_cookie_header",
+        help="Paste the full Cookie header only if the endpoint requires member authentication.",
+    )
+    rr1, rr2 = st.columns(2)
+    refresh_rotowire_clicked = rr1.button("Refresh RotoWire Data", key="refresh_rotowire_data")
+    if refresh_rotowire_clicked:
+        load_rotowire_slates_frame.clear()
+        load_rotowire_players_frame.clear()
+    rr2.caption(
+        "Cookie source: loaded from secrets/env."
+        if default_rotowire_cookie
+        else "Cookie source: not set."
+    )
+
+    try:
+        rotowire_cookie_value = rotowire_cookie_header.strip() or None
+        rotowire_slates_df = load_rotowire_slates_frame(
+            site_id=rotowire_site_id,
+            cookie_header=rotowire_cookie_value,
+        )
+        if rotowire_slates_df.empty:
+            st.warning("No RotoWire slates returned for DraftKings.")
+        else:
+            filtered_rotowire_slates = rotowire_slates_df.loc[
+                rotowire_slates_df["slate_date"].astype(str) == rotowire_selected_date.isoformat()
+            ].copy()
+            if rotowire_contest_type != "All":
+                filtered_rotowire_slates = filtered_rotowire_slates.loc[
+                    filtered_rotowire_slates["contest_type"].astype(str).str.lower()
+                    == rotowire_contest_type.strip().lower()
+                ]
+            if rotowire_name_filter.strip():
+                filtered_rotowire_slates = filtered_rotowire_slates.loc[
+                    filtered_rotowire_slates["slate_name"].astype(str).str.contains(
+                        rotowire_name_filter.strip(),
+                        case=False,
+                        na=False,
+                    )
+                ]
+
+            st.caption(
+                f"Matched `{len(filtered_rotowire_slates)}` of `{len(rotowire_slates_df)}` "
+                "available DraftKings slates."
+            )
+            slate_show_cols = [
+                "slate_id",
+                "contest_type",
+                "slate_name",
+                "start_datetime",
+                "end_datetime",
+                "game_count",
+            ]
+            st.dataframe(
+                filtered_rotowire_slates[[c for c in slate_show_cols if c in filtered_rotowire_slates.columns]],
+                hide_index=True,
+                use_container_width=True,
+            )
+
+            if filtered_rotowire_slates.empty:
+                st.info("Adjust the filters above to select a slate.")
+            else:
+                rotowire_slate_labels = {
+                    int(row["slate_id"]): (
+                        f"{row['contest_type']} | {row['slate_name']} | "
+                        f"{row['start_datetime']} | slate {int(row['slate_id'])}"
+                    )
+                    for _, row in filtered_rotowire_slates.iterrows()
+                }
+                selected_rotowire_slate_id = st.selectbox(
+                    "Selected RotoWire Slate",
+                    options=list(rotowire_slate_labels.keys()),
+                    format_func=lambda slate_id: rotowire_slate_labels.get(int(slate_id), str(slate_id)),
+                    key="rotowire_selected_slate_id",
+                )
+                selected_rotowire_slate = filtered_rotowire_slates.loc[
+                    filtered_rotowire_slates["slate_id"] == int(selected_rotowire_slate_id)
+                ].iloc[0]
+                rotowire_players_df = load_rotowire_players_frame(
+                    site_id=rotowire_site_id,
+                    slate_id=int(selected_rotowire_slate_id),
+                    slate_date=str(selected_rotowire_slate.get("slate_date") or ""),
+                    contest_type=str(selected_rotowire_slate.get("contest_type") or ""),
+                    slate_name=str(selected_rotowire_slate.get("slate_name") or ""),
+                    cookie_header=rotowire_cookie_value,
+                )
+                rp1, rp2, rp3 = st.columns(3)
+                rp1.metric("RotoWire Players", int(len(rotowire_players_df)))
+                proj_mean = pd.to_numeric(
+                    rotowire_players_df.get("proj_fantasy_points", pd.Series(dtype=float)),
+                    errors="coerce",
+                )
+                mins_mean = pd.to_numeric(
+                    rotowire_players_df.get("proj_minutes", pd.Series(dtype=float)),
+                    errors="coerce",
+                )
+                rp2.metric(
+                    "Avg Projected FPTS",
+                    f"{float(proj_mean.mean()):.2f}" if len(proj_mean) and proj_mean.notna().any() else "0.00",
+                )
+                rp3.metric(
+                    "Avg Projected Minutes",
+                    f"{float(mins_mean.mean()):.1f}" if len(mins_mean) and mins_mean.notna().any() else "0.0",
+                )
+
+                rotowire_show_cols = [
+                    "player_name",
+                    "team_abbr",
+                    "opp_abbr",
+                    "site_positions",
+                    "salary",
+                    "proj_fantasy_points",
+                    "proj_minutes",
+                    "proj_value_per_1k",
+                    "avg_fpts_last5",
+                    "avg_fpts_season",
+                    "usage_rate",
+                    "implied_points",
+                    "spread",
+                    "over_under",
+                    "injury_status",
+                ]
+                rotowire_display = rotowire_players_df[
+                    [c for c in rotowire_show_cols if c in rotowire_players_df.columns]
+                ].copy()
+                numeric_rotowire_cols = [
+                    "salary",
+                    "proj_fantasy_points",
+                    "proj_minutes",
+                    "proj_value_per_1k",
+                    "avg_fpts_last5",
+                    "avg_fpts_season",
+                    "usage_rate",
+                    "implied_points",
+                    "spread",
+                    "over_under",
+                ]
+                for col in numeric_rotowire_cols:
+                    if col in rotowire_display.columns:
+                        rotowire_display[col] = pd.to_numeric(rotowire_display[col], errors="coerce")
+                st.dataframe(rotowire_display, hide_index=True, use_container_width=True)
+
+                export_stub = _slate_key_from_label(
+                    f"{selected_rotowire_slate.get('slate_date')}_{selected_rotowire_slate.get('contest_type')}_{selected_rotowire_slate.get('slate_name')}",
+                    default="rotowire",
+                )
+                export_csv = rotowire_players_df.to_csv(index=False)
+                export_json = json.dumps(rotowire_players_df.to_dict(orient="records"), indent=2)
+                rd1, rd2 = st.columns(2)
+                rd1.download_button(
+                    "Download RotoWire CSV",
+                    data=export_csv,
+                    file_name=f"rotowire_{export_stub}.csv",
+                    mime="text/csv",
+                    key="download_rotowire_csv",
+                )
+                rd2.download_button(
+                    "Download RotoWire JSON",
+                    data=export_json,
+                    file_name=f"rotowire_{export_stub}.json",
+                    mime="application/json",
+                    key="download_rotowire_json",
+                )
+    except Exception as exc:
+        st.exception(exc)
 
 with tab_lineups:
     st.subheader("DK Lineup Generator")
