@@ -3045,8 +3045,12 @@ def load_historical_ownership_frame_for_date(
         one["Name"] = one["Name"].astype(str).str.strip()
         one["TeamAbbrev"] = one["TeamAbbrev"].astype(str).str.strip().str.upper()
         one["actual_ownership"] = pd.to_numeric(one.get("actual_ownership"), errors="coerce")
-        one["review_date"] = pd.to_datetime(one.get("review_date"), errors="coerce").where(
-            pd.to_datetime(one.get("review_date"), errors="coerce").notna(),
+        review_date_series = pd.to_datetime(
+            one.get("review_date", pd.Series([pd.NA] * len(one), index=one.index)),
+            errors="coerce",
+        )
+        one["review_date"] = review_date_series.where(
+            review_date_series.notna(),
             pd.Timestamp(history_date),
         )
         one = one.loc[(one["Name"] != "") & one["actual_ownership"].notna(), ["Name", "TeamAbbrev", "actual_ownership", "review_date"]]
