@@ -1081,6 +1081,50 @@ def test_generate_lineups_preferred_game_stack_requirement_enforces_share() -> N
     assert met_count >= int(round((required_pct / 100.0) * requested_lineups))
 
 
+def test_generate_lineups_caps_non_focus_false_chalk_per_lineup() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy()
+    flagged_ids = {"2001", "2002"}
+    flagged_mask = pool["ID"].astype(str).isin(flagged_ids)
+    pool.loc[flagged_mask, "projected_dk_points"] = 9.0
+    pool.loc[flagged_mask, "blended_projection"] = 9.0
+    pool.loc[flagged_mask, "projected_ownership"] = 34.0
+    pool.loc[flagged_mask, "historical_ownership_baseline"] = 0.0
+    pool.loc[flagged_mask, "field_ownership_pct"] = 0.0
+    pool.loc[flagged_mask, "ownership_confidence"] = 0.12
+    pool.loc[flagged_mask, "ownership_chalk_surge_score"] = 0.0
+    pool.loc[flagged_mask, "team_stack_popularity_score"] = 0.0
+    pool.loc[flagged_mask, "minutes_shock_boost_pct"] = 0.0
+    objective_bonuses = {pid: 45.0 for pid in flagged_ids}
+
+    baseline_lineups, _ = generate_lineups(
+        pool_df=pool,
+        num_lineups=6,
+        contest_type="Large GPP",
+        preferred_game_keys=["CCC@DDD"],
+        preferred_game_bonus=1.0,
+        auto_preferred_game_count=0,
+        objective_score_adjustments=objective_bonuses,
+        random_seed=17,
+    )
+    capped_lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=6,
+        contest_type="Large GPP",
+        preferred_game_keys=["CCC@DDD"],
+        preferred_game_bonus=1.0,
+        auto_preferred_game_count=0,
+        max_unsupported_false_chalk_per_lineup=0,
+        objective_score_adjustments=objective_bonuses,
+        random_seed=17,
+    )
+
+    assert len(baseline_lineups) == 6
+    assert len(capped_lineups) == 6
+    assert any(int(lineup.get("unsupported_false_chalk_count") or 0) > 0 for lineup in baseline_lineups)
+    assert all(int(lineup.get("unsupported_false_chalk_count") or 0) == 0 for lineup in capped_lineups)
+    assert any("Non-focus false-chalk cap active" in warning for warning in warnings)
+
+
 def test_generate_lineups_ceiling_boost_marks_expected_count() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     requested_lineups = 10

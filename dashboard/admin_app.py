@@ -160,6 +160,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "preferred_game_bonus": 0.8,
             "preferred_game_stack_lineup_pct": 45.0,
             "preferred_game_stack_min_players": 2,
+            "max_unsupported_false_chalk_per_lineup": 2,
             "ceiling_boost_lineup_pct": 32.0,
             "ceiling_boost_stack_bonus": 2.4,
             "ceiling_boost_salary_left_target": 150,
@@ -183,6 +184,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "preferred_game_bonus": 1.3,
             "preferred_game_stack_lineup_pct": 60.0,
             "preferred_game_stack_min_players": 2,
+            "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 70.0,
             "ceiling_boost_stack_bonus": 3.5,
             "ceiling_boost_salary_left_target": 230,
@@ -206,6 +208,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "preferred_game_bonus": 1.1,
             "preferred_game_stack_lineup_pct": 55.0,
             "preferred_game_stack_min_players": 2,
+            "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 52.0,
             "ceiling_boost_stack_bonus": 2.9,
             "ceiling_boost_salary_left_target": 190,
@@ -229,6 +232,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "preferred_game_bonus": 0.9,
             "preferred_game_stack_lineup_pct": 60.0,
             "preferred_game_stack_min_players": 3,
+            "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 38.0,
             "ceiling_boost_stack_bonus": 2.5,
             "ceiling_boost_salary_left_target": 160,
@@ -252,6 +256,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "preferred_game_bonus": 1.1,
             "preferred_game_stack_lineup_pct": 70.0,
             "preferred_game_stack_min_players": 3,
+            "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 66.0,
             "ceiling_boost_stack_bonus": 3.1,
             "ceiling_boost_salary_left_target": 210,
@@ -305,6 +310,7 @@ def _resolve_lineup_runtime_controls(
     preferred_game_bonus: float,
     preferred_game_stack_lineup_pct: float,
     preferred_game_stack_min_players: int,
+    max_unsupported_false_chalk_per_lineup: int,
     ceiling_boost_lineup_pct: float,
     ceiling_boost_stack_bonus: float,
     ceiling_boost_salary_left_target: int,
@@ -320,6 +326,7 @@ def _resolve_lineup_runtime_controls(
         "preferred_game_bonus": float(preferred_game_bonus),
         "preferred_game_stack_lineup_pct": float(preferred_game_stack_lineup_pct),
         "preferred_game_stack_min_players": int(preferred_game_stack_min_players),
+        "max_unsupported_false_chalk_per_lineup": int(max_unsupported_false_chalk_per_lineup),
         "ceiling_boost_lineup_pct": float(ceiling_boost_lineup_pct),
         "ceiling_boost_stack_bonus": float(ceiling_boost_stack_bonus),
         "ceiling_boost_salary_left_target": int(ceiling_boost_salary_left_target),
@@ -4688,6 +4695,19 @@ with tab_lineups:
     low_own_bucket_min_tail_score = 55.0
     low_own_bucket_objective_bonus = 1.3
     preferred_game_bonus = 0.6
+    max_unsupported_false_chalk_per_lineup = int(
+        st.slider(
+            "Max Non-Focus False Chalk",
+            min_value=0,
+            max_value=4,
+            value=2,
+            step=1,
+            help=(
+                "Hard cap on unsupported high-owned plays outside the focus games. "
+                "Lower is stricter."
+            ),
+        )
+    )
     cb1, cb2, cb3, cb4 = st.columns(4)
     ceiling_boost_lineup_pct = float(
         cb1.slider(
@@ -5173,6 +5193,7 @@ with tab_lineups:
                             preferred_game_bonus=preferred_game_bonus,
                             preferred_game_stack_lineup_pct=focus_game_stack_lineup_pct,
                             preferred_game_stack_min_players=focus_game_stack_min_players,
+                            max_unsupported_false_chalk_per_lineup=max_unsupported_false_chalk_per_lineup,
                             ceiling_boost_lineup_pct=ceiling_boost_lineup_pct,
                             ceiling_boost_stack_bonus=ceiling_boost_stack_bonus,
                             ceiling_boost_salary_left_target=ceiling_boost_salary_left_target,
@@ -5182,6 +5203,7 @@ with tab_lineups:
                                 f"[{version_cfg['version_key']}] variance preset: "
                                 f"low_own={float(runtime_controls['low_own_bucket_exposure_pct']):.0f}%, "
                                 f"focus_stack={float(runtime_controls['preferred_game_stack_lineup_pct']):.0f}%/{int(runtime_controls['preferred_game_stack_min_players'])}, "
+                                f"false_chalk<={int(runtime_controls['max_unsupported_false_chalk_per_lineup'])}, "
                                 f"ceiling={float(runtime_controls['ceiling_boost_lineup_pct']):.0f}%, "
                                 f"salary_left_target={int(runtime_controls['salary_left_target'])}"
                             )
@@ -5240,6 +5262,9 @@ with tab_lineups:
                                 else 0
                             ),
                             auto_preferred_game_count=0,
+                            max_unsupported_false_chalk_per_lineup=int(
+                                runtime_controls["max_unsupported_false_chalk_per_lineup"]
+                            ),
                             ceiling_boost_lineup_pct=float(runtime_controls["ceiling_boost_lineup_pct"]),
                             ceiling_boost_stack_bonus=float(runtime_controls["ceiling_boost_stack_bonus"]),
                             ceiling_boost_salary_left_target=int(runtime_controls["ceiling_boost_salary_left_target"]),
@@ -5321,6 +5346,7 @@ with tab_lineups:
                             "focus_game_stack_lineup_pct": focus_game_stack_lineup_pct,
                             "focus_game_stack_min_players": focus_game_stack_min_players,
                             "selected_preferred_game_keys": selected_preferred_game_keys,
+                            "max_unsupported_false_chalk_per_lineup": max_unsupported_false_chalk_per_lineup,
                             "ceiling_boost_lineup_pct": ceiling_boost_lineup_pct,
                             "ceiling_boost_stack_bonus": ceiling_boost_stack_bonus,
                             "ceiling_boost_salary_left_target": ceiling_boost_salary_left_target,

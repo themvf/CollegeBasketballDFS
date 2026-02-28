@@ -2071,6 +2071,57 @@ def apply_false_chalk_discount(
     return _recompute_leverage_score(out)
 
 
+def _annotate_unsupported_false_chalk(
+    pool_df: pd.DataFrame,
+    preferred_games: set[str] | None = None,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        out["unsupported_false_chalk_flag"] = pd.Series(dtype="bool")
+        out["unsupported_false_chalk_score"] = pd.Series(dtype="float64")
+        return out
+
+    preferred = {
+        str(key or "").strip().upper().split(" ")[0]
+        for key in (preferred_games or set())
+        if str(key or "").strip()
+    }
+    false_chalk_flag = (
+        out.get("false_chalk_discount_flag", pd.Series([False] * len(out), index=out.index))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
+    focus_game_flag = (
+        out.get("game_stack_focus_flag", pd.Series([False] * len(out), index=out.index))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
+    focus_game_chalk_flag = (
+        out.get("focus_game_chalk_guardrail_flag", pd.Series([False] * len(out), index=out.index))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
+    if "game_key_norm" in out.columns:
+        game_key_norm = out["game_key_norm"].astype(str).str.strip().str.upper().str.split().str[0]
+    else:
+        game_key_norm = (
+            out.get("game_key", pd.Series([""] * len(out), index=out.index))
+            .astype(str)
+            .str.strip()
+            .str.upper()
+            .str.split()
+            .str[0]
+        )
+    preferred_mask = game_key_norm.isin(preferred) if preferred else pd.Series([False] * len(out), index=out.index)
+    supported_mask = (preferred_mask | focus_game_flag | focus_game_chalk_flag).astype(bool)
+    false_chalk_score = pd.to_numeric(out.get("false_chalk_discount_score"), errors="coerce").fillna(0.0).clip(lower=0.0)
+    unsupported_mask = (false_chalk_flag & ~supported_mask).astype(bool)
+
+    out["unsupported_false_chalk_flag"] = unsupported_mask
+    out["unsupported_false_chalk_score"] = false_chalk_score.where(unsupported_mask, 0.0).round(4)
+    return out
+
+
 def apply_projection_uncertainty_adjustment(
     pool_df: pd.DataFrame,
     uncertainty_weight: float = 0.18,
@@ -2697,6 +2748,7 @@ def generate_lineups(
     preferred_game_stack_lineup_pct: float = 0.0,
     preferred_game_stack_min_players: int = 0,
     auto_preferred_game_count: int = 2,
+    max_unsupported_false_chalk_per_lineup: int | None = None,
     ceiling_boost_lineup_pct: float = 0.0,
     ceiling_boost_stack_bonus: float = 0.0,
     ceiling_boost_salary_left_target: int | None = None,
@@ -2778,6 +2830,7 @@ def generate_lineups(
             preferred_game_bonus_value > 0.0
             or preferred_game_stack_lineup_pct_value > 0.0
             or preferred_game_stack_min_players_value > 0
+            or max_unsupported_false_chalk_per_lineup is not None
         )
     ):
         preferred_games = {
@@ -2787,8 +2840,9 @@ def generate_lineups(
         }
     if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value <= 0:
         preferred_game_stack_min_players_value = int(focus_settings.get("min_players") or 0)
-    if preferred_games and preferred_game_bonus_value > 0.0 and "game_key" in scored.columns:
+    if "game_key" in scored.columns:
         scored["game_key_norm"] = scored["game_key"].map(lambda x: str(x or "").strip().upper().split(" ")[0])
+    if preferred_games and preferred_game_bonus_value > 0.0 and "game_key_norm" in scored.columns:
         preferred_mask = scored["game_key_norm"].isin(preferred_games)
         scored["objective_score"] = (
             pd.to_numeric(scored.get("objective_score"), errors="coerce").fillna(0.0)
@@ -2797,6 +2851,7 @@ def generate_lineups(
         scored["preferred_game_flag"] = preferred_mask.map(lambda x: bool(x))
     else:
         scored["preferred_game_flag"] = False
+    scored = _annotate_unsupported_false_chalk(scored, preferred_games)
 
     warnings: list[str] = []
     if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value > 0:
@@ -2805,6 +2860,11 @@ def generate_lineups(
             f"{preferred_game_stack_lineup_pct_value:.0f}% of lineups require >= {preferred_game_stack_min_players_value} players "
             f"from one of {', '.join(sorted(preferred_games))}."
         )
+    unsupported_false_chalk_cap = None
+    if max_unsupported_false_chalk_per_lineup is not None:
+        unsupported_false_chalk_cap = max(0, min(ROSTER_SIZE, int(max_unsupported_false_chalk_per_lineup)))
+        if unsupported_false_chalk_cap >= ROSTER_SIZE:
+            unsupported_false_chalk_cap = None
     ownership_reliability = _ownership_reliability_for_pool(scored)
     low_own_candidate_ids: set[str] = set()
     requested_low_own_exposure = max(0.0, min(100.0, float(low_own_bucket_exposure_pct)))
@@ -2886,6 +2946,21 @@ def generate_lineups(
         scored["low_own_upside_flag"] = False
         scored["low_own_upside_v2_score"] = 0.0
 
+    unsupported_false_chalk_ids: set[str] = set(
+        scored.loc[scored["unsupported_false_chalk_flag"].astype(bool), "ID"].astype(str).tolist()
+    )
+    if unsupported_false_chalk_cap is not None:
+        if unsupported_false_chalk_ids:
+            warnings.append(
+                "Non-focus false-chalk cap active: "
+                f"max {unsupported_false_chalk_cap} unsupported high-owned plays per lineup "
+                f"across {len(unsupported_false_chalk_ids)} tagged candidates."
+            )
+        else:
+            warnings.append(
+                "Non-focus false-chalk cap was enabled, but no unsupported false-chalk candidates were tagged on this slate."
+            )
+
     if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value <= 0:
         preferred_game_stack_min_players_value = 2
 
@@ -2916,6 +2991,15 @@ def generate_lineups(
     lock_players = [by_id[pid] for pid in locked_set]
     if len(lock_players) > ROSTER_SIZE:
         return [], ["Too many locked players for roster size."]
+    if unsupported_false_chalk_cap is not None:
+        locked_unsupported_false_chalk = sum(
+            1 for p in lock_players if str(p.get("ID")) in unsupported_false_chalk_ids
+        )
+        if locked_unsupported_false_chalk > unsupported_false_chalk_cap:
+            return [], [
+                "Locked players exceed the non-focus false-chalk cap "
+                f"({locked_unsupported_false_chalk} > {unsupported_false_chalk_cap})."
+            ]
 
     lock_salary = sum(int(p["Salary"]) for p in lock_players)
     if lock_salary > SALARY_CAP:
@@ -3039,6 +3123,11 @@ def generate_lineups(
         "chalk_ceiling_guardrail_flag",
         "chalk_ceiling_guardrail_target",
         "chalk_ceiling_guardrail_delta",
+        "false_chalk_discount_score",
+        "false_chalk_discount_flag",
+        "false_chalk_discount_delta",
+        "unsupported_false_chalk_flag",
+        "unsupported_false_chalk_score",
         "low_own_upside_flag",
         "low_own_upside_v2_score",
         "preferred_game_flag",
@@ -3083,6 +3172,8 @@ def generate_lineups(
             low_own_candidate_ids=low_own_candidate_ids,
             low_own_min_per_lineup=low_own_min_required,
             low_own_required_indices=low_own_required_indices,
+            unsupported_false_chalk_ids=unsupported_false_chalk_ids,
+            max_unsupported_false_chalk_per_lineup=unsupported_false_chalk_cap,
             preferred_game_keys=preferred_games,
             preferred_game_bonus=preferred_game_bonus_value,
             preferred_game_stack_min_players=preferred_game_stack_min_players_value,
@@ -3139,6 +3230,9 @@ def generate_lineups(
             selected_ids = {str(p["ID"]) for p in selected}
             salary = sum(int(p["Salary"]) for p in selected)
             current_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_candidate_ids)
+            current_unsupported_false_chalk_count = sum(
+                1 for p in selected if str(p.get("ID")) in unsupported_false_chalk_ids
+            )
 
             while len(selected) < ROSTER_SIZE:
                 remaining_slots = ROSTER_SIZE - len(selected)
@@ -3169,6 +3263,13 @@ def generate_lineups(
                         min_needed_after_pick = max(0, low_own_min_required - projected_low_own)
                         if min_needed_after_pick > rem_after_pick:
                             continue
+                    if unsupported_false_chalk_cap is not None:
+                        is_unsupported_false_chalk_pick = pid in unsupported_false_chalk_ids
+                        projected_unsupported_false_chalk = (
+                            current_unsupported_false_chalk_count + (1 if is_unsupported_false_chalk_pick else 0)
+                        )
+                        if projected_unsupported_false_chalk > unsupported_false_chalk_cap:
+                            continue
                     pick_game_key = str(p.get("game_key") or "").strip().upper()
                     if require_preferred_stack and not _can_still_hit_preferred_stack(
                         selected,
@@ -3197,6 +3298,8 @@ def generate_lineups(
                 salary += int(pick["Salary"])
                 if str(pick.get("ID")) in low_own_candidate_ids:
                     current_low_own_count += 1
+                if str(pick.get("ID")) in unsupported_false_chalk_ids:
+                    current_unsupported_false_chalk_count += 1
 
             if not selected:
                 continue
@@ -3210,6 +3313,12 @@ def generate_lineups(
                 continue
             lineup_low_own_count = sum(1 for pid in current_ids if pid in low_own_candidate_ids)
             if require_low_own and lineup_low_own_count < low_own_min_required:
+                continue
+            lineup_unsupported_false_chalk_count = sum(1 for pid in current_ids if pid in unsupported_false_chalk_ids)
+            if (
+                unsupported_false_chalk_cap is not None
+                and lineup_unsupported_false_chalk_count > unsupported_false_chalk_cap
+            ):
                 continue
             preferred_stack_size = _preferred_game_stack_size(selected, preferred_games)
             if require_preferred_stack and preferred_stack_size < preferred_game_stack_min_players_value:
@@ -3274,6 +3383,9 @@ def generate_lineups(
         expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
         preferred_game_player_count = _preferred_game_stack_total(best_lineup, preferred_games)
         preferred_game_stack_size = _preferred_game_stack_size(best_lineup, preferred_games)
+        unsupported_false_chalk_count = int(
+            sum(1 for p in best_lineup if str(p.get("ID")) in unsupported_false_chalk_ids)
+        )
         pair_id = ((lineup_idx // 2) + 1) if spike_mode else None
         pair_role = ("A" if (lineup_idx % 2 == 0) else "B") if spike_mode else None
 
@@ -3299,6 +3411,7 @@ def generate_lineups(
                 "preferred_game_stack_met": bool(
                     preferred_game_stack_min_players_value > 0 and preferred_game_stack_size >= preferred_game_stack_min_players_value
                 ),
+                "unsupported_false_chalk_count": unsupported_false_chalk_count,
                 "ceiling_boost_active": bool(ceiling_boost_active),
             }
         )
@@ -3329,6 +3442,8 @@ def _generate_lineups_cluster_mode(
     low_own_candidate_ids: set[str] | None = None,
     low_own_min_per_lineup: int = 0,
     low_own_required_indices: set[int] | None = None,
+    unsupported_false_chalk_ids: set[str] | None = None,
+    max_unsupported_false_chalk_per_lineup: int | None = None,
     preferred_game_keys: set[str] | None = None,
     preferred_game_bonus: float = 0.0,
     preferred_game_stack_min_players: int = 0,
@@ -3354,6 +3469,16 @@ def _generate_lineups_cluster_mode(
     low_own_ids = {str(pid) for pid in (low_own_candidate_ids or set()) if str(pid).strip()}
     low_own_required = max(0, min(ROSTER_SIZE, int(low_own_min_per_lineup)))
     low_own_required_idx = {int(x) for x in (low_own_required_indices or set())}
+    unsupported_false_chalk_ids_set = {
+        str(pid) for pid in (unsupported_false_chalk_ids or set()) if str(pid).strip()
+    }
+    unsupported_false_chalk_cap = (
+        None
+        if max_unsupported_false_chalk_per_lineup is None
+        else max(0, min(ROSTER_SIZE, int(max_unsupported_false_chalk_per_lineup)))
+    )
+    if unsupported_false_chalk_cap is not None and unsupported_false_chalk_cap >= ROSTER_SIZE:
+        unsupported_false_chalk_cap = None
     preferred_games = {str(x or "").strip().upper() for x in (preferred_game_keys or set()) if str(x or "").strip()}
     preferred_bonus = max(0.0, float(preferred_game_bonus))
     preferred_stack_required = {int(x) for x in (preferred_stack_required_indices or set())}
@@ -3445,6 +3570,9 @@ def _generate_lineups_cluster_mode(
                 selected_ids = {str(p["ID"]) for p in selected}
                 salary = sum(int(p["Salary"]) for p in selected)
                 current_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_ids)
+                current_unsupported_false_chalk_count = sum(
+                    1 for p in selected if str(p.get("ID")) in unsupported_false_chalk_ids_set
+                )
 
                 while len(selected) < ROSTER_SIZE:
                     remaining_slots = ROSTER_SIZE - len(selected)
@@ -3484,6 +3612,12 @@ def _generate_lineups_cluster_mode(
                             projected_low_own = current_low_own_count + (1 if is_low_own_pick else 0)
                             low_own_needed_after_pick = max(0, low_own_required - projected_low_own)
                             if low_own_needed_after_pick > rem_after_pick:
+                                continue
+                        if unsupported_false_chalk_cap is not None:
+                            projected_unsupported_false_chalk = current_unsupported_false_chalk_count + (
+                                1 if pid in unsupported_false_chalk_ids_set else 0
+                            )
+                            if projected_unsupported_false_chalk > unsupported_false_chalk_cap:
                                 continue
                         if require_preferred_stack and not _can_still_hit_preferred_stack(
                             selected,
@@ -3535,6 +3669,8 @@ def _generate_lineups_cluster_mode(
                     salary += int(pick["Salary"])
                     if str(pick.get("ID")) in low_own_ids:
                         current_low_own_count += 1
+                    if str(pick.get("ID")) in unsupported_false_chalk_ids_set:
+                        current_unsupported_false_chalk_count += 1
 
                 if not selected:
                     continue
@@ -3550,6 +3686,14 @@ def _generate_lineups_cluster_mode(
                     continue
                 lineup_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_ids)
                 if require_low_own and lineup_low_own_count < low_own_required:
+                    continue
+                lineup_unsupported_false_chalk_count = sum(
+                    1 for p in selected if str(p.get("ID")) in unsupported_false_chalk_ids_set
+                )
+                if (
+                    unsupported_false_chalk_cap is not None
+                    and lineup_unsupported_false_chalk_count > unsupported_false_chalk_cap
+                ):
                     continue
                 preferred_stack_size = _preferred_game_stack_size(selected, preferred_games)
                 if require_preferred_stack and preferred_stack_size < preferred_stack_min:
@@ -3634,6 +3778,9 @@ def _generate_lineups_cluster_mode(
             expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
             preferred_game_player_count = _preferred_game_stack_total(best_lineup, preferred_games)
             preferred_game_stack_size = _preferred_game_stack_size(best_lineup, preferred_games)
+            unsupported_false_chalk_count = int(
+                sum(1 for p in best_lineup if str(p.get("ID")) in unsupported_false_chalk_ids_set)
+            )
             lineup_number = len(lineups) + 1
             if seed_lineup_id is None:
                 seed_lineup_id = lineup_number
@@ -3668,6 +3815,7 @@ def _generate_lineups_cluster_mode(
                 "preferred_game_player_count": int(preferred_game_player_count),
                 "preferred_game_stack_size": int(preferred_game_stack_size),
                 "preferred_game_stack_met": bool(preferred_stack_min > 0 and preferred_game_stack_size >= preferred_stack_min),
+                "unsupported_false_chalk_count": unsupported_false_chalk_count,
                 "ceiling_boost_active": bool(ceiling_boost_active),
             }
             lineups.append(lineup_payload)
@@ -3738,6 +3886,8 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Preferred Game Stack Size"] = int(lineup.get("preferred_game_stack_size") or 0)
         if lineup.get("preferred_game_stack_met") is not None:
             row["Preferred Game Stack Met"] = bool(lineup.get("preferred_game_stack_met"))
+        if lineup.get("unsupported_false_chalk_count") is not None:
+            row["Unsupported False Chalk Count"] = int(lineup.get("unsupported_false_chalk_count") or 0)
         if lineup.get("ceiling_boost_active") is not None:
             row["Ceiling Boost"] = bool(lineup.get("ceiling_boost_active"))
         rows.append(row)
@@ -3857,6 +4007,8 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             row["Preferred Game Stack Size"] = int(lineup.get("preferred_game_stack_size") or 0)
         if lineup.get("preferred_game_stack_met") is not None:
             row["Preferred Game Stack Met"] = bool(lineup.get("preferred_game_stack_met"))
+        if lineup.get("unsupported_false_chalk_count") is not None:
+            row["Unsupported False Chalk Count"] = int(lineup.get("unsupported_false_chalk_count") or 0)
         if lineup.get("ceiling_boost_active") is not None:
             row["Ceiling Boost"] = bool(lineup.get("ceiling_boost_active"))
         rows.append(row)
