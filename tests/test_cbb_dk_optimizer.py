@@ -391,29 +391,20 @@ def test_generate_lineups_respects_global_max_exposure() -> None:
     assert max(exposure_counts.values()) <= max_allowed_count
 
 
-def test_generate_lineups_spike_mode_decorrelates_pairs() -> None:
+def test_generate_lineups_spike_mode_runs_without_pair_metadata() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     lineups, warnings = generate_lineups(
         pool_df=pool,
         num_lineups=4,
         contest_type="Small GPP",
         lineup_strategy="spike",
-        spike_max_pair_overlap=4,
         random_seed=13,
     )
 
     assert warnings == []
     assert len(lineups) == 4
-    assert lineups[0]["pair_id"] == 1 and lineups[0]["pair_role"] == "A"
-    assert lineups[1]["pair_id"] == 1 and lineups[1]["pair_role"] == "B"
-    assert lineups[2]["pair_id"] == 2 and lineups[2]["pair_role"] == "A"
-    assert lineups[3]["pair_id"] == 2 and lineups[3]["pair_role"] == "B"
     assert all(str(l.get("lineup_strategy")) == "spike" for l in lineups)
-
-    for idx in (0, 2):
-        a_ids = set(lineups[idx]["player_ids"])
-        b_ids = set(lineups[idx + 1]["player_ids"])
-        assert len(a_ids & b_ids) <= 4
+    assert all("pair_id" not in lineup and "pair_role" not in lineup for lineup in lineups)
 
 
 def test_generate_lineups_objective_adjustments_increase_target_exposure() -> None:

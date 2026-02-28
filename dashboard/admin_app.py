@@ -167,7 +167,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         },
     },
     {
-        "label": "Spike v2 (High-Variance Tail A/B)",
+        "label": "Spike v2 (High-Variance Tail)",
         "version_key": "spike_v2_tail",
         "lineup_strategy": "spike",
         "include_tail_signals": True,
@@ -275,7 +275,7 @@ ALL_VERSIONS_WEIGHT_TEXT = ", ".join(
 )
 
 
-def _lineup_model_config(version_key: str, spike_max_pair_overlap: int) -> dict[str, Any]:
+def _lineup_model_config(version_key: str) -> dict[str, Any]:
     cfg = LINEUP_MODEL_BY_KEY.get(
         str(version_key or "").strip(),
         LINEUP_MODEL_BY_KEY.get("standard_v1", {}),
@@ -286,7 +286,6 @@ def _lineup_model_config(version_key: str, spike_max_pair_overlap: int) -> dict[
         "lineup_strategy": str(cfg.get("lineup_strategy") or "standard"),
         "include_tail_signals": bool(cfg.get("include_tail_signals", False)),
         "model_profile": str(cfg.get("model_profile") or "legacy_baseline"),
-        "spike_max_pair_overlap": int(spike_max_pair_overlap),
         "gpp_overrides": dict(cfg.get("gpp_overrides") or {}),
     }
 
@@ -4762,21 +4761,6 @@ with tab_lineups:
         )
     )
     effective_max_salary_left = min(max_salary_left, 50) if strict_salary_utilization else max_salary_left
-    spike_max_pair_overlap = 4
-    if run_mode_key == "all" or lineup_strategy == "spike":
-        spike_max_pair_overlap = int(
-            st.slider(
-                "Spike Max Shared Players (A vs B)",
-                min_value=0,
-                max_value=8,
-                value=4,
-                step=1,
-                help=(
-                    "Within each A/B pair, lineup B can share at most this many players with lineup A "
-                    "(locks can force overlap)."
-                ),
-            )
-        )
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
     else:
@@ -5110,7 +5094,7 @@ with tab_lineups:
 
                     if run_mode_key == "all":
                         version_plan = [
-                            _lineup_model_config(str(cfg["version_key"]), spike_max_pair_overlap)
+                            _lineup_model_config(str(cfg["version_key"]))
                             for cfg in LINEUP_MODEL_REGISTRY
                         ]
                         total_requested = int(lineup_count * len(version_plan))
@@ -5133,7 +5117,7 @@ with tab_lineups:
                         )
                         st.caption(f"Default allocation applied: {preview}")
                     else:
-                        version_plan = [_lineup_model_config(selected_model_key, spike_max_pair_overlap)]
+                        version_plan = [_lineup_model_config(selected_model_key)]
                         for cfg in version_plan:
                             cfg["lineup_count"] = int(lineup_count)
 
@@ -5231,7 +5215,6 @@ with tab_lineups:
                             max_salary_left=effective_max_salary_left,
                             lineup_strategy=str(version_cfg["lineup_strategy"]),
                             include_tail_signals=bool(version_cfg.get("include_tail_signals", False)),
-                            spike_max_pair_overlap=int(version_cfg["spike_max_pair_overlap"]),
                             cluster_target_count=int(version_cfg.get("cluster_target_count", 15)),
                             cluster_variants_per_cluster=int(version_cfg.get("cluster_variants_per_cluster", 10)),
                             projection_scale=projection_scale,
@@ -5324,7 +5307,6 @@ with tab_lineups:
                             "strict_salary_utilization": strict_salary_utilization,
                             "salary_left_target": salary_left_target,
                             "global_max_exposure_pct": global_max_exposure_pct,
-                            "spike_max_pair_overlap": spike_max_pair_overlap,
                             "cluster_target_count": 15,
                             "cluster_variants_per_cluster": 10,
                             "projection_scale": projection_scale,
@@ -7484,8 +7466,6 @@ with tab_tournament_review:
                     "version_label",
                     "lineup_number",
                     "lineup_strategy",
-                    "pair_id",
-                    "pair_role",
                     "cluster_id",
                     "cluster_script",
                     "anchor_game_key",

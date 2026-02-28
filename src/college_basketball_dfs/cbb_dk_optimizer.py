@@ -2720,7 +2720,6 @@ def generate_lineups(
     max_salary_left: int | None = None,
     lineup_strategy: str = "standard",
     include_tail_signals: bool = False,
-    spike_max_pair_overlap: int = 4,
     cluster_target_count: int = 15,
     cluster_variants_per_cluster: int = 10,
     projection_scale: float = 1.0,
@@ -3149,7 +3148,6 @@ def generate_lineups(
         "cluster_mutation",
         "cluster_mutation_v1",
     }
-    spike_pair_overlap_cap = max(0, min(ROSTER_SIZE, int(spike_max_pair_overlap)))
 
     if cluster_mode:
         return _generate_lineups_cluster_mode(
@@ -3198,29 +3196,8 @@ def generate_lineups(
         ceiling_boost_active = lineup_idx in ceiling_boost_indices
         active_salary_target = ceiling_salary_target if ceiling_boost_active else salary_target
 
-        anchor_ids: set[str] = set()
-        anchor_games: set[str] = set()
-        anchor_primary_game = ""
-        pair_overlap_limit = ROSTER_SIZE
-        if spike_mode and (lineup_idx % 2 == 1) and lineups:
-            anchor = lineups[lineup_idx - 1]
-            anchor_ids = {str(pid) for pid in anchor.get("player_ids", [])}
-            anchor_games = {
-                str(p.get("game_key") or "")
-                for p in anchor.get("players", [])
-                if str(p.get("game_key") or "")
-            }
-            anchor_primary_game = _primary_game_from_counts(_lineup_game_counts(anchor.get("players", [])))
-            minimum_overlap_required = len(anchor_ids & locked_set)
-            pair_overlap_limit = max(spike_pair_overlap_cap, minimum_overlap_required)
-
         if progress_callback is not None:
-            if spike_mode:
-                pair_number = (lineup_idx // 2) + 1
-                pair_role = "A" if lineup_idx % 2 == 0 else "B"
-                status = f"Generating lineup {lineup_idx + 1} of {num_lineups} (Pair {pair_number}-{pair_role})..."
-            else:
-                status = f"Generating lineup {lineup_idx + 1} of {num_lineups}..."
+            status = f"Generating lineup {lineup_idx + 1} of {num_lineups}..."
             progress_callback(lineup_idx, num_lineups, status)
         best_lineup: list[dict[str, Any]] | None = None
         best_score = -10**12
@@ -3253,10 +3230,6 @@ def generate_lineups(
                         continue
                     if next_salary + (rem_after_pick * max_salary_any) < min_salary_used:
                         continue
-                    if anchor_ids:
-                        next_selected_ids = selected_ids | {pid}
-                        if len(next_selected_ids & anchor_ids) > pair_overlap_limit:
-                            continue
                     if require_low_own:
                         is_low_own_pick = pid in low_own_candidate_ids
                         projected_low_own = current_low_own_count + (1 if is_low_own_pick else 0)
@@ -3309,8 +3282,6 @@ def generate_lineups(
             if final_salary < min_salary_used:
                 continue
             current_ids = {str(p["ID"]) for p in selected}
-            if anchor_ids and len(current_ids & anchor_ids) > pair_overlap_limit:
-                continue
             lineup_low_own_count = sum(1 for pid in current_ids if pid in low_own_candidate_ids)
             if require_low_own and lineup_low_own_count < low_own_min_required:
                 continue
@@ -3352,15 +3323,6 @@ def generate_lineups(
             if lineups:
                 max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)
                 selected_score -= max(0, max_overlap - 6) * 2.0
-            if anchor_ids:
-                overlap_count = len(current_ids & anchor_ids)
-                selected_score -= 1.4 * float(overlap_count * overlap_count)
-                current_games = set(game_counts.keys())
-                overlap_games = len(current_games & anchor_games)
-                selected_score -= 0.9 * float(overlap_games)
-                primary_game = _primary_game_from_counts(game_counts)
-                if anchor_primary_game and primary_game and primary_game != anchor_primary_game:
-                    selected_score += 2.5
 
             if selected_score > best_score:
                 best_score = selected_score
@@ -3386,8 +3348,6 @@ def generate_lineups(
         unsupported_false_chalk_count = int(
             sum(1 for p in best_lineup if str(p.get("ID")) in unsupported_false_chalk_ids)
         )
-        pair_id = ((lineup_idx // 2) + 1) if spike_mode else None
-        pair_role = ("A" if (lineup_idx % 2 == 0) else "B") if spike_mode else None
 
         lineups.append(
             {
@@ -3403,8 +3363,6 @@ def generate_lineups(
                 "avg_minutes_last3": avg_minutes_last3,
                 "lineup_strategy": "spike" if spike_mode else "standard",
                 "model_profile": model_profile_value,
-                "pair_id": pair_id,
-                "pair_role": pair_role,
                 "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_candidate_ids)),
                 "preferred_game_player_count": int(preferred_game_player_count),
                 "preferred_game_stack_size": int(preferred_game_stack_size),
@@ -3802,8 +3760,6 @@ def _generate_lineups_cluster_mode(
                 "avg_minutes_last3": avg_minutes_last3,
                 "lineup_strategy": "cluster",
                 "model_profile": str(model_profile or "legacy_baseline"),
-                "pair_id": None,
-                "pair_role": None,
                 "cluster_id": cluster_id,
                 "cluster_script": cluster_script,
                 "anchor_game_key": anchor_game_key,
@@ -3864,8 +3820,6 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
         lineup_model_label = _lineup_model_label_value(lineup)
         if lineup_model_label:
             row["Lineup Model"] = lineup_model_label
-        if lineup.get("pair_id") is not None and lineup.get("pair_role"):
-            row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
             row["Strategy"] = str(lineup.get("lineup_strategy"))
         if lineup.get("model_profile"):
@@ -3985,8 +3939,6 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
         lineup_model_label = _lineup_model_label_value(lineup)
         if lineup_model_label:
             row["Lineup Model"] = lineup_model_label
-        if lineup.get("pair_id") is not None and lineup.get("pair_role"):
-            row["Pair"] = f"{lineup['pair_id']}{lineup['pair_role']}"
         if lineup.get("lineup_strategy"):
             row["Strategy"] = str(lineup.get("lineup_strategy"))
         if lineup.get("model_profile"):
