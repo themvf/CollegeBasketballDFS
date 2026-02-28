@@ -94,6 +94,32 @@ Daily pregame workflow in Streamlit:
 - Set `Props Fetch Mode` to `Pregame Live`
 - Click `Run Props Import` before tip-off
 
+## RotoWire Slate Export
+
+If you have permission to use RotoWire member data, you can export slate-level optimizer projections directly:
+
+```bash
+python -m college_basketball_dfs.cbb_rotowire --list-slates --date 2026-02-28 --contest-type Classic
+python -m college_basketball_dfs.cbb_rotowire --date 2026-02-28 --contest-type Classic --slate-name Night --csv-out data/rotowire_night.csv
+```
+
+Useful flags:
+- `--slate-id 3371`: export a specific slate directly
+- `--json-out data/rotowire_night.json`: write JSON alongside CSV
+- `--slates-csv-out data/rotowire_slates.csv`: save available slate metadata
+- `--cookie-header "...your member cookie..."`: pass an authenticated Cookie header if RotoWire gates the endpoint for your account
+
+Normalized export columns include:
+- `player_name`
+- `team_abbr`
+- `opp_abbr`
+- `salary`
+- `proj_fantasy_points`
+- `proj_minutes`
+- `proj_value_per_1k`
+- `avg_fpts_last3`, `avg_fpts_last5`, `avg_fpts_last7`, `avg_fpts_last14`, `avg_fpts_season`
+- `implied_points`, `implied_win_prob`, `spread`, `over_under`
+
 ## Streamlit Admin App
 
 Run locally:
