@@ -1,6 +1,12 @@
 from datetime import date
 
-from college_basketball_dfs.cbb_ncaa import extract_game_id, fetch_games_with_boxscores, prior_day
+from college_basketball_dfs.cbb_ncaa import (
+    NcaaApiClient,
+    NcaaApiClientError,
+    extract_game_id,
+    fetch_games_with_boxscores,
+    prior_day,
+)
 
 
 def test_prior_day_uses_reference_date() -> None:
@@ -53,3 +59,47 @@ def test_fetch_games_with_boxscores_collects_one_row() -> None:
     assert result["games"][0]["home_team"] == "Home Team"
     assert result["games"][0]["away_team"] == "Away Team"
     assert result["games"][0]["boxscore"] == {"contestId": 12345, "status": "F"}
+
+
+def test_fetch_scoreboard_falls_back_to_direct_ncaa(monkeypatch) -> None:
+    client = NcaaApiClient(base_url="https://ncaa-api.henrygd.me")
+
+    def fail_get(path, params=None):
+        raise NcaaApiClientError("public wrapper down")
+
+    def fake_direct_scoreboard(session, timeout_seconds, *, game_date, sport, division):
+        assert game_date == date(2026, 2, 27)
+        assert sport == "basketball-men"
+        assert division == "d1"
+        return {"games": [{"game": {"gameID": "6501730"}}]}
+
+    monkeypatch.setattr(client, "get", fail_get)
+    monkeypatch.setattr("college_basketball_dfs.cbb_ncaa._fetch_direct_scoreboard", fake_direct_scoreboard)
+
+    try:
+        payload = client.fetch_scoreboard(date(2026, 2, 27))
+    finally:
+        client.close()
+
+    assert payload == {"games": [{"game": {"gameID": "6501730"}}]}
+
+
+def test_fetch_boxscore_falls_back_to_direct_ncaa(monkeypatch) -> None:
+    client = NcaaApiClient(base_url="https://ncaa-api.henrygd.me")
+
+    def fail_get(path, params=None):
+        raise NcaaApiClientError("public wrapper down")
+
+    def fake_direct_boxscore(session, timeout_seconds, *, game_id):
+        assert game_id == "6501730"
+        return {"contestId": 6501730, "teamBoxscore": []}
+
+    monkeypatch.setattr(client, "get", fail_get)
+    monkeypatch.setattr("college_basketball_dfs.cbb_ncaa._fetch_direct_boxscore", fake_direct_boxscore)
+
+    try:
+        payload = client.fetch_boxscore("6501730")
+    finally:
+        client.close()
+
+    assert payload == {"contestId": 6501730, "teamBoxscore": []}
