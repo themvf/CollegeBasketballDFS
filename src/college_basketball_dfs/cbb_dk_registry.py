@@ -272,6 +272,53 @@ def build_registry_history_from_local_directory(directory: str | Path) -> pd.Dat
     ).reset_index(drop=True)
 
 
+def manual_overrides_to_history_frame(manual_df: pd.DataFrame) -> pd.DataFrame:
+    if manual_df is None or manual_df.empty:
+        return _empty_history_frame()
+
+    work = manual_df.copy()
+    empty_series = pd.Series([""] * len(work), index=work.index, dtype="object")
+    work["player_name"] = work.get("player_name", empty_series).astype(str).str.strip()
+    work["team_abbr"] = work.get("team_abbr", empty_series).astype(str).str.strip().str.upper()
+    work["dk_id"] = work.get("dk_id", empty_series).astype(str).str.strip()
+    work["name_plus_id"] = work.get("name_plus_id", empty_series).astype(str).str.strip()
+    work["position"] = work.get("position", empty_series).astype(str).str.strip().str.upper()
+    work["roster_position"] = work.get("roster_position", empty_series).astype(str).str.strip().str.upper()
+    work["salary"] = pd.to_numeric(work.get("salary"), errors="coerce")
+    work["opp_abbr"] = work.get("opp_abbr", empty_series).astype(str).str.strip().str.upper()
+    work["game_key"] = work.get("game_key", empty_series).astype(str).str.strip().str.upper()
+    work["slate_date"] = pd.to_datetime(work.get("slate_date"), errors="coerce")
+    work["slate_key"] = work.get("slate_key", empty_series).astype(str).str.strip().str.lower()
+    work["source_name"] = work.get("source_name", empty_series).astype(str).str.strip()
+    work = work.loc[(work["player_name"] != "") & (work["team_abbr"] != "") & (work["dk_id"] != "")]
+    if work.empty:
+        return _empty_history_frame()
+
+    work["player_name_norm"] = work["player_name"].map(_normalize_text)
+    work["team_norm"] = work["team_abbr"].map(_normalize_text)
+    work["position_base"] = work["position"].map(_position_base)
+    history = work[
+        [
+            "dk_id",
+            "name_plus_id",
+            "player_name",
+            "player_name_norm",
+            "team_abbr",
+            "team_norm",
+            "position",
+            "position_base",
+            "roster_position",
+            "salary",
+            "opp_abbr",
+            "game_key",
+            "slate_date",
+            "slate_key",
+            "source_name",
+        ]
+    ].copy()
+    return history.reset_index(drop=True)
+
+
 def parse_local_dk_slate_filename(filename: str) -> dict[str, Any]:
     text = str(filename or "").strip()
     match = re.search(r"(\d{1,2})_(\d{1,2})_(\d{4})(?:_([A-Za-z0-9-]+))?", text)

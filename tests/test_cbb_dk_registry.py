@@ -6,6 +6,7 @@ from college_basketball_dfs.cbb_dk_registry import (
     build_dk_identity_registry,
     build_rotowire_dk_slate,
     extract_registry_rows_from_dk_slate,
+    manual_overrides_to_history_frame,
 )
 
 
@@ -174,3 +175,33 @@ def test_build_rotowire_dk_slate_flags_ambiguous_match_as_conflict() -> None:
     assert resolution_df.iloc[0]["dk_resolution_status"] == "conflict"
     assert bool(meta["fully_resolved"]) is False
     assert int(meta["conflict_players"]) == 1
+
+
+def test_manual_overrides_to_history_frame_normalizes_override_rows() -> None:
+    manual_df = pd.DataFrame(
+        [
+            {
+                "player_name": "Chris Lane",
+                "team_abbr": "abc",
+                "opp_abbr": "xyz",
+                "salary": 6100,
+                "position": "g",
+                "roster_position": "g/util",
+                "game_key": "ABC@XYZ",
+                "dk_id": "4111",
+                "name_plus_id": "Chris Lane (4111)",
+                "slate_date": "2026-02-23",
+                "slate_key": "night",
+                "source_name": "manual_override:test",
+            }
+        ]
+    )
+
+    history = manual_overrides_to_history_frame(manual_df)
+
+    assert len(history) == 1
+    row = history.iloc[0]
+    assert row["player_name_norm"] == "chrislane"
+    assert row["team_abbr"] == "ABC"
+    assert row["position_base"] == "G"
+    assert row["dk_id"] == "4111"

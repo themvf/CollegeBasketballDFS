@@ -96,6 +96,7 @@ from college_basketball_dfs.cbb_dk_registry import (
     build_registry_history_from_local_directory,
     build_rotowire_dk_slate,
     extract_registry_rows_from_dk_slate,
+    manual_overrides_to_history_frame,
 )
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 
@@ -1512,6 +1513,70 @@ def _delete_dk_slate_csv(
             blob.delete()
             return True, name
     return False, blob_name
+
+
+def _read_dk_registry_manual_csv(store: CbbGcsStore) -> str | None:
+    reader = getattr(store, "read_dk_registry_manual_csv", None)
+    if callable(reader):
+        return reader()
+    blob_name = "cbb/dk_registry/manual_overrides.csv"
+    blob = store.bucket.blob(blob_name)
+    if not blob.exists():
+        return None
+    return blob.download_as_text(encoding="utf-8")
+
+
+def _write_dk_registry_manual_csv(store: CbbGcsStore, csv_text: str) -> str:
+    writer = getattr(store, "write_dk_registry_manual_csv", None)
+    if callable(writer):
+        return writer(csv_text)
+    blob_name = "cbb/dk_registry/manual_overrides.csv"
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
+def _upsert_dk_registry_manual_override(
+    bucket_name: str,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+    override_row: dict[str, Any],
+) -> tuple[pd.DataFrame, str]:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    existing_csv = _read_dk_registry_manual_csv(store)
+    if existing_csv and existing_csv.strip():
+        try:
+            existing_df = pd.read_csv(io.StringIO(existing_csv))
+        except Exception:
+            existing_df = pd.DataFrame()
+    else:
+        existing_df = pd.DataFrame()
+    add_df = pd.DataFrame([override_row])
+    merged = pd.concat([existing_df, add_df], ignore_index=True)
+    for col in ["player_name", "team_abbr", "slate_key", "dk_id"]:
+        if col in merged.columns:
+            merged[col] = merged[col].astype(str).str.strip()
+    if "team_abbr" in merged.columns:
+        merged["team_abbr"] = merged["team_abbr"].str.upper()
+    if "slate_key" in merged.columns:
+        merged["slate_key"] = merged["slate_key"].str.lower()
+    if "position" in merged.columns:
+        merged["position"] = merged["position"].astype(str).str.strip().str.upper()
+    if "roster_position" in merged.columns:
+        merged["roster_position"] = merged["roster_position"].astype(str).str.strip().str.upper()
+    if "slate_date" in merged.columns:
+        merged["slate_date"] = pd.to_datetime(merged["slate_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    dedupe_cols = [c for c in ["player_name", "team_abbr", "slate_key"] if c in merged.columns]
+    if dedupe_cols:
+        merged = merged.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
+    blob_name = _write_dk_registry_manual_csv(store, merged.to_csv(index=False))
+    return merged, blob_name
 
 
 def _injuries_blob_name() -> str:
@@ -3326,6 +3391,33 @@ def _parse_dk_slate_blob_context(blob_name: str) -> tuple[pd.Timestamp | pd.NaT,
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
+def load_dk_registry_manual_overrides_frame(
+    bucket_name: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    if not bucket_name:
+        return pd.DataFrame()
+    try:
+        client = build_storage_client(
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+            project=gcp_project,
+        )
+        store = CbbGcsStore(bucket_name=bucket_name, client=client)
+        csv_text = _read_dk_registry_manual_csv(store)
+    except Exception:
+        return pd.DataFrame()
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(io.StringIO(csv_text))
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_dk_identity_registry_frame(
     bucket_name: str | None,
     gcp_project: str | None,
@@ -3337,6 +3429,16 @@ def load_dk_identity_registry_frame(
     local_history = build_registry_history_from_local_directory(ROOT / "Draftkings")
     if not local_history.empty:
         frames.append(local_history)
+
+    manual_overrides_df = load_dk_registry_manual_overrides_frame(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    manual_history = manual_overrides_to_history_frame(manual_overrides_df)
+    if not manual_history.empty:
+        frames.append(manual_history)
 
     if bucket_name:
         try:
@@ -3379,6 +3481,45 @@ def load_dk_identity_registry_frame(
         keep="last",
     ).reset_index(drop=True)
     return build_dk_identity_registry(history_df)
+
+
+def _registry_candidate_rows(registry_df: pd.DataFrame, player_name: str, team_abbr: str) -> pd.DataFrame:
+    if registry_df is None or registry_df.empty:
+        return pd.DataFrame()
+    work = registry_df.copy()
+    name_norm = re.sub(r"[^a-z0-9]", "", str(player_name or "").strip().lower())
+    team_norm = str(team_abbr or "").strip().upper()
+    work["player_name_norm"] = work.get("player_name_norm", "").astype(str).str.strip()
+    work["team_abbr"] = work.get("team_abbr", "").astype(str).str.strip().str.upper()
+    filtered = work.loc[work["player_name_norm"] == name_norm].copy()
+    if team_norm:
+        team_matches = filtered.loc[filtered["team_abbr"] == team_norm].copy()
+        if not team_matches.empty:
+            filtered = team_matches
+    return filtered.sort_values(
+        ["last_seen_date", "seen_count"],
+        ascending=[False, False],
+        kind="stable",
+    ).reset_index(drop=True)
+
+
+def _default_roster_position(position_value: str, site_positions_value: str = "") -> str:
+    site_positions_text = str(site_positions_value or "").strip().upper()
+    if site_positions_text:
+        return site_positions_text if "UTIL" in site_positions_text else f"{site_positions_text}/UTIL"
+    position_text = str(position_value or "").strip().upper()
+    if not position_text:
+        return "UTIL"
+    base = position_text.split("/")[0].strip()
+    return f"{base}/UTIL" if base else "UTIL"
+
+
+def _rotowire_game_key_for_row(row: pd.Series) -> str:
+    team_abbr = str(row.get("team_abbr") or "").strip().upper()
+    opp_abbr = str(row.get("opp_abbr") or "").strip().upper()
+    if not team_abbr or not opp_abbr:
+        return ""
+    return f"{opp_abbr}@{team_abbr}" if bool(row.get("is_home")) else f"{team_abbr}@{opp_abbr}"
 
 
 @st.cache_data(ttl=300, show_spinner=False)
@@ -4855,6 +4996,12 @@ with tab_rotowire:
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
                 )
+                manual_overrides_df = load_dk_registry_manual_overrides_frame(
+                    bucket_name=(bucket_name or None),
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
                 _, resolution_df, resolution_meta = build_rotowire_dk_slate(
                     rotowire_df=rotowire_players_df,
                     registry_df=registry_df,
@@ -4901,6 +5048,172 @@ with tab_rotowire:
                             file_name=f"dk_id_mismatches_{export_stub}.csv",
                             mime="text/csv",
                             key="download_rotowire_dk_mismatches_csv",
+                        )
+                        with st.expander("Manual DK ID Resolver", expanded=False):
+                            if not bucket_name:
+                                st.info("Set a GCS bucket in the sidebar to save manual DK ID overrides.")
+                            else:
+                                mismatch_options = list(mismatch_df.index)
+                                selected_mismatch_idx = st.selectbox(
+                                    "Mismatch Player",
+                                    options=mismatch_options,
+                                    format_func=lambda idx: (
+                                        f"{mismatch_df.loc[idx, 'player_name']} | "
+                                        f"{mismatch_df.loc[idx, 'team_abbr']} | "
+                                        f"${int(pd.to_numeric(pd.Series([mismatch_df.loc[idx, 'salary']]), errors='coerce').fillna(0).iloc[0])} | "
+                                        f"{mismatch_df.loc[idx, 'dk_resolution_status']}"
+                                    ),
+                                    key="rotowire_mismatch_player_select",
+                                )
+                                selected_mismatch = mismatch_df.loc[selected_mismatch_idx]
+                                candidate_df = _registry_candidate_rows(
+                                    registry_df=registry_df,
+                                    player_name=str(selected_mismatch.get("player_name") or ""),
+                                    team_abbr=str(selected_mismatch.get("team_abbr") or ""),
+                                )
+                                mode_options = ["Manual Entry"]
+                                if not candidate_df.empty:
+                                    mode_options.insert(0, "Choose Registry Candidate")
+                                resolve_mode = st.radio(
+                                    "Resolution Mode",
+                                    options=mode_options,
+                                    horizontal=True,
+                                    key="rotowire_mismatch_resolution_mode",
+                                )
+
+                                rw_name_series = rotowire_players_df.get(
+                                    "player_name",
+                                    pd.Series([""] * len(rotowire_players_df), index=rotowire_players_df.index, dtype="object"),
+                                ).astype(str).str.strip()
+                                rw_team_series = rotowire_players_df.get(
+                                    "team_abbr",
+                                    pd.Series([""] * len(rotowire_players_df), index=rotowire_players_df.index, dtype="object"),
+                                ).astype(str).str.strip().str.upper()
+                                selected_rw_rows = rotowire_players_df.loc[
+                                    (rw_name_series == str(selected_mismatch.get("player_name") or "").strip())
+                                    & (rw_team_series == str(selected_mismatch.get("team_abbr") or "").strip().upper())
+                                ].copy()
+                                selected_rw_row = selected_rw_rows.iloc[0] if not selected_rw_rows.empty else pd.Series(dtype=object)
+                                default_position = str(selected_mismatch.get("position") or selected_rw_row.get("roto_position") or "").strip().upper()
+                                default_site_positions = str(selected_rw_row.get("site_positions") or "").strip().upper()
+                                default_roster_position = _default_roster_position(default_position, default_site_positions)
+                                resolved_dk_id = ""
+                                resolved_name_plus_id = ""
+                                resolved_position = default_position
+                                resolved_roster_position = default_roster_position
+
+                                if resolve_mode == "Choose Registry Candidate" and not candidate_df.empty:
+                                    candidate_labels = {
+                                        int(idx): (
+                                            f"{row['name_plus_id']} | team={row['team_abbr']} | "
+                                            f"salary={int(pd.to_numeric(pd.Series([row.get('latest_salary')]), errors='coerce').fillna(0).iloc[0])} | "
+                                            f"last_seen={pd.to_datetime(row.get('last_seen_date'), errors='coerce').strftime('%Y-%m-%d') if pd.notna(pd.to_datetime(row.get('last_seen_date'), errors='coerce')) else ''}"
+                                        )
+                                        for idx, row in candidate_df.iterrows()
+                                    }
+                                    selected_candidate_idx = st.selectbox(
+                                        "Registry Candidate",
+                                        options=list(candidate_labels.keys()),
+                                        format_func=lambda idx: candidate_labels.get(int(idx), str(idx)),
+                                        key="rotowire_registry_candidate_select",
+                                    )
+                                    candidate_row = candidate_df.loc[int(selected_candidate_idx)]
+                                    resolved_dk_id = str(candidate_row.get("dk_id") or "").strip()
+                                    resolved_name_plus_id = str(candidate_row.get("name_plus_id") or "").strip()
+                                    resolved_position = str(candidate_row.get("position") or default_position).strip().upper()
+                                    resolved_roster_position = str(candidate_row.get("roster_position") or default_roster_position).strip().upper()
+                                else:
+                                    mf1, mf2 = st.columns(2)
+                                    resolved_dk_id = mf1.text_input(
+                                        "DK ID",
+                                        value=str(selected_mismatch.get("dk_id") or "").strip(),
+                                        key="rotowire_manual_dk_id_input",
+                                    ).strip()
+                                    resolved_name_plus_id = mf2.text_input(
+                                        "Name + ID",
+                                        value=str(selected_mismatch.get("name_plus_id") or "").strip(),
+                                        key="rotowire_manual_name_plus_id_input",
+                                        help="Optional. If blank, it will be derived as `Player Name (DK ID)`.",
+                                    ).strip()
+                                    mp1, mp2 = st.columns(2)
+                                    resolved_position = mp1.text_input(
+                                        "Position",
+                                        value=default_position,
+                                        key="rotowire_manual_position_input",
+                                    ).strip().upper()
+                                    resolved_roster_position = mp2.text_input(
+                                        "Roster Position",
+                                        value=default_roster_position,
+                                        key="rotowire_manual_roster_position_input",
+                                    ).strip().upper()
+
+                                save_override_clicked = st.button(
+                                    "Save DK ID Override",
+                                    key="save_rotowire_dk_override",
+                                )
+                                if save_override_clicked:
+                                    if not resolved_dk_id:
+                                        st.error("DK ID is required to save a manual override.")
+                                    else:
+                                        if not resolved_name_plus_id:
+                                            resolved_name_plus_id = f"{str(selected_mismatch.get('player_name') or '').strip()} ({resolved_dk_id})"
+                                        override_row = {
+                                            "player_name": str(selected_mismatch.get("player_name") or "").strip(),
+                                            "team_abbr": str(selected_mismatch.get("team_abbr") or "").strip().upper(),
+                                            "opp_abbr": str(selected_mismatch.get("opp_abbr") or "").strip().upper(),
+                                            "salary": int(pd.to_numeric(pd.Series([selected_mismatch.get("salary")]), errors="coerce").fillna(0).iloc[0]),
+                                            "position": str(resolved_position or default_position).strip().upper(),
+                                            "roster_position": str(resolved_roster_position or default_roster_position).strip().upper(),
+                                            "game_key": _rotowire_game_key_for_row(selected_rw_row),
+                                            "dk_id": resolved_dk_id,
+                                            "name_plus_id": resolved_name_plus_id,
+                                            "slate_date": rotowire_selected_date.isoformat(),
+                                            "slate_key": str(shared_slate_key or "").strip().lower(),
+                                            "source_name": f"manual_override:{rotowire_selected_date.isoformat()}:{shared_slate_key}",
+                                        }
+                                        try:
+                                            merged_overrides_df, blob_name = _upsert_dk_registry_manual_override(
+                                                bucket_name=bucket_name,
+                                                gcp_project=gcp_project or None,
+                                                service_account_json=cred_json,
+                                                service_account_json_b64=cred_json_b64,
+                                                override_row=override_row,
+                                            )
+                                            load_dk_registry_manual_overrides_frame.clear()
+                                            load_dk_identity_registry_frame.clear()
+                                            resolve_optimizer_slate_frame_for_date.clear()
+                                            st.success(
+                                                f"Saved manual DK override to `{blob_name}`. "
+                                                f"Total overrides: {len(merged_overrides_df)}."
+                                            )
+                                        except Exception as exc:
+                                            st.exception(exc)
+
+                if not manual_overrides_df.empty:
+                    with st.expander("Saved Manual DK Overrides", expanded=False):
+                        override_show_cols = [
+                            "player_name",
+                            "team_abbr",
+                            "opp_abbr",
+                            "salary",
+                            "position",
+                            "roster_position",
+                            "dk_id",
+                            "name_plus_id",
+                            "slate_date",
+                            "slate_key",
+                        ]
+                        st.dataframe(
+                            manual_overrides_df[[c for c in override_show_cols if c in manual_overrides_df.columns]],
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+                        st.download_button(
+                            "Download Manual DK Overrides CSV",
+                            data=manual_overrides_df.to_csv(index=False),
+                            file_name="dk_manual_overrides.csv",
+                            mime="text/csv",
+                            key="download_manual_dk_overrides_csv",
                         )
 
                 export_csv = rotowire_players_df.to_csv(index=False)

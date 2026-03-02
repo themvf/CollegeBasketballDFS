@@ -55,6 +55,7 @@ class CbbGcsStore:
     props_prefix: str = "cbb/props"
     props_lines_prefix: str = "cbb/props_lines"
     dk_slates_prefix: str = "cbb/dk_slates"
+    dk_registry_prefix: str = "cbb/dk_registry"
     injuries_prefix: str = "cbb/injuries"
     projections_prefix: str = "cbb/projections"
     ownership_prefix: str = "cbb/ownership"
@@ -99,6 +100,9 @@ class CbbGcsStore:
 
     def injuries_blob_name(self) -> str:
         return f"{self.injuries_prefix}/injuries_master.csv"
+
+    def dk_registry_manual_blob_name(self) -> str:
+        return f"{self.dk_registry_prefix}/manual_overrides.csv"
 
     def injuries_feed_blob_name(self, game_date: date | None = None) -> str:
         if game_date is None:
@@ -355,6 +359,18 @@ class CbbGcsStore:
                 blob.delete()
                 return True
         return False
+
+    def read_dk_registry_manual_csv(self) -> str | None:
+        blob = self.bucket.blob(self.dk_registry_manual_blob_name())
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_dk_registry_manual_csv(self, csv_text: str) -> str:
+        blob_name = self.dk_registry_manual_blob_name()
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
 
     def read_injuries_csv(self) -> str | None:
         blob = self.bucket.blob(self.injuries_blob_name())
