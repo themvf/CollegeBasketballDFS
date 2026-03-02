@@ -157,22 +157,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": False,
         "model_profile": "legacy_baseline",
-        "all_versions_weight": 0.08,
+        "all_versions_weight": 0.05,
         "gpp_overrides": {
-            "salary_left_target": 260,
-            "low_own_bucket_exposure_pct": 34.0,
+            "salary_left_target": 150,
+            "low_own_bucket_exposure_pct": 28.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 13.0,
-            "low_own_bucket_min_projection": 20.0,
+            "low_own_bucket_min_projection": 18.0,
             "low_own_bucket_min_tail_score": 56.0,
-            "low_own_bucket_objective_bonus": 1.2,
-            "preferred_game_bonus": 0.8,
-            "preferred_game_stack_lineup_pct": 45.0,
-            "preferred_game_stack_min_players": 2,
-            "max_unsupported_false_chalk_per_lineup": 2,
+            "low_own_bucket_objective_bonus": 1.0,
+            "preferred_game_bonus": 0.9,
+            "preferred_game_stack_lineup_pct": 55.0,
+            "preferred_game_stack_min_players": 3,
+            "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 32.0,
             "ceiling_boost_stack_bonus": 2.4,
-            "ceiling_boost_salary_left_target": 150,
+            "ceiling_boost_salary_left_target": 120,
         },
     },
     {
@@ -181,22 +181,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "spike",
         "include_tail_signals": True,
         "model_profile": "tail_spike_pairs",
-        "all_versions_weight": 0.27,
+        "all_versions_weight": 0.28,
         "gpp_overrides": {
-            "salary_left_target": 420,
-            "low_own_bucket_exposure_pct": 68.0,
+            "salary_left_target": 240,
+            "low_own_bucket_exposure_pct": 52.0,
             "low_own_bucket_min_per_lineup": 2,
             "low_own_bucket_max_projected_ownership": 11.0,
             "low_own_bucket_min_projection": 16.0,
             "low_own_bucket_min_tail_score": 62.0,
-            "low_own_bucket_objective_bonus": 2.0,
+            "low_own_bucket_objective_bonus": 1.8,
             "preferred_game_bonus": 1.3,
-            "preferred_game_stack_lineup_pct": 60.0,
-            "preferred_game_stack_min_players": 2,
+            "preferred_game_stack_lineup_pct": 68.0,
+            "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 70.0,
             "ceiling_boost_stack_bonus": 3.5,
-            "ceiling_boost_salary_left_target": 230,
+            "ceiling_boost_salary_left_target": 170,
         },
     },
     {
@@ -205,22 +205,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "standout_capture_v1",
-        "all_versions_weight": 0.18,
+        "all_versions_weight": 0.19,
         "gpp_overrides": {
-            "salary_left_target": 340,
-            "low_own_bucket_exposure_pct": 54.0,
+            "salary_left_target": 170,
+            "low_own_bucket_exposure_pct": 42.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 12.0,
             "low_own_bucket_min_projection": 18.0,
             "low_own_bucket_min_tail_score": 58.0,
-            "low_own_bucket_objective_bonus": 1.7,
+            "low_own_bucket_objective_bonus": 1.5,
             "preferred_game_bonus": 1.1,
-            "preferred_game_stack_lineup_pct": 55.0,
-            "preferred_game_stack_min_players": 2,
+            "preferred_game_stack_lineup_pct": 62.0,
+            "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 52.0,
             "ceiling_boost_stack_bonus": 2.9,
-            "ceiling_boost_salary_left_target": 190,
+            "ceiling_boost_salary_left_target": 145,
         },
     },
     {
@@ -231,20 +231,20 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "model_profile": "chalk_value_capture_v1",
         "all_versions_weight": 0.12,
         "gpp_overrides": {
-            "salary_left_target": 290,
-            "low_own_bucket_exposure_pct": 32.0,
+            "salary_left_target": 150,
+            "low_own_bucket_exposure_pct": 26.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 13.0,
-            "low_own_bucket_min_projection": 19.0,
+            "low_own_bucket_min_projection": 18.0,
             "low_own_bucket_min_tail_score": 55.0,
-            "low_own_bucket_objective_bonus": 1.3,
-            "preferred_game_bonus": 0.9,
-            "preferred_game_stack_lineup_pct": 60.0,
+            "low_own_bucket_objective_bonus": 1.1,
+            "preferred_game_bonus": 1.0,
+            "preferred_game_stack_lineup_pct": 66.0,
             "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 38.0,
             "ceiling_boost_stack_bonus": 2.5,
-            "ceiling_boost_salary_left_target": 160,
+            "ceiling_boost_salary_left_target": 125,
         },
     },
     {
@@ -253,22 +253,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "salary_efficiency_ceiling_v1",
-        "all_versions_weight": 0.35,
+        "all_versions_weight": 0.36,
         "gpp_overrides": {
-            "salary_left_target": 370,
-            "low_own_bucket_exposure_pct": 48.0,
+            "salary_left_target": 130,
+            "low_own_bucket_exposure_pct": 38.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 12.0,
             "low_own_bucket_min_projection": 20.0,
             "low_own_bucket_min_tail_score": 60.0,
-            "low_own_bucket_objective_bonus": 1.6,
-            "preferred_game_bonus": 1.1,
-            "preferred_game_stack_lineup_pct": 70.0,
+            "low_own_bucket_objective_bonus": 1.4,
+            "preferred_game_bonus": 1.2,
+            "preferred_game_stack_lineup_pct": 78.0,
             "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 66.0,
             "ceiling_boost_stack_bonus": 3.1,
-            "ceiling_boost_salary_left_target": 210,
+            "ceiling_boost_salary_left_target": 150,
         },
     },
 )
@@ -3211,6 +3211,55 @@ def load_rotowire_players_frame(
     return normalize_rotowire_players(raw_players, slate_row=slate_row)
 
 
+def load_rotowire_projection_frame_for_date(
+    selected_date: date,
+    selected_slate_key: str | None,
+    cookie_header: str | None,
+    site_id: int = 1,
+) -> pd.DataFrame:
+    slates_df = load_rotowire_slates_frame(site_id=site_id, cookie_header=cookie_header)
+    if slates_df.empty:
+        return pd.DataFrame()
+
+    slate_date = selected_date.isoformat()
+    filtered = slates_df.loc[slates_df["slate_date"].astype(str) == slate_date].copy()
+    if filtered.empty:
+        return pd.DataFrame()
+
+    contest_mask = filtered["contest_type"].astype(str).str.strip().str.lower() == "classic"
+    if contest_mask.any():
+        filtered = filtered.loc[contest_mask].copy()
+
+    preferred_name = _default_rotowire_slate_name(selected_slate_key)
+    if preferred_name:
+        preferred_mask = filtered["slate_name"].astype(str).str.strip().str.lower() == preferred_name.strip().lower()
+        if preferred_mask.any():
+            filtered = filtered.loc[preferred_mask].copy()
+
+    default_mask = filtered.get("default_slate", pd.Series([False] * len(filtered), index=filtered.index)).astype(bool)
+    if default_mask.any():
+        filtered = filtered.loc[default_mask].copy()
+
+    if len(filtered) > 1:
+        filtered = filtered.sort_values(
+            ["game_count", "start_datetime", "slate_id"],
+            ascending=[False, True, True],
+            kind="stable",
+        ).reset_index(drop=True)
+    slate_row = filtered.iloc[0]
+    slate_id = _safe_int_value(slate_row.get("slate_id"), 0)
+    if slate_id <= 0:
+        return pd.DataFrame()
+    return load_rotowire_players_frame(
+        site_id=site_id,
+        slate_id=slate_id,
+        slate_date=str(slate_row.get("slate_date") or slate_date),
+        contest_type=str(slate_row.get("contest_type") or ""),
+        slate_name=str(slate_row.get("slate_name") or ""),
+        cookie_header=cookie_header,
+    )
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_contest_standings_frame(
     bucket_name: str,
@@ -3307,11 +3356,22 @@ def build_optimizer_pool_for_date(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
+    rotowire_df = pd.DataFrame()
+    try:
+        rotowire_df = load_rotowire_projection_frame_for_date(
+            selected_date=slate_date,
+            selected_slate_key=slate_key,
+            cookie_header=_resolve_rotowire_cookie(),
+            site_id=1,
+        )
+    except Exception:
+        rotowire_df = pd.DataFrame()
     pool_df = build_player_pool(
         slate_df=filtered_slate,
         props_df=props_df,
         season_stats_df=season_history_df,
         ownership_history_df=ownership_history_df,
+        rotowire_df=rotowire_df,
         bookmaker_filter=(bookmaker or None),
         odds_games_df=odds_scored_df,
         recent_form_games=int(max(1, recent_form_games)),
@@ -4247,9 +4307,27 @@ with tab_slate_vegas:
                         "our_assists_proj",
                         "our_threes_proj",
                         "our_dk_projection",
+                        "projection_pre_rotowire",
+                        "consensus_dk_projection",
                         "projected_dk_points",
                         "projected_ownership",
                         "leverage_score",
+                        "consensus_minutes_proj",
+                        "rotowire_proj_fantasy_points",
+                        "rotowire_proj_minutes",
+                        "rotowire_value_per_1k",
+                        "rotowire_projection_delta",
+                        "rotowire_projection_delta_pct",
+                        "rotowire_minutes_delta_vs_recent",
+                        "rotowire_signal_score",
+                        "rotowire_value_signal",
+                        "rotowire_ownership_bonus",
+                        "rotowire_blend_weight",
+                        "rotowire_minutes_blend_weight",
+                        "rotowire_match_source",
+                        "rotowire_upside_flag",
+                        "rotowire_chalk_floor_flag",
+                        "rotowire_chalk_floor_target",
                         "game_tail_match_score",
                         "game_total_line",
                         "game_spread_line",
@@ -4294,9 +4372,24 @@ with tab_slate_vegas:
                         "our_assists_proj",
                         "our_threes_proj",
                         "our_dk_projection",
+                        "projection_pre_rotowire",
+                        "consensus_dk_projection",
                         "projected_dk_points",
                         "projected_ownership",
                         "leverage_score",
+                        "consensus_minutes_proj",
+                        "rotowire_proj_fantasy_points",
+                        "rotowire_proj_minutes",
+                        "rotowire_value_per_1k",
+                        "rotowire_projection_delta",
+                        "rotowire_projection_delta_pct",
+                        "rotowire_minutes_delta_vs_recent",
+                        "rotowire_signal_score",
+                        "rotowire_value_signal",
+                        "rotowire_ownership_bonus",
+                        "rotowire_blend_weight",
+                        "rotowire_minutes_blend_weight",
+                        "rotowire_chalk_floor_target",
                         "game_tail_match_score",
                         "game_total_line",
                         "game_spread_line",

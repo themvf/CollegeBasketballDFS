@@ -110,6 +110,45 @@ def _sample_season_stats() -> pd.DataFrame:
     )
 
 
+def _sample_rotowire_players() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "player_name": "Guard 1",
+                "team_abbr": "CCC",
+                "proj_fantasy_points": 39.8,
+                "proj_minutes": 37.0,
+                "proj_value_per_1k": 6.42,
+                "avg_fpts_last3": 37.1,
+                "avg_fpts_last5": 35.6,
+                "avg_fpts_last7": 34.9,
+                "avg_fpts_season": 31.2,
+                "usage_rate": 27.8,
+                "implied_points": 75.5,
+                "over_under": 151.5,
+                "spread": -4.0,
+                "salary": 6200,
+            },
+            {
+                "player_name": "Guard 6",
+                "team_abbr": "AAA",
+                "proj_fantasy_points": 31.4,
+                "proj_minutes": 35.0,
+                "proj_value_per_1k": 5.73,
+                "avg_fpts_last3": 28.4,
+                "avg_fpts_last5": 26.9,
+                "avg_fpts_last7": 25.7,
+                "avg_fpts_season": 22.8,
+                "usage_rate": 24.1,
+                "implied_points": 73.0,
+                "over_under": 147.5,
+                "spread": -2.5,
+                "salary": 5480,
+            },
+        ]
+    )
+
+
 def test_remove_injured_players_filters_out_and_doubtful() -> None:
     slate = _sample_slate()
     injuries = pd.DataFrame(
@@ -255,6 +294,51 @@ def test_build_player_pool_uses_historical_ownership_prior_when_current_field_is
         - pd.to_numeric(base_pool["projected_ownership"], errors="coerce")
     ).abs().sum()
     assert projected_shift > 0.0
+
+
+def test_build_player_pool_blends_rotowire_projection_and_minutes_signal() -> None:
+    base_pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        bookmaker_filter="fanduel",
+    )
+    rw_pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        rotowire_df=_sample_rotowire_players(),
+        bookmaker_filter="fanduel",
+    )
+
+    base_g1 = base_pool.loc[base_pool["Name"] == "Guard 1"].iloc[0]
+    rw_g1 = rw_pool.loc[rw_pool["Name"] == "Guard 1"].iloc[0]
+
+    assert rw_g1["rotowire_match_source"] == "team_exact"
+    assert bool(rw_g1["rotowire_projection_available"]) is True
+    assert bool(rw_g1["rotowire_minutes_available"]) is True
+    assert float(rw_g1["consensus_dk_projection"]) > float(base_g1["projected_dk_points"])
+    assert float(rw_g1["consensus_minutes_proj"]) > float(base_g1["our_minutes_avg"])
+    assert float(rw_g1["rotowire_signal_score"]) > 0.0
+    assert float(rw_g1["rotowire_blend_weight"]) > 0.0
+
+
+def test_build_player_pool_rotowire_value_signal_lifts_cheap_player_ownership() -> None:
+    base_pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    rw_pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        rotowire_df=_sample_rotowire_players(),
+        bookmaker_filter="fanduel",
+    )
+
+    base_g6 = base_pool.loc[base_pool["Name"] == "Guard 6"].iloc[0]
+    rw_g6 = rw_pool.loc[rw_pool["Name"] == "Guard 6"].iloc[0]
+
+    assert float(rw_g6["projected_ownership"]) >= float(base_g6["projected_ownership"])
+    assert float(rw_g6["rotowire_ownership_bonus"]) > 0.0
+    assert float(rw_g6["rotowire_value_signal"]) > 0.0
+    assert float(rw_g6["rotowire_blend_weight"]) > 0.0
 
 
 def test_generate_lineups_respects_locks_and_excludes() -> None:

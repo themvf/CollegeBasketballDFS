@@ -61,10 +61,16 @@ def _player_expected_minutes(player: dict[str, Any]) -> float:
     return max(
         0.0,
         _safe_num(
-            player.get("our_minutes_recent"),
+            player.get("consensus_minutes_proj"),
             _safe_num(
-                player.get("our_minutes_last7"),
-                _safe_num(player.get("our_minutes_last3"), _safe_num(player.get("our_minutes_avg"), 0.0)),
+                player.get("our_minutes_recent"),
+                _safe_num(
+                    player.get("rotowire_proj_minutes"),
+                    _safe_num(
+                        player.get("our_minutes_last7"),
+                        _safe_num(player.get("our_minutes_last3"), _safe_num(player.get("our_minutes_avg"), 0.0)),
+                    ),
+                ),
             ),
         ),
     )
@@ -328,6 +334,218 @@ def _attach_historical_ownership_priors(
         & pd.to_numeric(out["historical_ownership_avg"], errors="coerce").notna()
     ] = "historical_avg"
     out["ownership_prior_source"] = source
+    return out
+
+
+def _attach_rotowire_priors(
+    pool_df: pd.DataFrame,
+    rotowire_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    for col in [
+        "rotowire_proj_fantasy_points",
+        "rotowire_proj_minutes",
+        "rotowire_value_per_1k",
+        "rotowire_avg_fpts_last5",
+        "rotowire_avg_fpts_season",
+        "rotowire_usage_rate",
+        "rotowire_salary",
+    ]:
+        if col not in out.columns:
+            out[col] = pd.NA
+    if "rotowire_match_source" not in out.columns:
+        out["rotowire_match_source"] = ""
+    if "rotowire_projection_available" not in out.columns:
+        out["rotowire_projection_available"] = False
+    if "rotowire_minutes_available" not in out.columns:
+        out["rotowire_minutes_available"] = False
+
+    if rotowire_df is None or rotowire_df.empty:
+        return out
+
+    rw = rotowire_df.copy()
+    normalized_cols = {_normalize_col_name(col): col for col in rw.columns}
+    rename_map: dict[str, str] = {}
+    for alias, dest in {
+        "playername": "player_name",
+        "name": "player_name",
+        "player": "player_name",
+        "teamabbr": "team_abbr",
+        "teamabbrev": "team_abbr",
+        "team": "team_abbr",
+        "projfantasypoints": "proj_fantasy_points",
+        "projectedfantasypoints": "proj_fantasy_points",
+        "projfpts": "proj_fantasy_points",
+        "pts": "proj_fantasy_points",
+        "projminutes": "proj_minutes",
+        "projectedminutes": "proj_minutes",
+        "minutes": "proj_minutes",
+        "min": "proj_minutes",
+        "projvalueper1k": "proj_value_per_1k",
+        "valueper1k": "proj_value_per_1k",
+        "avgfptslast5": "avg_fpts_last5",
+        "avgfptsseason": "avg_fpts_season",
+        "usagerate": "usage_rate",
+        "salary": "salary",
+    }.items():
+        source_col = normalized_cols.get(alias)
+        if source_col and source_col not in rename_map:
+            rename_map[source_col] = dest
+    if rename_map:
+        rw = rw.rename(columns=rename_map)
+
+    if "player_name" not in rw.columns:
+        return out
+    if "team_abbr" not in rw.columns:
+        rw["team_abbr"] = ""
+    for col in ["proj_fantasy_points", "proj_minutes", "proj_value_per_1k", "avg_fpts_last5", "avg_fpts_season", "usage_rate", "salary"]:
+        if col not in rw.columns:
+            rw[col] = pd.NA
+
+    rw["player_name"] = rw["player_name"].astype(str).str.strip()
+    rw["team_abbr"] = rw["team_abbr"].astype(str).str.strip().str.upper()
+    rw["_name_norm"] = rw["player_name"].map(_normalize_text)
+    rw["_team_norm"] = rw["team_abbr"].map(_normalize_text)
+    rw["proj_fantasy_points"] = pd.to_numeric(rw.get("proj_fantasy_points"), errors="coerce")
+    rw["proj_minutes"] = pd.to_numeric(rw.get("proj_minutes"), errors="coerce")
+    rw["proj_value_per_1k"] = pd.to_numeric(rw.get("proj_value_per_1k"), errors="coerce")
+    rw["avg_fpts_last5"] = pd.to_numeric(rw.get("avg_fpts_last5"), errors="coerce")
+    rw["avg_fpts_season"] = pd.to_numeric(rw.get("avg_fpts_season"), errors="coerce")
+    rw["usage_rate"] = pd.to_numeric(rw.get("usage_rate"), errors="coerce")
+    rw["salary"] = pd.to_numeric(rw.get("salary"), errors="coerce")
+    rw["proj_value_per_1k"] = rw["proj_value_per_1k"].where(
+        rw["proj_value_per_1k"].notna(),
+        (rw["proj_fantasy_points"] / rw["salary"].replace(0.0, pd.NA)) * 1000.0,
+    )
+    rw = rw.loc[
+        (rw["_name_norm"] != "")
+        & (rw["proj_fantasy_points"].notna() | rw["proj_minutes"].notna())
+    ].copy()
+    if rw.empty:
+        return out
+
+    sort_projection = rw["proj_fantasy_points"].fillna(-9999.0)
+    sort_minutes = rw["proj_minutes"].fillna(-9999.0)
+    rw = rw.assign(_sort_projection=sort_projection, _sort_minutes=sort_minutes)
+    rw = rw.sort_values(["_name_norm", "_team_norm", "_sort_projection", "_sort_minutes"], ascending=[True, True, False, False], kind="stable")
+
+    exact = (
+        rw.loc[rw["_team_norm"] != ""]
+        .drop_duplicates(subset=["_name_norm", "_team_norm"], keep="first")
+        [
+            [
+                "_name_norm",
+                "_team_norm",
+                "proj_fantasy_points",
+                "proj_minutes",
+                "proj_value_per_1k",
+                "avg_fpts_last5",
+                "avg_fpts_season",
+                "usage_rate",
+                "salary",
+            ]
+        ]
+        .rename(
+            columns={
+                "proj_fantasy_points": "rotowire_proj_fantasy_points_exact",
+                "proj_minutes": "rotowire_proj_minutes_exact",
+                "proj_value_per_1k": "rotowire_value_per_1k_exact",
+                "avg_fpts_last5": "rotowire_avg_fpts_last5_exact",
+                "avg_fpts_season": "rotowire_avg_fpts_season_exact",
+                "usage_rate": "rotowire_usage_rate_exact",
+                "salary": "rotowire_salary_exact",
+            }
+        )
+    )
+    if not exact.empty:
+        out = out.merge(exact, on=["_name_norm", "_team_norm"], how="left")
+
+    current_name_counts = out["_name_norm"].value_counts(dropna=False)
+    unique_current_names = set(current_name_counts.loc[current_name_counts == 1].index.tolist())
+    rw_name_counts = rw["_name_norm"].value_counts(dropna=False)
+    unique_rw_names = set(rw_name_counts.loc[rw_name_counts == 1].index.tolist())
+    fallback_keys = unique_current_names & unique_rw_names
+    fallback = (
+        rw.loc[rw["_name_norm"].isin(fallback_keys)]
+        .drop_duplicates(subset=["_name_norm"], keep="first")
+        [
+            [
+                "_name_norm",
+                "proj_fantasy_points",
+                "proj_minutes",
+                "proj_value_per_1k",
+                "avg_fpts_last5",
+                "avg_fpts_season",
+                "usage_rate",
+                "salary",
+            ]
+        ]
+        .rename(
+            columns={
+                "proj_fantasy_points": "rotowire_proj_fantasy_points_name",
+                "proj_minutes": "rotowire_proj_minutes_name",
+                "proj_value_per_1k": "rotowire_value_per_1k_name",
+                "avg_fpts_last5": "rotowire_avg_fpts_last5_name",
+                "avg_fpts_season": "rotowire_avg_fpts_season_name",
+                "usage_rate": "rotowire_usage_rate_name",
+                "salary": "rotowire_salary_name",
+            }
+        )
+    )
+    if not fallback.empty:
+        out = out.merge(fallback, on="_name_norm", how="left")
+
+    for base_col in [
+        "rotowire_proj_fantasy_points",
+        "rotowire_proj_minutes",
+        "rotowire_value_per_1k",
+        "rotowire_avg_fpts_last5",
+        "rotowire_avg_fpts_season",
+        "rotowire_usage_rate",
+        "rotowire_salary",
+    ]:
+        exact_col = f"{base_col}_exact"
+        name_col = f"{base_col}_name"
+        out[base_col] = pd.to_numeric(out.get(exact_col), errors="coerce")
+        out[base_col] = out[base_col].where(
+            out[base_col].notna(),
+            pd.to_numeric(out.get(name_col), errors="coerce"),
+        )
+
+    match_source = pd.Series([""] * len(out), index=out.index, dtype="object")
+    exact_available = (
+        pd.to_numeric(out.get("rotowire_proj_fantasy_points_exact"), errors="coerce").notna()
+        | pd.to_numeric(out.get("rotowire_proj_minutes_exact"), errors="coerce").notna()
+    )
+    fallback_available = (
+        pd.to_numeric(out.get("rotowire_proj_fantasy_points_name"), errors="coerce").notna()
+        | pd.to_numeric(out.get("rotowire_proj_minutes_name"), errors="coerce").notna()
+    )
+    match_source.loc[exact_available] = "team_exact"
+    match_source.loc[(match_source == "") & fallback_available] = "name_only"
+    out["rotowire_match_source"] = match_source
+    out["rotowire_projection_available"] = pd.to_numeric(out.get("rotowire_proj_fantasy_points"), errors="coerce").notna()
+    out["rotowire_minutes_available"] = pd.to_numeric(out.get("rotowire_proj_minutes"), errors="coerce").notna()
+
+    helper_cols = [
+        "rotowire_proj_fantasy_points_exact",
+        "rotowire_proj_minutes_exact",
+        "rotowire_value_per_1k_exact",
+        "rotowire_avg_fpts_last5_exact",
+        "rotowire_avg_fpts_season_exact",
+        "rotowire_usage_rate_exact",
+        "rotowire_salary_exact",
+        "rotowire_proj_fantasy_points_name",
+        "rotowire_proj_minutes_name",
+        "rotowire_value_per_1k_name",
+        "rotowire_avg_fpts_last5_name",
+        "rotowire_avg_fpts_season_name",
+        "rotowire_usage_rate_name",
+        "rotowire_salary_name",
+    ]
+    existing_helpers = [col for col in helper_cols if col in out.columns]
+    if existing_helpers:
+        out = out.drop(columns=existing_helpers)
     return out
 
 
@@ -817,6 +1035,7 @@ def build_player_pool(
     props_df: pd.DataFrame | None,
     season_stats_df: pd.DataFrame | None = None,
     ownership_history_df: pd.DataFrame | None = None,
+    rotowire_df: pd.DataFrame | None = None,
     bookmaker_filter: str | None = None,
     odds_games_df: pd.DataFrame | None = None,
     recent_form_games: int = 7,
@@ -840,6 +1059,7 @@ def build_player_pool(
     out["_name_norm"] = out["Name"].map(_normalize_text)
     out["_team_norm"] = out["TeamAbbrev"].map(_normalize_text)
     out = _attach_historical_ownership_priors(out, ownership_history_df)
+    out = _attach_rotowire_priors(out, rotowire_df)
 
     # Attach game-level Vegas tail metrics (p+8 / p+12 / volatility) by matching slate game keys to odds events.
     if odds_games_df is not None and not odds_games_df.empty and "game_key" in out.columns:
@@ -1216,6 +1436,70 @@ def build_player_pool(
         + bonus
     ).astype(float)
 
+    projection_pre_rotowire = pd.to_numeric(out["projected_dk_points"], errors="coerce")
+    salary_num = pd.to_numeric(out.get("Salary"), errors="coerce")
+    rotowire_proj = pd.to_numeric(out.get("rotowire_proj_fantasy_points"), errors="coerce")
+    rotowire_minutes = pd.to_numeric(out.get("rotowire_proj_minutes"), errors="coerce")
+    our_minutes_signal = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    our_minutes_signal = our_minutes_signal.where(
+        our_minutes_signal.notna(),
+        pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"),
+    )
+    our_minutes_signal = our_minutes_signal.where(
+        our_minutes_signal.notna(),
+        pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"),
+    )
+    rotowire_value = pd.to_numeric(out.get("rotowire_value_per_1k"), errors="coerce")
+    has_vegas_projection = pd.to_numeric(out.get("vegas_blend_weight"), errors="coerce").fillna(0.0) > 0.0
+    positive_projection_delta = (rotowire_proj - projection_pre_rotowire).clip(lower=0.0).fillna(0.0)
+    positive_minutes_delta = (rotowire_minutes - our_minutes_signal).clip(lower=0.0).fillna(0.0)
+    rotowire_value_rank = _rank_pct_series(rotowire_value).fillna(0.0)
+    rotowire_blend_weight = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    rotowire_blend_weight.loc[rotowire_proj.notna() & (~has_vegas_projection)] = 0.28
+    rotowire_blend_weight.loc[rotowire_proj.notna() & has_vegas_projection] = 0.18
+    rotowire_blend_weight = rotowire_blend_weight + ((salary_num < 6500.0).astype(float) * 0.05)
+    rotowire_blend_weight = rotowire_blend_weight + ((positive_projection_delta / 12.0).clip(lower=0.0, upper=1.0) * 0.08)
+    rotowire_blend_weight = rotowire_blend_weight + ((positive_minutes_delta / 8.0).clip(lower=0.0, upper=1.0) * 0.09)
+    rotowire_blend_weight = rotowire_blend_weight + (rotowire_value_rank * (salary_num < 6500.0).astype(float) * 0.05)
+    rotowire_blend_weight = rotowire_blend_weight.where(rotowire_proj.notna(), 0.0).clip(lower=0.0, upper=0.48)
+    rotowire_blend_weight.loc[projection_pre_rotowire.isna() & rotowire_proj.notna()] = 1.0
+    consensus_projection = (
+        ((1.0 - rotowire_blend_weight) * projection_pre_rotowire.fillna(rotowire_proj))
+        + (rotowire_blend_weight * rotowire_proj.fillna(projection_pre_rotowire))
+    )
+    consensus_projection = consensus_projection.where(consensus_projection.notna(), projection_pre_rotowire)
+
+    rotowire_minutes_blend_weight = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    rotowire_minutes_blend_weight.loc[rotowire_minutes.notna() & our_minutes_signal.notna()] = 0.35
+    rotowire_minutes_blend_weight = rotowire_minutes_blend_weight + ((salary_num < 6500.0).astype(float) * 0.05)
+    rotowire_minutes_blend_weight = rotowire_minutes_blend_weight + (
+        (positive_minutes_delta / 8.0).clip(lower=0.0, upper=1.0) * 0.20
+    )
+    rotowire_minutes_blend_weight = rotowire_minutes_blend_weight + (
+        rotowire_value_rank * (salary_num < 7000.0).astype(float) * 0.08
+    )
+    rotowire_minutes_blend_weight = rotowire_minutes_blend_weight.where(rotowire_minutes.notna(), 0.0).clip(
+        lower=0.0,
+        upper=0.65,
+    )
+    rotowire_minutes_blend_weight.loc[our_minutes_signal.isna() & rotowire_minutes.notna()] = 1.0
+    consensus_minutes = (
+        ((1.0 - rotowire_minutes_blend_weight) * our_minutes_signal.fillna(rotowire_minutes))
+        + (rotowire_minutes_blend_weight * rotowire_minutes.fillna(our_minutes_signal))
+    )
+    consensus_minutes = consensus_minutes.where(consensus_minutes.notna(), our_minutes_signal)
+
+    out["projection_pre_rotowire"] = projection_pre_rotowire.round(4)
+    out["rotowire_blend_weight"] = rotowire_blend_weight.round(4)
+    out["consensus_dk_projection"] = pd.to_numeric(consensus_projection, errors="coerce").round(4)
+    out["projected_dk_points"] = pd.to_numeric(out["consensus_dk_projection"], errors="coerce")
+    out["rotowire_minutes_blend_weight"] = rotowire_minutes_blend_weight.round(4)
+    out["consensus_minutes_proj"] = pd.to_numeric(consensus_minutes, errors="coerce").round(3)
+    out["rotowire_projection_delta"] = (rotowire_proj - projection_pre_rotowire).round(4)
+    out["rotowire_projection_delta_pct"] = (
+        ((rotowire_proj - projection_pre_rotowire) / projection_pre_rotowire.replace(0.0, pd.NA)) * 100.0
+    ).round(4)
+    out["rotowire_minutes_delta_vs_recent"] = (rotowire_minutes - our_minutes_signal).round(4)
     out["blended_projection"] = out["projected_dk_points"]
     out["projection_per_dollar"] = out["projected_dk_points"] / out["Salary"].replace(0, pd.NA)
     out["value_per_1k"] = out["projection_per_dollar"] * 1000.0
@@ -1234,6 +1518,37 @@ def build_player_pool(
     salary_num = pd.to_numeric(out.get("Salary"), errors="coerce")
     value_per_1k = pd.to_numeric(out["value_per_1k"], errors="coerce")
     val_pct = _rank_pct_series(value_per_1k)
+    rotowire_proj_pct = _rank_pct_series(rotowire_proj).fillna(0.0)
+    rotowire_value_pct = _rank_pct_series(rotowire_value).fillna(0.0)
+    rotowire_minutes_pct = _rank_pct_series(rotowire_minutes).fillna(0.0)
+    positive_projection_signal = (positive_projection_delta / 10.0).clip(lower=0.0, upper=1.0)
+    positive_minutes_signal = (positive_minutes_delta / 6.0).clip(lower=0.0, upper=1.0)
+    rotowire_signal_score = (
+        (0.34 * rotowire_proj_pct)
+        + (0.24 * rotowire_minutes_pct)
+        + (0.20 * rotowire_value_pct)
+        + (0.14 * positive_projection_signal.fillna(0.0))
+        + (0.08 * positive_minutes_signal.fillna(0.0))
+    ).where(rotowire_proj.notna() | rotowire_minutes.notna(), 0.0).clip(lower=0.0, upper=1.0)
+    rotowire_value_signal = (
+        (0.45 * rotowire_value_pct)
+        + (0.35 * rotowire_proj_pct)
+        + (0.20 * positive_minutes_signal.fillna(0.0))
+    ).where(rotowire_proj.notna() | rotowire_minutes.notna(), 0.0).clip(lower=0.0, upper=1.0)
+    consensus_value_signal = (
+        (0.45 * val_pct)
+        + (0.30 * rotowire_value_pct)
+        + (0.15 * rotowire_proj_pct)
+        + (0.10 * positive_projection_signal.fillna(0.0))
+    ).clip(lower=0.0, upper=1.0)
+    out["rotowire_signal_score"] = rotowire_signal_score.round(4)
+    out["rotowire_value_signal"] = rotowire_value_signal.round(4)
+    out["consensus_value_signal"] = consensus_value_signal.round(4)
+    out["rotowire_upside_flag"] = (
+        ((rotowire_signal_score >= 0.66) & ((positive_projection_delta >= 1.5) | (positive_minutes_delta >= 3.0)))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
     ownership_salary_bucket = salary_num.map(ownership_salary_bucket_key)
     out["ownership_salary_bucket"] = ownership_salary_bucket
     value_tier_median = value_per_1k.groupby(ownership_salary_bucket).transform("median")
@@ -1249,7 +1564,8 @@ def build_player_pool(
             "gte7500": -0.04,
         }
     ).fillna(0.0)
-    mins_signal = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    mins_signal = pd.to_numeric(out.get("consensus_minutes_proj"), errors="coerce")
+    mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_recent"), errors="coerce"))
     mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"))
     mins_signal = mins_signal.where(mins_signal.notna(), pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"))
     mins_pct = _rank_pct_series(mins_signal)
@@ -1267,11 +1583,16 @@ def build_player_pool(
 
     # Lightweight minutes/DNP uncertainty model from trend + usage + slate volatility.
     mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
-    mins_recent_signal = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    mins_recent_signal = pd.to_numeric(out.get("consensus_minutes_proj"), errors="coerce")
+    mins_recent_signal = mins_recent_signal.where(
+        mins_recent_signal.notna(),
+        pd.to_numeric(out.get("our_minutes_recent"), errors="coerce"),
+    )
     mins_recent_signal = mins_recent_signal.where(
         mins_recent_signal.notna(),
         pd.to_numeric(out.get("our_minutes_last7"), errors="coerce"),
     )
+    mins_avg = mins_avg.where(mins_avg.notna(), pd.to_numeric(out.get("consensus_minutes_proj"), errors="coerce"))
     mins_ref = mins_avg.where(mins_avg.notna(), mins_recent_signal)
     mins_ref = mins_ref.where(mins_ref.notna(), pd.Series([28.0] * len(out), index=out.index, dtype="float64"))
     mins_recent = mins_recent_signal.where(mins_recent_signal.notna(), mins_avg)
@@ -1419,6 +1740,27 @@ def build_player_pool(
             + (weights["team_stack"] * team_stack_popularity.loc[tier_mask])
             + (weights["tier_bias"] * salary_tier_bias.loc[tier_mask])
         )
+    rotowire_bonus_weight = ownership_salary_bucket.map(
+        {
+            "lt5500": 0.22,
+            "5500_7499": 0.14,
+            "gte7500": 0.08,
+        }
+    ).fillna(0.0)
+    rotowire_value_bonus_weight = ownership_salary_bucket.map(
+        {
+            "lt5500": 0.16,
+            "5500_7499": 0.09,
+            "gte7500": 0.05,
+        }
+    ).fillna(0.0)
+    rotowire_ownership_bonus = (
+        (rotowire_bonus_weight * rotowire_signal_score)
+        + (rotowire_value_bonus_weight * rotowire_value_signal)
+        + ((salary_num < 6500.0).astype(float) * out["rotowire_upside_flag"].astype(float) * 0.05)
+    ).clip(lower=0.0)
+    own_score = own_score + rotowire_ownership_bonus
+    out["rotowire_ownership_bonus"] = rotowire_ownership_bonus.round(4)
     unique_game_keys = {
         str(x or "").strip().upper()
         for x in out.get("game_key", pd.Series(dtype=str)).tolist()
@@ -1440,6 +1782,20 @@ def build_player_pool(
         leverage_shrink = ((0.30 * surge_uncertainty) + (0.20 * surge_flag)).clip(lower=0.0, upper=0.45)
         ownership_alloc = (ownership_alloc * (1.0 - leverage_shrink)) + (baseline_own * leverage_shrink)
         ownership_alloc = ownership_alloc.clip(lower=0.0, upper=100.0)
+        rotowire_chalk_floor = (
+            4.0 + (6.0 * consensus_value_signal) + (4.0 * rotowire_signal_score)
+        ).clip(lower=0.0, upper=16.0)
+        rotowire_chalk_floor_flag = (
+            rotowire_proj.notna()
+            & (salary_num <= 7000.0)
+            & (consensus_value_signal >= 0.64)
+            & (rotowire_signal_score >= 0.60)
+            & (pd.to_numeric(out["projected_dk_points"], errors="coerce") >= 16.0)
+        )
+        ownership_alloc = ownership_alloc.where(
+            ~rotowire_chalk_floor_flag,
+            ownership_alloc.clip(lower=rotowire_chalk_floor),
+        )
         total_after = float(ownership_alloc.sum())
         if total_after > 0.0:
             ownership_alloc = ownership_alloc * (ownership_target_total / total_after)
@@ -1451,6 +1807,8 @@ def build_player_pool(
         )
     else:
         leverage_shrink = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+        rotowire_chalk_floor = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+        rotowire_chalk_floor_flag = pd.Series([False] * len(out), index=out.index, dtype="bool")
     out["ownership_model"] = "v3_tiered_softmax"
     out["ownership_temperature"] = ownership_temperature
     out["ownership_target_total"] = ownership_target_total
@@ -1460,6 +1818,8 @@ def build_player_pool(
     out["ownership_chalk_surge_flag"] = surge_flag.astype(bool)
     out["ownership_confidence"] = (1.0 - surge_uncertainty).clip(lower=0.0, upper=1.0).round(4)
     out["ownership_leverage_shrink"] = pd.to_numeric(leverage_shrink, errors="coerce").fillna(0.0).round(4)
+    out["rotowire_chalk_floor_flag"] = rotowire_chalk_floor_flag.astype(bool)
+    out["rotowire_chalk_floor_target"] = rotowire_chalk_floor.where(rotowire_chalk_floor_flag, 0.0).round(3)
 
     for col in ["game_p_plus_8", "game_p_plus_12", "game_volatility_score", "game_tail_residual_mu", "game_tail_sigma", "game_tail_match_score"]:
         if col not in out.columns:
@@ -1561,6 +1921,30 @@ def build_player_pool(
         "historical_ownership_avg_name",
         "historical_ownership_last5_name",
         "historical_ownership_samples_name",
+        "rotowire_proj_fantasy_points_team",
+        "rotowire_proj_minutes_team",
+        "rotowire_value_per_1k_team",
+        "rotowire_avg_fpts_last3_team",
+        "rotowire_avg_fpts_last5_team",
+        "rotowire_avg_fpts_last7_team",
+        "rotowire_avg_fpts_season_team",
+        "rotowire_usage_rate_team",
+        "rotowire_implied_points_team",
+        "rotowire_over_under_team",
+        "rotowire_spread_team",
+        "rotowire_salary_team",
+        "rotowire_proj_fantasy_points_name",
+        "rotowire_proj_minutes_name",
+        "rotowire_value_per_1k_name",
+        "rotowire_avg_fpts_last3_name",
+        "rotowire_avg_fpts_last5_name",
+        "rotowire_avg_fpts_last7_name",
+        "rotowire_avg_fpts_season_name",
+        "rotowire_usage_rate_name",
+        "rotowire_implied_points_name",
+        "rotowire_over_under_name",
+        "rotowire_spread_name",
+        "rotowire_salary_name",
     ]
     existing_drop = [c for c in drop_cols if c in out.columns]
     return out.drop(columns=existing_drop)
@@ -2183,8 +2567,11 @@ def apply_minutes_shock_override(
     mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
     mins_last7 = pd.to_numeric(out.get("our_minutes_last7"), errors="coerce")
     mins_recent = pd.to_numeric(out.get("our_minutes_recent"), errors="coerce")
+    consensus_minutes = pd.to_numeric(out.get("consensus_minutes_proj"), errors="coerce")
+    mins_recent = mins_recent.where(mins_recent.notna(), consensus_minutes)
     mins_recent = mins_recent.where(mins_recent.notna(), mins_last7)
     mins_recent = mins_recent.where(mins_recent.notna(), mins_avg)
+    mins_avg = mins_avg.where(mins_avg.notna(), consensus_minutes)
     mins_avg = mins_avg.where(mins_avg.notna(), mins_last7)
     mins_avg = mins_avg.where(mins_avg.notna(), mins_recent)
     mins_avg = mins_avg.fillna(0.0)
@@ -2205,7 +2592,10 @@ def apply_minutes_shock_override(
     )
     expected_rotation_minutes = mins_avg + (expected_rotation_flag.astype(float) * rotation_bonus)
 
-    minutes_anchor = pd.concat([mins_recent, mins_last7, expected_rotation_minutes], axis=1).max(axis=1, skipna=True)
+    minutes_anchor = pd.concat([mins_recent, mins_last7, expected_rotation_minutes, consensus_minutes], axis=1).max(
+        axis=1,
+        skipna=True,
+    )
     minutes_anchor = minutes_anchor.fillna(mins_avg)
     minutes_delta = (minutes_anchor - mins_avg).clip(lower=0.0, upper=10.0)
     raw_boost = (minutes_delta * per_minute).clip(lower=0.0, upper=boost_cap)
