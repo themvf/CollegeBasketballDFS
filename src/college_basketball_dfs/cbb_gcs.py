@@ -246,6 +246,12 @@ class CbbGcsStore:
         names.sort()
         return names
 
+    def list_dk_slate_blob_names(self) -> list[str]:
+        blobs = self.bucket.list_blobs(prefix=f"{self.dk_slates_prefix}/")
+        names = [blob.name for blob in blobs if blob.name.endswith("_dk_slate.csv")]
+        names.sort()
+        return names
+
     def read_raw_json_blob(self, blob_name: str) -> dict[str, Any]:
         blob = self.bucket.blob(blob_name)
         text = blob.download_as_text(encoding="utf-8")

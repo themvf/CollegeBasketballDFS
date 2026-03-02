@@ -91,6 +91,12 @@ from college_basketball_dfs.cbb_rotowire import (
     flatten_slates as flatten_rotowire_slates,
     normalize_players as normalize_rotowire_players,
 )
+from college_basketball_dfs.cbb_dk_registry import (
+    build_dk_identity_registry,
+    build_registry_history_from_local_directory,
+    build_rotowire_dk_slate,
+    extract_registry_rows_from_dk_slate,
+)
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 
 
@@ -3308,6 +3314,147 @@ def load_rotowire_projection_frame_for_date(
     )
 
 
+def _parse_dk_slate_blob_context(blob_name: str) -> tuple[pd.Timestamp | pd.NaT, str]:
+    text = str(blob_name or "").replace("\\", "/").strip()
+    nested_match = re.search(r"/(\d{4}-\d{2}-\d{2})/([^/]+)_dk_slate\.csv$", text)
+    if nested_match:
+        return pd.to_datetime(nested_match.group(1), errors="coerce"), str(nested_match.group(2) or "").strip().lower()
+    flat_match = re.search(r"/(\d{4}-\d{2}-\d{2})_dk_slate\.csv$", text)
+    if flat_match:
+        return pd.to_datetime(flat_match.group(1), errors="coerce"), "main"
+    return pd.NaT, ""
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def load_dk_identity_registry_frame(
+    bucket_name: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    frames: list[pd.DataFrame] = []
+
+    local_history = build_registry_history_from_local_directory(ROOT / "Draftkings")
+    if not local_history.empty:
+        frames.append(local_history)
+
+    if bucket_name:
+        try:
+            client = build_storage_client(
+                service_account_json=service_account_json,
+                service_account_json_b64=service_account_json_b64,
+                project=gcp_project,
+            )
+            store = CbbGcsStore(bucket_name=bucket_name, client=client)
+            for blob_name in store.list_dk_slate_blob_names():
+                try:
+                    csv_text = store.bucket.blob(blob_name).download_as_text(encoding="utf-8")
+                except Exception:
+                    continue
+                if not csv_text.strip():
+                    continue
+                try:
+                    slate_df = pd.read_csv(io.StringIO(csv_text))
+                except Exception:
+                    continue
+                slate_date_value, slate_key_value = _parse_dk_slate_blob_context(blob_name)
+                frames.append(
+                    extract_registry_rows_from_dk_slate(
+                        slate_df,
+                        slate_date=slate_date_value,
+                        slate_key=slate_key_value,
+                        source_name=blob_name,
+                    )
+                )
+        except Exception:
+            pass
+
+    if not frames:
+        return pd.DataFrame()
+    history_df = pd.concat(frames, ignore_index=True)
+    if history_df.empty:
+        return pd.DataFrame()
+    history_df = history_df.drop_duplicates(
+        subset=["dk_id", "team_abbr", "salary", "slate_date", "source_name"],
+        keep="last",
+    ).reset_index(drop=True)
+    return build_dk_identity_registry(history_df)
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def resolve_optimizer_slate_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    slate_key: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    uploaded_slate_df = load_dk_slate_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=selected_date,
+        slate_key=slate_key,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if not uploaded_slate_df.empty:
+        return uploaded_slate_df, {
+            "source": "uploaded_dk_slate",
+            "players_total": int(len(uploaded_slate_df)),
+            "resolved_players": int(len(uploaded_slate_df)),
+            "unresolved_players": 0,
+            "conflict_players": 0,
+            "coverage_pct": 100.0,
+            "fully_resolved": True,
+            "needs_manual_dk_slate": False,
+        }
+
+    rotowire_df = pd.DataFrame()
+    try:
+        rotowire_df = load_rotowire_projection_frame_for_date(
+            selected_date=selected_date,
+            selected_slate_key=slate_key,
+            cookie_header=_resolve_rotowire_cookie(),
+            site_id=1,
+        )
+    except Exception:
+        rotowire_df = pd.DataFrame()
+
+    if rotowire_df.empty:
+        return pd.DataFrame(), {
+            "source": "no_slate_source",
+            "players_total": 0,
+            "resolved_players": 0,
+            "unresolved_players": 0,
+            "conflict_players": 0,
+            "coverage_pct": 0.0,
+            "fully_resolved": False,
+            "needs_manual_dk_slate": True,
+            "failure_reason": "rotowire_slate_missing",
+        }
+
+    registry_df = load_dk_identity_registry_frame(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    resolved_slate_df, _, meta = build_rotowire_dk_slate(
+        rotowire_df=rotowire_df,
+        registry_df=registry_df,
+        slate_date=selected_date,
+        slate_key=slate_key,
+    )
+    meta = dict(meta or {})
+    meta["rotowire_players"] = int(len(rotowire_df))
+    meta["registry_players"] = int(len(registry_df))
+    meta["needs_manual_dk_slate"] = not bool(meta.get("fully_resolved"))
+    if bool(meta.get("fully_resolved")):
+        return resolved_slate_df, meta
+    return pd.DataFrame(), meta
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_contest_standings_frame(
     bucket_name: str,
@@ -3345,8 +3492,8 @@ def build_optimizer_pool_for_date(
     service_account_json_b64: str | None,
     recent_form_games: int = 7,
     recent_points_weight: float = 0.0,
-) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    slate_df = load_dk_slate_frame_for_date(
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    slate_df, slate_source_meta = resolve_optimizer_slate_frame_for_date(
         bucket_name=bucket_name,
         selected_date=slate_date,
         slate_key=slate_key,
@@ -3362,7 +3509,7 @@ def build_optimizer_pool_for_date(
         service_account_json_b64=service_account_json_b64,
     )
     if slate_df.empty:
-        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame()
+        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame(), slate_source_meta
 
     filtered_slate, removed_injured = remove_injured_players(slate_df, injuries_df)
     season_history_df = load_season_player_history_frame(
@@ -3425,7 +3572,7 @@ def build_optimizer_pool_for_date(
         recent_form_games=int(max(1, recent_form_games)),
         recent_points_weight=float(max(0.0, min(1.0, recent_points_weight))),
     )
-    return pool_df, removed_injured, slate_df, injuries_df, season_history_df
+    return pool_df, removed_injured, slate_df, injuries_df, season_history_df, slate_source_meta
 
 
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
@@ -3811,6 +3958,8 @@ with tab_dk:
                     store = CbbGcsStore(bucket_name=bucket_name, client=client)
                     deleted, blob_name = _delete_dk_slate_csv(store, dk_slate_date, slate_key=dk_slate_key)
                     load_dk_slate_frame_for_date.clear()
+                    load_dk_identity_registry_frame.clear()
+                    resolve_optimizer_slate_frame_for_date.clear()
                     if deleted:
                         st.session_state.pop("cbb_dk_upload_summary", None)
                         st.success(f"Deleted `{blob_name}`")
@@ -3850,6 +3999,8 @@ with tab_dk:
                             slate_key=dk_slate_key,
                         )
                         load_dk_slate_frame_for_date.clear()
+                        load_dk_identity_registry_frame.clear()
+                        resolve_optimizer_slate_frame_for_date.clear()
                         st.session_state["cbb_dk_upload_summary"] = {
                             "slate_date": dk_slate_date.isoformat(),
                             "slate_label": dk_slate_label,
@@ -3981,6 +4132,8 @@ with tab_backfill:
 with tab_dk:
     if load_dk_slate_clicked:
         load_dk_slate_frame_for_date.clear()
+        load_dk_identity_registry_frame.clear()
+        resolve_optimizer_slate_frame_for_date.clear()
 
     dk_upload_summary = st.session_state.get("cbb_dk_upload_summary")
     if dk_upload_summary:
@@ -4290,6 +4443,7 @@ with tab_slate_vegas:
     refresh_pool_clicked = st.button("Refresh Slate + Vegas", key="refresh_slate_vegas_pool")
     if refresh_pool_clicked:
         load_dk_slate_frame_for_date.clear()
+        resolve_optimizer_slate_frame_for_date.clear()
         load_props_frame_for_date.clear()
         load_odds_frame_for_date.clear()
         load_injuries_frame.clear()
@@ -4300,7 +4454,7 @@ with tab_slate_vegas:
         st.info("Set a GCS bucket in sidebar to build the slate player pool.")
     else:
         try:
-            pool_df, removed_injured_df, raw_slate_df, _, season_history_df = build_optimizer_pool_for_date(
+            pool_df, removed_injured_df, raw_slate_df, _, season_history_df, slate_source_meta = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
                 slate_date=slate_vegas_date,
                 slate_key=shared_slate_key,
@@ -4312,18 +4466,29 @@ with tab_slate_vegas:
                 recent_points_weight=slate_recent_points_weight,
             )
             if raw_slate_df.empty:
-                st.warning("No DraftKings slate found for selected optimizer date. Upload in `DK Slate` tab first.")
+                if slate_source_meta.get("source") == "rotowire_registry":
+                    st.warning(
+                        "No uploaded DK slate and registry resolution is incomplete for this date. "
+                        f"Resolved {int(slate_source_meta.get('resolved_players') or 0)} of "
+                        f"{int(slate_source_meta.get('players_total') or 0)} players "
+                        f"({float(slate_source_meta.get('coverage_pct') or 0.0):.1f}%). "
+                        "Upload the DK slate only for the unresolved mismatch cases."
+                    )
+                else:
+                    st.warning("No DraftKings slate found for selected optimizer date. Upload in `DK Slate` tab first.")
             else:
-                m1, m2, m3 = st.columns(3)
+                m1, m2, m3, m4 = st.columns(4)
                 m1.metric("Raw Slate Players", int(len(raw_slate_df)))
                 m2.metric("Removed (Out/Doubtful)", int(len(removed_injured_df)))
                 m3.metric("Active Pool Players", int(len(pool_df)))
+                m4.metric("Slate Source", "RotoWire+Registry" if slate_source_meta.get("source") == "rotowire_registry" else "DK Upload")
                 mins_pct = pd.to_numeric(pool_df.get("our_minutes_avg", pd.Series(dtype=float)), errors="coerce")
                 avg_mins = float(mins_pct.mean()) if len(mins_pct) and mins_pct.notna().any() else 0.0
                 mins_recent = pd.to_numeric(pool_df.get("our_minutes_recent", pd.Series(dtype=float)), errors="coerce")
                 avg_mins_recent = float(mins_recent.mean()) if len(mins_recent) and mins_recent.notna().any() else 0.0
                 st.caption(
                     f"Season stats rows used: `{len(season_history_df):,}` | "
+                    f"DK ID coverage: `{float(slate_source_meta.get('coverage_pct') or 100.0):.1f}%` | "
                     f"Average projected minutes: `{avg_mins:.1f}` | "
                     f"Average recent minutes ({slate_recent_form_games}g): `{avg_mins_recent:.1f}`"
                 )
@@ -4545,6 +4710,7 @@ with tab_rotowire:
     if refresh_rotowire_clicked:
         load_rotowire_slates_frame.clear()
         load_rotowire_players_frame.clear()
+        resolve_optimizer_slate_frame_for_date.clear()
     rr2.caption(
         "Cookie source: loaded from secrets/env."
         if default_rotowire_cookie
@@ -4682,6 +4848,61 @@ with tab_rotowire:
                     f"{selected_rotowire_slate.get('slate_date')}_{selected_rotowire_slate.get('contest_type')}_{selected_rotowire_slate.get('slate_name')}",
                     default="rotowire",
                 )
+
+                registry_df = load_dk_identity_registry_frame(
+                    bucket_name=(bucket_name or None),
+                    gcp_project=gcp_project or None,
+                    service_account_json=cred_json,
+                    service_account_json_b64=cred_json_b64,
+                )
+                _, resolution_df, resolution_meta = build_rotowire_dk_slate(
+                    rotowire_df=rotowire_players_df,
+                    registry_df=registry_df,
+                    slate_date=rotowire_selected_date,
+                    slate_key=shared_slate_key,
+                )
+                st.markdown("**DK ID Registry Coverage**")
+                rk1, rk2, rk3, rk4 = st.columns(4)
+                rk1.metric("Registry Players", int(len(registry_df)))
+                rk2.metric("Resolved", int(resolution_meta.get("resolved_players") or 0))
+                rk3.metric("Conflicts", int(resolution_meta.get("conflict_players") or 0))
+                rk4.metric("Coverage %", f"{float(resolution_meta.get('coverage_pct') or 0.0):.1f}%")
+                if bool(resolution_meta.get("fully_resolved")):
+                    st.success("This slate is fully DK-ID resolved. Manual DK slate upload is not required for lineup generation.")
+                else:
+                    st.warning(
+                        "Registry coverage is not complete for this slate. "
+                        "Manual DK slate upload should only be needed for the unresolved mismatch cases."
+                    )
+                    mismatch_df = resolution_df.loc[
+                        resolution_df["dk_resolution_status"].isin(["unresolved", "conflict"])
+                    ].copy() if not resolution_df.empty else pd.DataFrame()
+                    if not mismatch_df.empty:
+                        mismatch_cols = [
+                            "player_name",
+                            "team_abbr",
+                            "opp_abbr",
+                            "salary",
+                            "position",
+                            "dk_resolution_status",
+                            "dk_match_reason",
+                            "candidate_count",
+                            "matched_team_abbr",
+                            "matched_salary",
+                        ]
+                        st.dataframe(
+                            mismatch_df[[c for c in mismatch_cols if c in mismatch_df.columns]],
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+                        st.download_button(
+                            "Download DK ID Mismatches CSV",
+                            data=mismatch_df.to_csv(index=False),
+                            file_name=f"dk_id_mismatches_{export_stub}.csv",
+                            mime="text/csv",
+                            key="download_rotowire_dk_mismatches_csv",
+                        )
+
                 export_csv = rotowire_players_df.to_csv(index=False)
                 export_json = json.dumps(rotowire_players_df.to_dict(orient="records"), indent=2)
                 rd1, rd2 = st.columns(2)
@@ -5159,7 +5380,7 @@ with tab_lineups:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
     else:
         try:
-            pool_df, removed_injured_df, raw_slate_df, _, _ = build_optimizer_pool_for_date(
+            pool_df, removed_injured_df, raw_slate_df, _, _, slate_source_meta = build_optimizer_pool_for_date(
                 bucket_name=bucket_name,
                 slate_date=lineup_slate_date,
                 slate_key=lineup_slate_key,
@@ -5172,13 +5393,26 @@ with tab_lineups:
             )
 
             if raw_slate_df.empty:
-                st.warning(
-                    "No DraftKings slate found for selected optimizer date+slate. "
-                    "Upload in `DK Slate` tab first."
-                )
+                if slate_source_meta.get("source") == "rotowire_registry":
+                    st.warning(
+                        "No uploaded DK slate and DK ID registry coverage is incomplete for this slate. "
+                        f"Resolved {int(slate_source_meta.get('resolved_players') or 0)} of "
+                        f"{int(slate_source_meta.get('players_total') or 0)} players "
+                        f"({float(slate_source_meta.get('coverage_pct') or 0.0):.1f}%). "
+                        "Upload the DK slate only when there is a mismatch."
+                    )
+                else:
+                    st.warning(
+                        "No DraftKings slate found for selected optimizer date+slate. "
+                        "Upload in `DK Slate` tab first."
+                    )
             elif pool_df.empty:
                 st.warning("No players available after injury filtering. Check `Injuries` tab or slate date.")
             else:
+                st.caption(
+                    f"Slate source: `{('RotoWire+Registry' if slate_source_meta.get('source') == 'rotowire_registry' else 'DK Upload')}` | "
+                    f"DK ID coverage: `{float(slate_source_meta.get('coverage_pct') or 100.0):.1f}%`"
+                )
                 pool_sorted = pool_df.sort_values("projected_dk_points", ascending=False).copy()
                 focus_settings = recommended_focus_stack_settings(pool_sorted, contest_type, focus_game_count=2)
                 focus_summary_df = focus_settings.get("focus_summary")
@@ -6795,7 +7029,7 @@ with tab_tournament_review:
                     need_pool_fallback = bool(missing_minutes or missing_ownership)
 
                 if need_pool_fallback and not slate_df.empty:
-                    fallback_pool, _, _, _, _ = build_optimizer_pool_for_date(
+                    fallback_pool, _, _, _, _, _ = build_optimizer_pool_for_date(
                         bucket_name=bucket_name,
                         slate_date=tr_date,
                         slate_key=shared_slate_key,
@@ -9855,7 +10089,7 @@ with tab_slate_vegas:
                     pool_df_agent = pd.DataFrame()
                     raw_slate_df_agent = pd.DataFrame()
                     try:
-                        pool_df_agent, _, raw_slate_df_agent, _, _ = build_optimizer_pool_for_date(
+                        pool_df_agent, _, raw_slate_df_agent, _, _, _ = build_optimizer_pool_for_date(
                             bucket_name=bucket_name,
                             slate_date=game_selected_date,
                             slate_key=shared_slate_key,
