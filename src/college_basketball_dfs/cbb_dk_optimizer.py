@@ -873,6 +873,124 @@ def normalize_projected_ownership_total(
     return _recompute_leverage_score(out)
 
 
+def apply_ownership_calibration(
+    pool_df: pd.DataFrame,
+    contest_type: str,
+    base_blend: float = 0.22,
+    max_blend: float = 0.46,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty or "projected_ownership" not in out.columns:
+        return out
+
+    contest_norm = str(contest_type or "").strip().lower()
+    proj_own = pd.to_numeric(out.get("projected_ownership"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    projection = pd.to_numeric(out.get("projected_dk_points"), errors="coerce")
+    projection_pct = _rank_pct_series(projection).fillna(0.0)
+    salary = pd.to_numeric(out.get("Salary"), errors="coerce")
+    salary_bucket = out.get("ownership_salary_bucket")
+    if not isinstance(salary_bucket, pd.Series):
+        salary_bucket = salary.map(ownership_salary_bucket_key)
+    salary_bucket = salary_bucket.astype(str)
+    focus_score = pd.to_numeric(out.get("game_stack_focus_score"), errors="coerce").fillna(0.0).clip(0.0, 100.0)
+    focus_norm = (focus_score / 100.0).clip(0.0, 1.0)
+    team_stack = pd.to_numeric(out.get("team_stack_popularity_score"), errors="coerce").fillna(0.0).clip(0.0, 100.0)
+    team_stack_norm = (team_stack / 100.0).clip(0.0, 1.0)
+    historical = pd.to_numeric(out.get("historical_ownership_baseline"), errors="coerce").fillna(0.0).clip(0.0, 100.0)
+    historical_pct = _rank_pct_series(historical).fillna(0.0)
+    field_prior = pd.to_numeric(out.get("field_ownership_pct"), errors="coerce").fillna(0.0).clip(0.0, 100.0)
+    field_prior_pct = _rank_pct_series(field_prior).fillna(0.0)
+    consensus_value = pd.to_numeric(out.get("consensus_value_signal"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    rotowire_signal = pd.to_numeric(out.get("rotowire_signal_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    rotowire_value = pd.to_numeric(out.get("rotowire_value_signal"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    uncertainty = pd.to_numeric(out.get("projection_uncertainty_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    dnp_risk = pd.to_numeric(out.get("dnp_risk_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
+    false_chalk_flag = (
+        out.get("unsupported_false_chalk_flag", pd.Series([False] * len(out), index=out.index))
+        .map(lambda x: bool(x))
+        .astype(bool)
+    )
+    false_chalk_score = pd.to_numeric(
+        out.get("unsupported_false_chalk_score", pd.Series([0.0] * len(out), index=out.index)),
+        errors="coerce",
+    ).fillna(0.0).clip(0.0, 100.0)
+    false_chalk_norm = (false_chalk_score / 100.0).clip(0.0, 1.0)
+    cheap_flag = (salary.fillna(99999.0) < 6500.0).astype(float)
+    stud_flag = (salary.fillna(0.0) >= 8500.0).astype(float)
+    low_value_penalty = (1.0 - consensus_value).clip(0.0, 1.0)
+
+    segment_signal = (
+        (0.34 * projection_pct)
+        + (0.20 * consensus_value)
+        + (0.12 * rotowire_signal)
+        + (0.10 * focus_norm)
+        + (0.08 * historical_pct)
+        + (0.08 * field_prior_pct)
+        + (0.08 * team_stack_norm)
+    ).clip(0.0, 1.0)
+    cheap_chalk_signal = (
+        cheap_flag
+        * (
+            (0.55 * consensus_value)
+            + (0.25 * rotowire_value)
+            + (0.20 * focus_norm)
+        )
+    ).clip(0.0, 1.0)
+    stud_fake_chalk_penalty = (
+        stud_flag
+        * (
+            (0.50 * low_value_penalty)
+            + (0.25 * (1.0 - focus_norm))
+            + (0.25 * (1.0 - historical_pct))
+        )
+    ).clip(0.0, 1.0)
+
+    segment_target = 2.0 + (38.0 * segment_signal) + (10.0 * cheap_chalk_signal) - (8.0 * stud_fake_chalk_penalty)
+    segment_target = segment_target.clip(lower=0.0, upper=100.0)
+    prior_target = pd.concat(
+        [
+            field_prior * 0.96,
+            historical * (0.92 + (0.06 * focus_norm)),
+            segment_target,
+        ],
+        axis=1,
+    ).max(axis=1)
+    if contest_norm == "large gpp":
+        prior_target = prior_target + (1.5 * cheap_chalk_signal) - (1.0 * stud_fake_chalk_penalty)
+    elif contest_norm == "small gpp":
+        prior_target = prior_target + (0.8 * cheap_chalk_signal) - (0.5 * stud_fake_chalk_penalty)
+    prior_target = prior_target.clip(lower=0.0, upper=100.0)
+
+    calibration_blend = pd.Series([float(base_blend)] * len(out), index=out.index, dtype="float64")
+    calibration_blend = calibration_blend + (0.08 * historical.gt(0.0).astype(float))
+    calibration_blend = calibration_blend + (0.06 * field_prior.gt(0.0).astype(float))
+    calibration_blend = calibration_blend + (0.06 * rotowire_signal)
+    calibration_blend = calibration_blend + (0.05 * focus_norm)
+    calibration_blend = calibration_blend - (0.10 * false_chalk_norm)
+    calibration_blend = calibration_blend - (0.06 * ((0.55 * uncertainty) + (0.45 * dnp_risk)))
+    calibration_blend = calibration_blend.clip(lower=max(0.08, float(base_blend) - 0.10), upper=float(max_blend))
+
+    calibrated = ((1.0 - calibration_blend) * proj_own) + (calibration_blend * prior_target)
+    calibrated = calibrated.where(~false_chalk_flag, calibrated * (0.82 - (0.10 * false_chalk_norm)))
+    cheap_floor = (
+        4.5 + (5.5 * consensus_value) + (3.0 * rotowire_signal) + (2.0 * focus_norm)
+    ).clip(lower=0.0, upper=18.0)
+    cheap_floor_mask = (
+        (salary_bucket == "lt5500")
+        & (projection.fillna(0.0) >= 15.0)
+        & (cheap_chalk_signal >= 0.45)
+    )
+    calibrated = calibrated.where(~cheap_floor_mask, calibrated.clip(lower=cheap_floor))
+    calibrated = calibrated.clip(lower=0.0, upper=100.0)
+
+    out["ownership_calibration_target"] = prior_target.round(4)
+    out["ownership_calibration_blend"] = calibration_blend.round(4)
+    out["ownership_calibration_delta"] = (calibrated - proj_own).round(4)
+    out["ownership_calibration_cheap_floor"] = cheap_floor.where(cheap_floor_mask, 0.0).round(4)
+    out["projected_ownership"] = calibrated.round(2)
+    return _recompute_leverage_score(out)
+
+
 def _ownership_reliability_for_pool(pool_df: pd.DataFrame, default_reliability: float = 0.50) -> float:
     confidence = pd.to_numeric(pool_df.get("ownership_confidence"), errors="coerce")
     if confidence is None or confidence.dropna().empty:
@@ -2938,6 +3056,143 @@ def _distributed_lineup_indices(
     return selected
 
 
+def _portfolio_candidate_count(
+    requested_lineups: int,
+    contest_type: str,
+    lineup_strategy: str,
+) -> int:
+    requested = max(0, int(requested_lineups))
+    if requested <= 0:
+        return 0
+    contest_norm = str(contest_type or "").strip().lower()
+    strategy_norm = str(lineup_strategy or "").strip().lower()
+    if contest_norm == "cash":
+        return requested
+    if strategy_norm in {"cluster", "cluster_v1", "cluster_v1_experimental", "cluster_mutation", "cluster_mutation_v1"}:
+        return requested
+    if requested < 8:
+        return requested
+    extra = max(4, int(math.ceil(float(requested) * (0.35 if contest_norm == "large gpp" else 0.22))))
+    return min(requested + extra, requested + 30)
+
+
+def _lineup_overlap_count(lineup_a: dict[str, Any], lineup_b: dict[str, Any]) -> int:
+    ids_a = {str(x) for x in (lineup_a.get("player_ids") or []) if str(x).strip()}
+    ids_b = {str(x) for x in (lineup_b.get("player_ids") or []) if str(x).strip()}
+    return int(len(ids_a & ids_b))
+
+
+def _lineup_uncertainty_mean(players: list[dict[str, Any]]) -> float:
+    if not players:
+        return 0.0
+    values = []
+    for player in players:
+        risk = (0.55 * _safe_num(player.get("dnp_risk_score"), 0.0)) + (
+            0.45 * _safe_num(player.get("projection_uncertainty_score"), 0.0)
+        )
+        values.append(max(0.0, min(1.0, float(risk))))
+    return 0.0 if not values else float(sum(values) / len(values))
+
+
+def _lineup_player_exposure_penalty(
+    lineup: dict[str, Any],
+    exposure_counts: dict[str, int],
+    cap_counts: dict[str, int],
+) -> float:
+    penalty = 0.0
+    for pid in [str(x) for x in (lineup.get("player_ids") or []) if str(x).strip()]:
+        cap = max(1, int(cap_counts.get(pid, 0) or 1))
+        used = max(0, int(exposure_counts.get(pid, 0) or 0))
+        penalty += float(used) / float(cap)
+    return penalty
+
+
+def _portfolio_base_lineup_score(
+    lineup: dict[str, Any],
+    *,
+    contest_type: str,
+    preferred_games: set[str],
+    salary_left_target: int | None,
+) -> float:
+    contest_norm = str(contest_type or "").strip().lower()
+    projected = _safe_num(lineup.get("projected_points"), 0.0)
+    ceiling = _safe_num(lineup.get("ceiling_projection"), projected * 1.18)
+    ownership = _safe_num(lineup.get("projected_ownership_sum"), 0.0)
+    salary_left = _safe_num(lineup.get("salary_left"), 0.0)
+    preferred_stack = _safe_num(lineup.get("preferred_game_stack_size"), 0.0)
+    preferred_total = _safe_num(lineup.get("preferred_game_player_count"), 0.0)
+    low_own = _safe_num(lineup.get("low_own_upside_count"), 0.0)
+    unsupported_false_chalk = _safe_num(lineup.get("unsupported_false_chalk_count"), 0.0)
+    uncertainty = _lineup_uncertainty_mean(list(lineup.get("players") or []))
+    stack_bonus = _stack_bonus_from_counts(_lineup_game_counts(list(lineup.get("players") or [])))
+
+    if contest_norm == "cash":
+        score = projected + (0.20 * ceiling)
+    elif contest_norm == "small gpp":
+        score = projected + (0.28 * ceiling) - (0.035 * ownership)
+    else:
+        score = projected + (0.34 * ceiling) - (0.055 * ownership)
+
+    score += (1.6 * preferred_stack) + (0.6 * preferred_total) + (1.1 * low_own) + (1.0 * stack_bonus)
+    score -= (4.5 * unsupported_false_chalk) + (8.0 * uncertainty)
+    if salary_left_target is not None:
+        score -= abs(float(salary_left) - float(salary_left_target)) / 70.0
+    if preferred_games and bool(lineup.get("preferred_game_stack_met")):
+        score += 2.0
+    return float(score)
+
+
+def _apply_uncertainty_exposure_caps(
+    players: list[dict[str, Any]],
+    cap_counts: dict[str, int],
+    target_lineups: int,
+    contest_type: str,
+) -> tuple[dict[str, int], dict[str, Any]]:
+    capped = dict(cap_counts)
+    total = max(1, int(target_lineups))
+    contest_norm = str(contest_type or "").strip().lower()
+    game_keys = {
+        str(p.get("game_key") or "").strip().upper()
+        for p in players
+        if str(p.get("game_key") or "").strip()
+    }
+    slate_games = max(1, len(game_keys))
+    small_slate = slate_games <= 4
+    moderate_cap_pct = 38.0 if (contest_norm == "large gpp" or small_slate) else 44.0
+    high_cap_pct = 24.0 if (contest_norm == "large gpp" or small_slate) else 30.0
+    affected = 0
+    high_risk_count = 0
+
+    for player in players:
+        pid = str(player.get("ID") or "").strip()
+        if not pid or pid not in capped:
+            continue
+        uncertainty = max(0.0, min(1.0, _safe_num(player.get("projection_uncertainty_score"), 0.0)))
+        dnp_risk = max(0.0, min(1.0, _safe_num(player.get("dnp_risk_score"), 0.0)))
+        focus_norm = max(0.0, min(1.0, _safe_num(player.get("game_stack_focus_score"), 0.0) / 100.0))
+        rotowire_signal = max(0.0, min(1.0, _safe_num(player.get("rotowire_signal_score"), 0.0)))
+        support = (0.18 * focus_norm) + (0.14 * rotowire_signal)
+        risk_score = max(0.0, min(1.0, (0.58 * dnp_risk) + (0.42 * uncertainty) - support))
+        existing_cap = int(capped.get(pid, total))
+        new_cap = existing_cap
+        if risk_score >= 0.60:
+            high_risk_count += 1
+            new_cap = min(existing_cap, max(1, int(math.floor((high_cap_pct / 100.0) * total))))
+        elif risk_score >= 0.48:
+            new_cap = min(existing_cap, max(1, int(math.floor((moderate_cap_pct / 100.0) * total))))
+        if new_cap < existing_cap:
+            capped[pid] = new_cap
+            affected += 1
+
+    return capped, {
+        "affected_players": int(affected),
+        "high_risk_players": int(high_risk_count),
+        "slate_game_count": int(slate_games),
+        "moderate_cap_pct": float(moderate_cap_pct),
+        "high_cap_pct": float(high_cap_pct),
+    }
+
+
 def _salary_texture_bucket(salary_left: int) -> str:
     left = max(0, int(salary_left))
     if left <= 100:
@@ -2949,6 +3204,136 @@ def _salary_texture_bucket(salary_left: int) -> str:
     if left <= 900:
         return "501-900"
     return "901+"
+
+
+def _rerank_lineup_portfolio(
+    candidate_lineups: list[dict[str, Any]],
+    *,
+    target_lineups: int,
+    contest_type: str,
+    cap_counts: dict[str, int],
+    preferred_games: set[str],
+    preferred_target_count: int,
+    low_own_target_count: int,
+    salary_left_target: int | None,
+) -> list[dict[str, Any]]:
+    candidates = [dict(lineup) for lineup in (candidate_lineups or [])]
+    requested = max(0, int(target_lineups))
+    if requested <= 0 or not candidates:
+        return []
+
+    def _uncertainty_mean(players: list[dict[str, Any]]) -> float:
+        if not players:
+            return 0.0
+        values = []
+        for player in players:
+            risk = (0.55 * _safe_num(player.get("dnp_risk_score"), 0.0)) + (
+                0.45 * _safe_num(player.get("projection_uncertainty_score"), 0.0)
+            )
+            values.append(max(0.0, min(1.0, float(risk))))
+        return 0.0 if not values else float(sum(values) / len(values))
+
+    def _base_score(lineup: dict[str, Any]) -> float:
+        contest_norm = str(contest_type or "").strip().lower()
+        projected = _safe_num(lineup.get("projected_points"), 0.0)
+        ceiling = _safe_num(lineup.get("ceiling_projection"), projected * 1.18)
+        ownership = _safe_num(lineup.get("projected_ownership_sum"), 0.0)
+        salary_left = _safe_num(lineup.get("salary_left"), 0.0)
+        preferred_stack = _safe_num(lineup.get("preferred_game_stack_size"), 0.0)
+        preferred_total = _safe_num(lineup.get("preferred_game_player_count"), 0.0)
+        low_own = _safe_num(lineup.get("low_own_upside_count"), 0.0)
+        unsupported_false_chalk = _safe_num(lineup.get("unsupported_false_chalk_count"), 0.0)
+        uncertainty = _uncertainty_mean(list(lineup.get("players") or []))
+        stack_bonus = _stack_bonus_from_counts(_lineup_game_counts(list(lineup.get("players") or [])))
+
+        if contest_norm == "cash":
+            score = projected + (0.20 * ceiling)
+        elif contest_norm == "small gpp":
+            score = projected + (0.28 * ceiling) - (0.035 * ownership)
+        else:
+            score = projected + (0.34 * ceiling) - (0.055 * ownership)
+
+        score += (1.6 * preferred_stack) + (0.6 * preferred_total) + (1.1 * low_own) + (1.0 * stack_bonus)
+        score -= (4.5 * unsupported_false_chalk) + (8.0 * uncertainty)
+        if salary_left_target is not None:
+            score -= abs(float(salary_left) - float(salary_left_target)) / 70.0
+        if preferred_games and bool(lineup.get("preferred_game_stack_met")):
+            score += 2.0
+        return float(score)
+
+    for lineup in candidates:
+        lineup["_portfolio_base_score"] = _base_score(lineup)
+
+    candidates.sort(
+        key=lambda lineup: (
+            float(lineup.get("_portfolio_base_score") or 0.0),
+            float(_safe_num(lineup.get("projected_points"), 0.0)),
+            -float(_safe_num(lineup.get("unsupported_false_chalk_count"), 0.0)),
+        ),
+        reverse=True,
+    )
+
+    selected: list[dict[str, Any]] = []
+    exposure_counts: dict[str, int] = {}
+    selected_preferred = 0
+    selected_low_own = 0
+
+    while candidates and len(selected) < requested:
+        remaining_slots = requested - len(selected)
+        preferred_needed = max(0, int(preferred_target_count) - selected_preferred)
+        low_own_needed = max(0, int(low_own_target_count) - selected_low_own)
+        best_idx = None
+        best_score = -10**12
+
+        for idx, lineup in enumerate(candidates):
+            lineup_ids = [str(x) for x in (lineup.get("player_ids") or []) if str(x).strip()]
+            if any(exposure_counts.get(pid, 0) >= int(cap_counts.get(pid, requested)) for pid in lineup_ids):
+                continue
+            if preferred_needed >= remaining_slots and not bool(lineup.get("preferred_game_stack_met")):
+                continue
+            if low_own_needed >= remaining_slots and _safe_num(lineup.get("low_own_upside_count"), 0.0) <= 0.0:
+                continue
+
+            overlap_penalty = 0.0
+            if selected:
+                overlap_penalty = max(
+                    0.0,
+                    float(max(_lineup_overlap_count(lineup, prior) for prior in selected) - 5),
+                ) * 2.4
+            exposure_penalty = 0.0
+            for pid in lineup_ids:
+                cap = max(1, int(cap_counts.get(pid, requested) or 1))
+                exposure_penalty += float(exposure_counts.get(pid, 0)) / float(cap)
+
+            preference_bonus = 0.0
+            if preferred_needed > 0 and bool(lineup.get("preferred_game_stack_met")):
+                preference_bonus += 4.0
+            if low_own_needed > 0 and _safe_num(lineup.get("low_own_upside_count"), 0.0) > 0.0:
+                preference_bonus += 2.5
+            candidate_score = float(lineup.get("_portfolio_base_score") or 0.0) + preference_bonus - overlap_penalty - (
+                1.4 * exposure_penalty
+            )
+            if candidate_score > best_score:
+                best_score = candidate_score
+                best_idx = idx
+
+        if best_idx is None:
+            break
+
+        chosen = candidates.pop(best_idx)
+        for pid in [str(x) for x in (chosen.get("player_ids") or []) if str(x).strip()]:
+            exposure_counts[pid] = exposure_counts.get(pid, 0) + 1
+        if bool(chosen.get("preferred_game_stack_met")):
+            selected_preferred += 1
+        if _safe_num(chosen.get("low_own_upside_count"), 0.0) > 0.0:
+            selected_low_own += 1
+        selected.append(chosen)
+
+    for idx, lineup in enumerate(selected[:requested], start=1):
+        lineup["lineup_number"] = idx
+        lineup["portfolio_rerank_score"] = round(float(lineup.get("_portfolio_base_score") or _base_score(lineup)), 4)
+        lineup.pop("_portfolio_base_score", None)
+    return selected[:requested]
 
 
 def _lineup_stack_signature(players: list[dict[str, Any]]) -> str:
@@ -3154,8 +3539,11 @@ def generate_lineups(
     if num_lineups <= 0:
         return [], ["Number of lineups must be > 0."]
 
+    requested_num_lineups = int(num_lineups)
+    candidate_num_lineups = _portfolio_candidate_count(requested_num_lineups, contest_type, lineup_strategy)
+
     if progress_callback is not None:
-        progress_callback(0, num_lineups, "Starting lineup generation...")
+        progress_callback(0, requested_num_lineups, "Starting lineup generation...")
 
     calibrated = apply_projection_calibration(
         pool_df,
@@ -3184,6 +3572,7 @@ def generate_lineups(
     calibrated = apply_focus_game_chalk_guardrail(calibrated)
     calibrated = apply_chalk_ceiling_guardrail(calibrated)
     calibrated = apply_false_chalk_discount(calibrated)
+    calibrated = apply_ownership_calibration(calibrated, contest_type=contest_type)
     calibrated = normalize_projected_ownership_total(calibrated)
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = apply_stack_anchor_bias(scored)
@@ -3400,8 +3789,10 @@ def generate_lineups(
         return [], ["Locked players make roster constraints impossible."]
 
     global_pct = max(0.0, min(100.0, float(global_max_exposure_pct)))
-    global_cap = max(0, int(math.floor((global_pct / 100.0) * num_lineups)))
-    cap_counts: dict[str, int] = {str(p["ID"]): global_cap for p in players}
+    generation_global_cap = max(0, int(math.floor((global_pct / 100.0) * candidate_num_lineups)))
+    final_global_cap = max(0, int(math.floor((global_pct / 100.0) * requested_num_lineups)))
+    cap_counts: dict[str, int] = {str(p["ID"]): generation_global_cap for p in players}
+    final_cap_counts: dict[str, int] = {str(p["ID"]): final_global_cap for p in players}
     exposure_caps_pct = exposure_caps_pct or {}
     for pid, pct in exposure_caps_pct.items():
         player_id = str(pid)
@@ -3410,10 +3801,37 @@ def generate_lineups(
         clamped_pct = max(0.0, min(100.0, float(pct)))
         cap_counts[player_id] = min(
             cap_counts[player_id],
-            max(0, int(math.floor((clamped_pct / 100.0) * num_lineups))),
+            max(0, int(math.floor((clamped_pct / 100.0) * candidate_num_lineups))),
+        )
+        final_cap_counts[player_id] = min(
+            final_cap_counts[player_id],
+            max(0, int(math.floor((clamped_pct / 100.0) * requested_num_lineups))),
         )
     for lock in locked_set:
-        cap_counts[lock] = num_lineups
+        cap_counts[lock] = candidate_num_lineups
+        final_cap_counts[lock] = requested_num_lineups
+
+    cap_counts, uncertainty_cap_meta = _apply_uncertainty_exposure_caps(
+        players,
+        cap_counts,
+        candidate_num_lineups,
+        contest_type,
+    )
+    final_cap_counts, _ = _apply_uncertainty_exposure_caps(
+        players,
+        final_cap_counts,
+        requested_num_lineups,
+        contest_type,
+    )
+    if int(uncertainty_cap_meta.get("affected_players") or 0) > 0:
+        warnings.append(
+            "Uncertainty exposure caps active: "
+            f"{int(uncertainty_cap_meta['affected_players'])} players capped "
+            f"(high-risk={int(uncertainty_cap_meta['high_risk_players'])}, "
+            f"slate_games={int(uncertainty_cap_meta['slate_game_count'])}, "
+            f"caps={int(round(float(uncertainty_cap_meta['moderate_cap_pct'])))}%/"
+            f"{int(round(float(uncertainty_cap_meta['high_cap_pct'])))}%)."
+        )
 
     exposure_counts: dict[str, int] = {str(p["ID"]): 0 for p in players}
     rng = random.Random(random_seed)
@@ -3424,19 +3842,19 @@ def generate_lineups(
             "Low-owned upside bucket was enabled, but no candidates met the filters; generation continued without bucket constraints."
         )
 
-    target_low_own_lineups = int(round((low_own_exposure / 100.0) * float(num_lineups)))
-    target_low_own_lineups = max(0, min(num_lineups, target_low_own_lineups))
+    target_low_own_lineups = int(round((low_own_exposure / 100.0) * float(candidate_num_lineups)))
+    target_low_own_lineups = max(0, min(candidate_num_lineups, target_low_own_lineups))
     low_own_required_indices: set[int] = set()
     if target_low_own_lineups > 0 and low_own_min_required > 0 and low_own_candidate_ids:
         low_own_required_indices = _distributed_lineup_indices(
-            total_lineups=num_lineups,
+            total_lineups=candidate_num_lineups,
             target_count=target_low_own_lineups,
             rng=rng,
             buckets=10,
         )
 
-    target_preferred_stack_lineups = int(round((preferred_game_stack_lineup_pct_value / 100.0) * float(num_lineups)))
-    target_preferred_stack_lineups = max(0, min(num_lineups, target_preferred_stack_lineups))
+    target_preferred_stack_lineups = int(round((preferred_game_stack_lineup_pct_value / 100.0) * float(candidate_num_lineups)))
+    target_preferred_stack_lineups = max(0, min(candidate_num_lineups, target_preferred_stack_lineups))
     preferred_stack_required_indices: set[int] = set()
     if (
         target_preferred_stack_lineups > 0
@@ -3444,18 +3862,18 @@ def generate_lineups(
         and preferred_games
     ):
         preferred_stack_required_indices = _distributed_lineup_indices(
-            total_lineups=num_lineups,
+            total_lineups=candidate_num_lineups,
             target_count=target_preferred_stack_lineups,
             rng=rng,
             buckets=10,
         )
 
     ceiling_pct = max(0.0, min(100.0, float(ceiling_boost_lineup_pct)))
-    target_ceiling_lineups = int(round((ceiling_pct / 100.0) * float(num_lineups)))
-    target_ceiling_lineups = max(0, min(num_lineups, target_ceiling_lineups))
+    target_ceiling_lineups = int(round((ceiling_pct / 100.0) * float(candidate_num_lineups)))
+    target_ceiling_lineups = max(0, min(candidate_num_lineups, target_ceiling_lineups))
     ceiling_boost_indices: set[int] = set()
     if target_ceiling_lineups > 0:
-        ceiling_boost_indices = set(rng.sample(list(range(num_lineups)), k=target_ceiling_lineups))
+        ceiling_boost_indices = set(rng.sample(list(range(candidate_num_lineups)), k=target_ceiling_lineups))
 
     min_salary_any = int(scored["Salary"].min())
     player_cols = [
@@ -3542,9 +3960,11 @@ def generate_lineups(
     if cluster_mode:
         return _generate_lineups_cluster_mode(
             players=players,
-            num_lineups=num_lineups,
+            num_lineups=requested_num_lineups,
+            candidate_num_lineups=candidate_num_lineups,
             lock_players=lock_players,
             cap_counts=cap_counts,
+            final_cap_counts=final_cap_counts,
             exposure_counts=exposure_counts,
             min_salary_used=min_salary_used,
             min_salary_any=min_salary_any,
@@ -3570,9 +3990,10 @@ def generate_lineups(
             ceiling_boost_stack_bonus=max(0.0, float(ceiling_boost_stack_bonus)),
             ceiling_boost_salary_left_target=ceiling_salary_target,
             model_profile=model_profile_value,
+            contest_type=contest_type,
         )
 
-    for lineup_idx in range(num_lineups):
+    for lineup_idx in range(candidate_num_lineups):
         require_low_own = (
             lineup_idx in low_own_required_indices
             and low_own_min_required > 0
@@ -3587,8 +4008,9 @@ def generate_lineups(
         active_salary_target = ceiling_salary_target if ceiling_boost_active else salary_target
 
         if progress_callback is not None:
-            status = f"Generating lineup {lineup_idx + 1} of {num_lineups}..."
-            progress_callback(lineup_idx, num_lineups, status)
+            display_idx = min(lineup_idx + 1, requested_num_lineups)
+            status = f"Generating lineup {display_idx} of {requested_num_lineups}..."
+            progress_callback(min(lineup_idx, requested_num_lineups), requested_num_lineups, status)
         best_lineup: list[dict[str, Any]] | None = None
         best_score = -10**12
 
@@ -3610,7 +4032,7 @@ def generate_lineups(
                     pid = str(p["ID"])
                     if pid in selected_ids:
                         continue
-                    if exposure_counts[pid] >= cap_counts.get(pid, num_lineups):
+                    if exposure_counts[pid] >= cap_counts.get(pid, candidate_num_lineups):
                         continue
                     next_salary = salary + int(p["Salary"])
                     if next_salary > SALARY_CAP:
@@ -3723,7 +4145,11 @@ def generate_lineups(
                 f"Stopped early at lineup {lineup_idx + 1}: could not satisfy constraints/exposure with current pool."
             )
             if progress_callback is not None:
-                progress_callback(len(lineups), num_lineups, "Stopped early due to constraints.")
+                progress_callback(
+                    min(len(lineups), requested_num_lineups),
+                    requested_num_lineups,
+                    "Stopped early due to constraints.",
+                )
             break
 
         for p in best_lineup:
@@ -3753,6 +4179,8 @@ def generate_lineups(
                 "avg_minutes_last3": avg_minutes_last3,
                 "lineup_strategy": "spike" if spike_mode else "standard",
                 "model_profile": model_profile_value,
+                "stack_signature": _lineup_stack_signature(best_lineup),
+                "salary_texture_bucket": _salary_texture_bucket(SALARY_CAP - lineup_salary),
                 "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_candidate_ids)),
                 "preferred_game_player_count": int(preferred_game_player_count),
                 "preferred_game_stack_size": int(preferred_game_stack_size),
@@ -3765,16 +4193,39 @@ def generate_lineups(
         )
 
         if progress_callback is not None:
-            progress_callback(len(lineups), num_lineups, f"Generated {len(lineups)} of {num_lineups} lineups.")
+                progress_callback(
+                    min(len(lineups), requested_num_lineups),
+                    requested_num_lineups,
+                    f"Generated {min(len(lineups), requested_num_lineups)} of {requested_num_lineups} lineups.",
+                )
 
-    return lineups, warnings
+    final_preferred_target = int(round((preferred_game_stack_lineup_pct_value / 100.0) * float(requested_num_lineups)))
+    final_low_own_target = int(round((low_own_exposure / 100.0) * float(requested_num_lineups)))
+    reranked_lineups = _rerank_lineup_portfolio(
+        lineups,
+        target_lineups=requested_num_lineups,
+        contest_type=contest_type,
+        cap_counts=final_cap_counts,
+        preferred_games=preferred_games,
+        preferred_target_count=final_preferred_target,
+        low_own_target_count=final_low_own_target,
+        salary_left_target=salary_target,
+    )
+    if len(reranked_lineups) < requested_num_lineups:
+        warnings.append(
+            "Portfolio reranker returned "
+            f"{len(reranked_lineups)} of {requested_num_lineups} requested lineups after applying final exposure and overlap caps."
+        )
+    return reranked_lineups, warnings
 
 
 def _generate_lineups_cluster_mode(
     players: list[dict[str, Any]],
     num_lineups: int,
+    candidate_num_lineups: int,
     lock_players: list[dict[str, Any]],
     cap_counts: dict[str, int],
+    final_cap_counts: dict[str, int],
     exposure_counts: dict[str, int],
     min_salary_used: int,
     min_salary_any: int,
@@ -3800,6 +4251,7 @@ def _generate_lineups_cluster_mode(
     ceiling_boost_stack_bonus: float = 0.0,
     ceiling_boost_salary_left_target: int | None = None,
     model_profile: str = "legacy_baseline",
+    contest_type: str = "large gpp",
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if not players:
         return [], ["No players available for cluster generation."]
@@ -4183,7 +4635,23 @@ def _generate_lineups_cluster_mode(
         warnings.append(
             f"Cluster generator returned {len(lineups)} of {num_lineups} requested lineups."
         )
-    return lineups, warnings
+    final_preferred_target = int(round((len(preferred_stack_required) / max(1, candidate_num_lineups)) * float(num_lineups)))
+    final_low_own_target = int(round((len(low_own_required_idx) / max(1, candidate_num_lineups)) * float(num_lineups)))
+    reranked_lineups = _rerank_lineup_portfolio(
+        lineups,
+        target_lineups=num_lineups,
+        contest_type=contest_type,
+        cap_counts=final_cap_counts,
+        preferred_games=preferred_games,
+        preferred_target_count=final_preferred_target,
+        low_own_target_count=final_low_own_target,
+        salary_left_target=salary_target,
+    )
+    if len(reranked_lineups) < num_lineups:
+        warnings.append(
+            f"Cluster reranker returned {len(reranked_lineups)} of {num_lineups} requested lineups after final caps."
+        )
+    return reranked_lineups, warnings
 
 
 def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
@@ -4207,6 +4675,9 @@ def lineups_summary_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             "Avg Minutes (Past 3 Games)": round(float(avg_minutes_last3_value), 2),
             "Players": " | ".join(str(p.get("Name + ID") or p.get("Name")) for p in players),
         }
+        portfolio_score = _safe_float(lineup.get("portfolio_rerank_score"))
+        if portfolio_score is not None and not math.isnan(portfolio_score):
+            row["Portfolio Score"] = round(float(portfolio_score), 4)
         lineup_model_label = _lineup_model_label_value(lineup)
         if lineup_model_label:
             row["Lineup Model"] = lineup_model_label
@@ -4317,6 +4788,9 @@ def lineups_slots_frame(lineups: list[dict[str, Any]]) -> pd.DataFrame:
             "Expected Minutes Sum": round(float(expected_minutes_sum_value), 2),
             "Avg Minutes (Past 3 Games)": round(float(avg_minutes_last3_value), 2),
         }
+        portfolio_score = _safe_float(lineup.get("portfolio_rerank_score"))
+        if portfolio_score is not None and not math.isnan(portfolio_score):
+            row["Portfolio Score"] = round(float(portfolio_score), 4)
         for slot_label, player in zip(slot_labels, slots, strict=False):
             row[slot_label] = player.get("Name + ID") or player.get("Name")
             row[f"{slot_label} ID"] = str(player.get("ID") or "")

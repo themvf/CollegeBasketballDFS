@@ -3,8 +3,11 @@ from collections import Counter
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
+    _apply_uncertainty_exposure_caps,
+    _rerank_lineup_portfolio,
     apply_focus_game_chalk_guardrail,
     apply_model_profile_adjustments,
+    apply_ownership_calibration,
     apply_projection_uncertainty_adjustment,
     apply_projection_calibration,
     apply_false_chalk_discount,
@@ -339,6 +342,129 @@ def test_build_player_pool_rotowire_value_signal_lifts_cheap_player_ownership() 
     assert float(rw_g6["rotowire_ownership_bonus"]) > 0.0
     assert float(rw_g6["rotowire_value_signal"]) > 0.0
     assert float(rw_g6["rotowire_blend_weight"]) > 0.0
+
+
+def test_apply_ownership_calibration_lifts_cheap_focus_value_and_cuts_false_chalk() -> None:
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        rotowire_df=_sample_rotowire_players(),
+        bookmaker_filter="fanduel",
+    ).copy()
+
+    cheap_idx = pool.index[pool["Name"] == "Guard 6"][0]
+    chalk_idx = pool.index[pool["Name"] == "Forward 6"][0]
+    pool.loc[cheap_idx, "projected_ownership"] = 4.0
+    pool.loc[cheap_idx, "historical_ownership_baseline"] = 16.0
+    pool.loc[cheap_idx, "field_ownership_pct"] = 14.0
+    pool.loc[cheap_idx, "game_stack_focus_score"] = 84.0
+    pool.loc[cheap_idx, "team_stack_popularity_score"] = 72.0
+    pool.loc[cheap_idx, "consensus_value_signal"] = 0.82
+    pool.loc[cheap_idx, "rotowire_signal_score"] = 0.78
+    pool.loc[cheap_idx, "rotowire_value_signal"] = 0.76
+    pool.loc[cheap_idx, "projection_uncertainty_score"] = 0.10
+    pool.loc[cheap_idx, "dnp_risk_score"] = 0.08
+
+    pool.loc[chalk_idx, "projected_ownership"] = 24.0
+    pool.loc[chalk_idx, "historical_ownership_baseline"] = 6.0
+    pool.loc[chalk_idx, "field_ownership_pct"] = 5.0
+    pool.loc[chalk_idx, "game_stack_focus_score"] = 18.0
+    pool.loc[chalk_idx, "team_stack_popularity_score"] = 12.0
+    pool.loc[chalk_idx, "consensus_value_signal"] = 0.20
+    pool.loc[chalk_idx, "rotowire_signal_score"] = 0.18
+    pool.loc[chalk_idx, "rotowire_value_signal"] = 0.16
+    pool.loc[chalk_idx, "unsupported_false_chalk_flag"] = True
+    pool.loc[chalk_idx, "unsupported_false_chalk_score"] = 85.0
+
+    calibrated = apply_ownership_calibration(pool, contest_type="Large GPP")
+    assert float(calibrated.loc[cheap_idx, "projected_ownership"]) > 4.0
+    assert float(calibrated.loc[chalk_idx, "projected_ownership"]) < 24.0
+    assert "ownership_calibration_delta" in calibrated.columns
+
+
+def test_apply_uncertainty_exposure_caps_tightens_high_risk_players() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    players = pool.to_dict("records")
+    cap_counts = {str(pid): 10 for pid in pool["ID"].astype(str).tolist()}
+    risky_id = str(pool.loc[pool["Name"] == "Guard 1", "ID"].iloc[0])
+    safe_id = str(pool.loc[pool["Name"] == "Forward 1", "ID"].iloc[0])
+
+    for player in players:
+        if str(player["ID"]) == risky_id:
+            player["projection_uncertainty_score"] = 0.82
+            player["dnp_risk_score"] = 0.72
+            player["game_stack_focus_score"] = 0.0
+            player["rotowire_signal_score"] = 0.0
+        if str(player["ID"]) == safe_id:
+            player["projection_uncertainty_score"] = 0.12
+            player["dnp_risk_score"] = 0.08
+            player["game_stack_focus_score"] = 82.0
+            player["rotowire_signal_score"] = 0.74
+
+    capped, meta = _apply_uncertainty_exposure_caps(players, cap_counts, target_lineups=10, contest_type="Large GPP")
+    assert capped[risky_id] < 10
+    assert capped[safe_id] == 10
+    assert int(meta["affected_players"]) >= 1
+
+
+def test_rerank_lineup_portfolio_respects_final_exposure_caps() -> None:
+    lineups = [
+        {
+            "player_ids": ["1", "2", "3", "4", "5", "6", "7", "8"],
+            "players": [{"ID": str(i)} for i in range(1, 9)],
+            "projected_points": 200.0,
+            "ceiling_projection": 236.0,
+            "projected_ownership_sum": 130.0,
+            "salary_left": 100,
+            "preferred_game_stack_size": 3,
+            "preferred_game_player_count": 3,
+            "preferred_game_stack_met": True,
+            "low_own_upside_count": 1,
+            "unsupported_false_chalk_count": 0,
+        },
+        {
+            "player_ids": ["1", "2", "3", "4", "5", "6", "9", "10"],
+            "players": [{"ID": x} for x in ["1", "2", "3", "4", "5", "6", "9", "10"]],
+            "projected_points": 198.0,
+            "ceiling_projection": 232.0,
+            "projected_ownership_sum": 128.0,
+            "salary_left": 120,
+            "preferred_game_stack_size": 2,
+            "preferred_game_player_count": 2,
+            "preferred_game_stack_met": True,
+            "low_own_upside_count": 1,
+            "unsupported_false_chalk_count": 0,
+        },
+        {
+            "player_ids": ["9", "10", "11", "12", "13", "14", "15", "16"],
+            "players": [{"ID": x} for x in ["9", "10", "11", "12", "13", "14", "15", "16"]],
+            "projected_points": 194.0,
+            "ceiling_projection": 228.0,
+            "projected_ownership_sum": 120.0,
+            "salary_left": 140,
+            "preferred_game_stack_size": 1,
+            "preferred_game_player_count": 1,
+            "preferred_game_stack_met": False,
+            "low_own_upside_count": 0,
+            "unsupported_false_chalk_count": 0,
+        },
+    ]
+    cap_counts = {str(i): 2 for i in range(1, 17)}
+    cap_counts["1"] = 1
+    reranked = _rerank_lineup_portfolio(
+        lineups,
+        target_lineups=2,
+        contest_type="Large GPP",
+        cap_counts=cap_counts,
+        preferred_games={"AAA@BBB"},
+        preferred_target_count=1,
+        low_own_target_count=0,
+        salary_left_target=100,
+    )
+
+    assert len(reranked) == 2
+    exposure_one = sum(1 for lineup in reranked if "1" in lineup["player_ids"])
+    assert exposure_one == 1
 
 
 def test_generate_lineups_respects_locks_and_excludes() -> None:

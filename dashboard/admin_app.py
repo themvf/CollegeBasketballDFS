@@ -157,22 +157,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": False,
         "model_profile": "legacy_baseline",
-        "all_versions_weight": 0.05,
+        "all_versions_weight": 0.02,
         "gpp_overrides": {
-            "salary_left_target": 150,
-            "low_own_bucket_exposure_pct": 28.0,
+            "salary_left_target": 125,
+            "low_own_bucket_exposure_pct": 22.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 13.0,
             "low_own_bucket_min_projection": 18.0,
             "low_own_bucket_min_tail_score": 56.0,
-            "low_own_bucket_objective_bonus": 1.0,
+            "low_own_bucket_objective_bonus": 0.8,
             "preferred_game_bonus": 0.9,
-            "preferred_game_stack_lineup_pct": 55.0,
+            "preferred_game_stack_lineup_pct": 60.0,
             "preferred_game_stack_min_players": 3,
-            "max_unsupported_false_chalk_per_lineup": 1,
+            "max_unsupported_false_chalk_per_lineup": 0,
             "ceiling_boost_lineup_pct": 32.0,
             "ceiling_boost_stack_bonus": 2.4,
-            "ceiling_boost_salary_left_target": 120,
+            "ceiling_boost_salary_left_target": 100,
         },
     },
     {
@@ -181,22 +181,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "spike",
         "include_tail_signals": True,
         "model_profile": "tail_spike_pairs",
-        "all_versions_weight": 0.28,
+        "all_versions_weight": 0.22,
         "gpp_overrides": {
-            "salary_left_target": 240,
-            "low_own_bucket_exposure_pct": 52.0,
+            "salary_left_target": 220,
+            "low_own_bucket_exposure_pct": 48.0,
             "low_own_bucket_min_per_lineup": 2,
             "low_own_bucket_max_projected_ownership": 11.0,
             "low_own_bucket_min_projection": 16.0,
             "low_own_bucket_min_tail_score": 62.0,
-            "low_own_bucket_objective_bonus": 1.8,
+            "low_own_bucket_objective_bonus": 1.6,
             "preferred_game_bonus": 1.3,
-            "preferred_game_stack_lineup_pct": 68.0,
+            "preferred_game_stack_lineup_pct": 70.0,
             "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 70.0,
             "ceiling_boost_stack_bonus": 3.5,
-            "ceiling_boost_salary_left_target": 170,
+            "ceiling_boost_salary_left_target": 150,
         },
     },
     {
@@ -205,22 +205,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "standout_capture_v1",
-        "all_versions_weight": 0.19,
+        "all_versions_weight": 0.21,
         "gpp_overrides": {
-            "salary_left_target": 170,
-            "low_own_bucket_exposure_pct": 42.0,
+            "salary_left_target": 150,
+            "low_own_bucket_exposure_pct": 36.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 12.0,
             "low_own_bucket_min_projection": 18.0,
             "low_own_bucket_min_tail_score": 58.0,
-            "low_own_bucket_objective_bonus": 1.5,
+            "low_own_bucket_objective_bonus": 1.3,
             "preferred_game_bonus": 1.1,
-            "preferred_game_stack_lineup_pct": 62.0,
+            "preferred_game_stack_lineup_pct": 65.0,
             "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 52.0,
             "ceiling_boost_stack_bonus": 2.9,
-            "ceiling_boost_salary_left_target": 145,
+            "ceiling_boost_salary_left_target": 130,
         },
     },
     {
@@ -229,22 +229,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "chalk_value_capture_v1",
-        "all_versions_weight": 0.12,
+        "all_versions_weight": 0.15,
         "gpp_overrides": {
-            "salary_left_target": 150,
-            "low_own_bucket_exposure_pct": 26.0,
+            "salary_left_target": 125,
+            "low_own_bucket_exposure_pct": 20.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 13.0,
             "low_own_bucket_min_projection": 18.0,
             "low_own_bucket_min_tail_score": 55.0,
-            "low_own_bucket_objective_bonus": 1.1,
+            "low_own_bucket_objective_bonus": 0.9,
             "preferred_game_bonus": 1.0,
-            "preferred_game_stack_lineup_pct": 66.0,
+            "preferred_game_stack_lineup_pct": 70.0,
             "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 38.0,
             "ceiling_boost_stack_bonus": 2.5,
-            "ceiling_boost_salary_left_target": 125,
+            "ceiling_boost_salary_left_target": 110,
         },
     },
     {
@@ -253,22 +253,22 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "lineup_strategy": "standard",
         "include_tail_signals": True,
         "model_profile": "salary_efficiency_ceiling_v1",
-        "all_versions_weight": 0.36,
+        "all_versions_weight": 0.40,
         "gpp_overrides": {
-            "salary_left_target": 130,
-            "low_own_bucket_exposure_pct": 38.0,
+            "salary_left_target": 100,
+            "low_own_bucket_exposure_pct": 32.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 12.0,
             "low_own_bucket_min_projection": 20.0,
             "low_own_bucket_min_tail_score": 60.0,
-            "low_own_bucket_objective_bonus": 1.4,
+            "low_own_bucket_objective_bonus": 1.2,
             "preferred_game_bonus": 1.2,
-            "preferred_game_stack_lineup_pct": 78.0,
+            "preferred_game_stack_lineup_pct": 80.0,
             "preferred_game_stack_min_players": 3,
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 66.0,
             "ceiling_boost_stack_bonus": 3.1,
-            "ceiling_boost_salary_left_target": 150,
+            "ceiling_boost_salary_left_target": 125,
         },
     },
 )
@@ -303,10 +303,25 @@ def _contest_is_gpp(contest_type: str) -> bool:
     return str(contest_type or "").strip().lower() in {"small gpp", "large gpp"}
 
 
+def _slate_game_count_from_pool(pool_df: pd.DataFrame | None) -> int:
+    if pool_df is None or pool_df.empty:
+        return 0
+    if "game_key" in pool_df.columns:
+        series = pool_df["game_key"]
+    elif "Game Info" in pool_df.columns:
+        series = pool_df["Game Info"].map(_normalize_game_key_token)
+    else:
+        return 0
+    normalized = series.astype(str).str.strip().str.upper()
+    normalized = normalized.loc[normalized != ""]
+    return int(normalized.nunique())
+
+
 def _resolve_lineup_runtime_controls(
     *,
     contest_type: str,
     version_cfg: dict[str, Any],
+    pool_df: pd.DataFrame | None,
     apply_gpp_variance_presets: bool,
     salary_left_target: int,
     low_own_bucket_exposure_pct: float,
@@ -339,6 +354,8 @@ def _resolve_lineup_runtime_controls(
         "ceiling_boost_stack_bonus": float(ceiling_boost_stack_bonus),
         "ceiling_boost_salary_left_target": int(ceiling_boost_salary_left_target),
         "variance_preset_applied": False,
+        "slate_game_count": int(_slate_game_count_from_pool(pool_df)),
+        "slate_size_profile": "none",
     }
     if not apply_gpp_variance_presets or not _contest_is_gpp(contest_type):
         return controls
@@ -349,6 +366,37 @@ def _resolve_lineup_runtime_controls(
         if key in controls and key != "variance_preset_applied":
             controls[key] = val
     controls["variance_preset_applied"] = True
+
+    slate_game_count = int(controls.get("slate_game_count") or 0)
+    if slate_game_count > 0:
+        if slate_game_count <= 4:
+            controls["slate_size_profile"] = "small"
+            controls["salary_left_target"] = max(90, int(controls["salary_left_target"]) - 35)
+            controls["ceiling_boost_salary_left_target"] = max(80, int(controls["ceiling_boost_salary_left_target"]) - 30)
+            controls["low_own_bucket_exposure_pct"] = max(12.0, float(controls["low_own_bucket_exposure_pct"]) * 0.80)
+            controls["low_own_bucket_min_per_lineup"] = min(int(controls["low_own_bucket_min_per_lineup"]), 1)
+            controls["preferred_game_stack_lineup_pct"] = min(
+                92.0,
+                float(controls["preferred_game_stack_lineup_pct"]) + 12.0,
+            )
+            controls["preferred_game_stack_min_players"] = max(3, int(controls["preferred_game_stack_min_players"]))
+            controls["max_unsupported_false_chalk_per_lineup"] = 0
+        elif slate_game_count <= 7:
+            controls["slate_size_profile"] = "medium"
+            controls["salary_left_target"] = max(100, int(controls["salary_left_target"]) - 10)
+            controls["ceiling_boost_salary_left_target"] = max(90, int(controls["ceiling_boost_salary_left_target"]) - 10)
+            controls["low_own_bucket_exposure_pct"] = max(14.0, float(controls["low_own_bucket_exposure_pct"]) * 0.92)
+            controls["preferred_game_stack_lineup_pct"] = min(
+                88.0,
+                float(controls["preferred_game_stack_lineup_pct"]) + 5.0,
+            )
+            controls["preferred_game_stack_min_players"] = max(3, int(controls["preferred_game_stack_min_players"]))
+            controls["max_unsupported_false_chalk_per_lineup"] = min(
+                1,
+                int(controls["max_unsupported_false_chalk_per_lineup"]),
+            )
+        else:
+            controls["slate_size_profile"] = "large"
     return controls
 
 
@@ -5516,6 +5564,7 @@ with tab_lineups:
                         runtime_controls = _resolve_lineup_runtime_controls(
                             contest_type=contest_type,
                             version_cfg=version_cfg,
+                            pool_df=pool_sorted,
                             apply_gpp_variance_presets=apply_gpp_variance_presets,
                             salary_left_target=salary_left_target,
                             low_own_bucket_exposure_pct=low_own_bucket_exposure_pct,
@@ -5539,7 +5588,9 @@ with tab_lineups:
                                 f"focus_stack={float(runtime_controls['preferred_game_stack_lineup_pct']):.0f}%/{int(runtime_controls['preferred_game_stack_min_players'])}, "
                                 f"false_chalk<={int(runtime_controls['max_unsupported_false_chalk_per_lineup'])}, "
                                 f"ceiling={float(runtime_controls['ceiling_boost_lineup_pct']):.0f}%, "
-                                f"salary_left_target={int(runtime_controls['salary_left_target'])}"
+                                f"salary_left_target={int(runtime_controls['salary_left_target'])}, "
+                                f"slate_profile={str(runtime_controls.get('slate_size_profile') or 'none')} "
+                                f"({int(runtime_controls.get('slate_game_count') or 0)} games)"
                             )
 
                         def _lineup_progress(done: int, total: int, status: str) -> None:
