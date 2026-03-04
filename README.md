@@ -146,6 +146,31 @@ For Streamlit Community Cloud, set entrypoint:
 Secrets template:
 - `.streamlit/secrets.toml.example`
 
+## Vercel Migration Starter
+
+This repository now includes an initial migration scaffold out of Streamlit:
+
+- API backend starter: `apps/api`
+- Next.js frontend starter: `apps/web`
+- Migration plan: `docs/vercel_migration_plan.md`
+
+Run locally:
+
+```bash
+# terminal 1
+cd apps/api
+pip install -r requirements.txt
+pip install -r ../../requirements.txt
+pip install -e ../..
+uvicorn main:app --reload --port 8000
+
+# terminal 2
+cd apps/web
+cp .env.example .env.local
+npm install
+npm run dev
+```
+
 ## AI Review Packet
 
 Tournament Review now includes an `AI Review Packet (GPT)` section that:
