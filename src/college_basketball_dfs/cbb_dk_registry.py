@@ -13,6 +13,7 @@ REGISTRY_HISTORY_COLUMNS = [
     "name_plus_id",
     "player_name",
     "player_name_norm",
+    "player_name_norm_loose",
     "team_abbr",
     "team_norm",
     "position",
@@ -31,6 +32,7 @@ REGISTRY_COLUMNS = [
     "name_plus_id",
     "player_name",
     "player_name_norm",
+    "player_name_norm_loose",
     "team_abbr",
     "team_norm",
     "position",
@@ -69,6 +71,15 @@ RESOLUTION_COLUMNS = [
 def _normalize_text(value: Any) -> str:
     text = str(value or "").strip().lower()
     return re.sub(r"[^a-z0-9]", "", text)
+
+
+_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v", "vi"}
+
+
+def _normalize_text_without_suffix(value: Any) -> str:
+    tokens = re.findall(r"[a-z0-9]+", str(value or "").strip().lower())
+    tokens = [token for token in tokens if token not in _SUFFIX_TOKENS]
+    return "".join(tokens)
 
 
 def _safe_float(value: Any) -> float | None:
@@ -163,6 +174,7 @@ def extract_registry_rows_from_dk_slate(
     work["name_plus_id"] = work["Name + ID"].where(work["Name + ID"] != "", work["Name"] + " (" + work["ID"] + ")")
     work["player_name"] = work["Name"]
     work["player_name_norm"] = work["Name"].map(_normalize_text)
+    work["player_name_norm_loose"] = work["Name"].map(_normalize_text_without_suffix)
     work["team_abbr"] = work["TeamAbbrev"]
     work["team_norm"] = work["TeamAbbrev"].map(_normalize_text)
     work["position"] = work["Position"]
@@ -177,7 +189,8 @@ def extract_registry_rows_from_dk_slate(
     work["slate_date"] = slate_ts
     work["slate_key"] = str(slate_key or "").strip().lower()
     work["source_name"] = str(source_name or "").strip()
-    return work[REGISTRY_HISTORY_COLUMNS].reset_index(drop=True)
+    out = work[REGISTRY_HISTORY_COLUMNS].reset_index(drop=True)
+    return out
 
 
 def build_dk_identity_registry(history_df: pd.DataFrame) -> pd.DataFrame:
@@ -189,6 +202,10 @@ def build_dk_identity_registry(history_df: pd.DataFrame) -> pd.DataFrame:
     work["dk_id"] = work.get("dk_id", empty_series).astype(str).str.strip()
     work["player_name"] = work.get("player_name", empty_series).astype(str).str.strip()
     work["player_name_norm"] = work.get("player_name_norm", empty_series).astype(str).str.strip()
+    work["player_name_norm_loose"] = work.get(
+        "player_name_norm_loose",
+        work["player_name"].map(_normalize_text_without_suffix),
+    ).astype(str).str.strip()
     work["team_abbr"] = work.get("team_abbr", empty_series).astype(str).str.strip().str.upper()
     work["team_norm"] = work.get("team_norm", empty_series).astype(str).str.strip()
     work["position"] = work.get("position", empty_series).astype(str).str.strip().str.upper()
@@ -212,6 +229,7 @@ def build_dk_identity_registry(history_df: pd.DataFrame) -> pd.DataFrame:
                 "name_plus_id": str(latest.get("name_plus_id") or ""),
                 "player_name": str(latest.get("player_name") or ""),
                 "player_name_norm": str(latest.get("player_name_norm") or ""),
+                "player_name_norm_loose": str(latest.get("player_name_norm_loose") or ""),
                 "team_abbr": str(latest.get("team_abbr") or "").upper(),
                 "team_norm": str(latest.get("team_norm") or ""),
                 "position": str(latest.get("position") or "").upper(),
@@ -261,6 +279,7 @@ def build_registry_history_from_local_directory(directory: str | Path) -> pd.Dat
                 source_name=str(csv_path),
             )
         )
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
     if not frames:
         return _empty_history_frame()
     combined = pd.concat(frames, ignore_index=True)
@@ -295,6 +314,7 @@ def manual_overrides_to_history_frame(manual_df: pd.DataFrame) -> pd.DataFrame:
         return _empty_history_frame()
 
     work["player_name_norm"] = work["player_name"].map(_normalize_text)
+    work["player_name_norm_loose"] = work["player_name"].map(_normalize_text_without_suffix)
     work["team_norm"] = work["team_abbr"].map(_normalize_text)
     work["position_base"] = work["position"].map(_position_base)
     history = work[
@@ -303,6 +323,7 @@ def manual_overrides_to_history_frame(manual_df: pd.DataFrame) -> pd.DataFrame:
             "name_plus_id",
             "player_name",
             "player_name_norm",
+            "player_name_norm_loose",
             "team_abbr",
             "team_norm",
             "position",
@@ -317,6 +338,191 @@ def manual_overrides_to_history_frame(manual_df: pd.DataFrame) -> pd.DataFrame:
         ]
     ].copy()
     return history.reset_index(drop=True)
+
+
+def derive_manual_overrides_from_dk_slate(
+    rotowire_df: pd.DataFrame,
+    resolution_df: pd.DataFrame,
+    dk_slate_df: pd.DataFrame,
+    slate_date: date | str | None = None,
+    slate_key: str | None = None,
+    source_name: str | None = None,
+) -> tuple[pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    if rotowire_df is None or rotowire_df.empty or resolution_df is None or resolution_df.empty or dk_slate_df is None or dk_slate_df.empty:
+        return pd.DataFrame(), pd.DataFrame(), {"derived_override_count": 0, "remaining_unresolved": 0}
+
+    unresolved = resolution_df.loc[
+        resolution_df.get("dk_resolution_status", "").astype(str).isin(["unresolved", "conflict"])
+    ].copy()
+    if unresolved.empty:
+        return pd.DataFrame(), pd.DataFrame(), {"derived_override_count": 0, "remaining_unresolved": 0}
+
+    rw = rotowire_df.copy()
+    rw["player_name"] = rw.get("player_name", pd.Series([""] * len(rw), index=rw.index, dtype="object")).astype(str).str.strip()
+    rw["team_abbr"] = rw.get("team_abbr", pd.Series([""] * len(rw), index=rw.index, dtype="object")).astype(str).str.strip().str.upper()
+    rw["opp_abbr"] = rw.get("opp_abbr", pd.Series([""] * len(rw), index=rw.index, dtype="object")).astype(str).str.strip().str.upper()
+    rw["salary"] = pd.to_numeric(rw.get("salary"), errors="coerce")
+    rw["position"] = rw.get("roto_position", pd.Series([""] * len(rw), index=rw.index, dtype="object")).astype(str).str.strip().str.upper()
+    rw["site_positions"] = rw.get("site_positions", pd.Series([""] * len(rw), index=rw.index, dtype="object")).astype(str).str.strip().str.upper()
+    rw["name_norm"] = rw["player_name"].map(_normalize_text)
+    rw["name_norm_loose"] = rw["player_name"].map(_normalize_text_without_suffix)
+
+    unresolved["player_name"] = unresolved.get("player_name", pd.Series([""] * len(unresolved), index=unresolved.index, dtype="object")).astype(str).str.strip()
+    unresolved["team_abbr"] = unresolved.get("team_abbr", pd.Series([""] * len(unresolved), index=unresolved.index, dtype="object")).astype(str).str.strip().str.upper()
+    unresolved["salary"] = pd.to_numeric(unresolved.get("salary"), errors="coerce")
+    unresolved["position"] = unresolved.get("position", pd.Series([""] * len(unresolved), index=unresolved.index, dtype="object")).astype(str).str.strip().str.upper()
+    unresolved["name_norm"] = unresolved["player_name"].map(_normalize_text)
+    unresolved["name_norm_loose"] = unresolved["player_name"].map(_normalize_text_without_suffix)
+
+    dk = dk_slate_df.copy()
+    dk["Name"] = dk.get("Name", pd.Series([""] * len(dk), index=dk.index, dtype="object")).astype(str).str.strip()
+    dk["ID"] = dk.get("ID", pd.Series([""] * len(dk), index=dk.index, dtype="object")).astype(str).str.strip()
+    dk["Name + ID"] = dk.get("Name + ID", pd.Series([""] * len(dk), index=dk.index, dtype="object")).astype(str).str.strip()
+    dk["TeamAbbrev"] = dk.get("TeamAbbrev", pd.Series([""] * len(dk), index=dk.index, dtype="object")).astype(str).str.strip().str.upper()
+    dk["Salary"] = pd.to_numeric(dk.get("Salary"), errors="coerce")
+    dk["Position"] = dk.get("Position", pd.Series([""] * len(dk), index=dk.index, dtype="object")).astype(str).str.strip().str.upper()
+    dk["Roster Position"] = dk.get("Roster Position", pd.Series([""] * len(dk), index=dk.index, dtype="object")).astype(str).str.strip().str.upper()
+    dk["Game Info"] = dk.get("Game Info", pd.Series([""] * len(dk), index=dk.index, dtype="object")).astype(str).str.strip()
+    dk["name_norm"] = dk["Name"].map(_normalize_text)
+    dk["name_norm_loose"] = dk["Name"].map(_normalize_text_without_suffix)
+
+    target = unresolved.merge(
+        rw[
+            [
+                "player_name",
+                "team_abbr",
+                "opp_abbr",
+                "salary",
+                "position",
+                "site_positions",
+                "is_home",
+                "name_norm",
+                "name_norm_loose",
+            ]
+        ].drop_duplicates(
+            subset=["player_name", "team_abbr", "salary"],
+            keep="first",
+        ),
+        on=["player_name", "team_abbr", "salary"],
+        how="left",
+        suffixes=("", "_rw"),
+    )
+
+    exact = target.merge(
+        dk[
+            [
+                "Name",
+                "ID",
+                "Name + ID",
+                "TeamAbbrev",
+                "Salary",
+                "Position",
+                "Roster Position",
+                "Game Info",
+                "name_norm",
+            ]
+        ],
+        on="name_norm",
+        how="left",
+        suffixes=("", "_dk"),
+    )
+    exact = exact.loc[exact["salary"] == exact["Salary"]].copy()
+    exact["override_reason"] = "dk_slate_exact_name_salary"
+
+    matched_keys = set(
+        zip(
+            exact["player_name"].astype(str),
+            exact["team_abbr"].astype(str),
+            exact["salary"].astype(float),
+        )
+    )
+    remaining = target.loc[
+        ~target.apply(
+            lambda row: (
+                str(row.get("player_name") or ""),
+                str(row.get("team_abbr") or ""),
+                float(row.get("salary")) if pd.notna(row.get("salary")) else float("nan"),
+            )
+            in matched_keys,
+            axis=1,
+        )
+    ].copy()
+
+    loose = remaining.merge(
+        dk[
+            [
+                "Name",
+                "ID",
+                "Name + ID",
+                "TeamAbbrev",
+                "Salary",
+                "Position",
+                "Roster Position",
+                "Game Info",
+                "name_norm_loose",
+            ]
+        ],
+        on="name_norm_loose",
+        how="left",
+        suffixes=("", "_dk"),
+    )
+    loose = loose.loc[loose["salary"] == loose["Salary"]].copy()
+    loose["override_reason"] = "dk_slate_loose_name_salary"
+
+    all_matches = pd.concat([exact, loose], ignore_index=True)
+    if all_matches.empty:
+        return pd.DataFrame(), unresolved.copy(), {"derived_override_count": 0, "remaining_unresolved": int(len(unresolved))}
+
+    all_matches = all_matches.drop_duplicates(
+        subset=["player_name", "team_abbr", "salary"],
+        keep="first",
+    ).reset_index(drop=True)
+
+    slate_ts = pd.to_datetime(slate_date, errors="coerce")
+    overrides = pd.DataFrame(
+        {
+            "player_name": all_matches["player_name"].astype(str).str.strip(),
+            "team_abbr": all_matches["team_abbr"].astype(str).str.strip().str.upper(),
+            "opp_abbr": all_matches.get("opp_abbr", pd.Series([""] * len(all_matches), index=all_matches.index)).astype(str).str.strip().str.upper(),
+            "salary": pd.to_numeric(all_matches["salary"], errors="coerce"),
+            "position": all_matches.get("Position", all_matches.get("position", "")).astype(str).str.strip().str.upper(),
+            "roster_position": all_matches.get("Roster Position", pd.Series([""] * len(all_matches), index=all_matches.index)).astype(str).str.strip().str.upper(),
+            "game_key": all_matches.get("Game Info", pd.Series([""] * len(all_matches), index=all_matches.index)).map(_extract_game_key),
+            "dk_id": all_matches["ID"].astype(str).str.strip(),
+            "name_plus_id": all_matches["Name + ID"].astype(str).str.strip(),
+            "slate_date": slate_ts.strftime("%Y-%m-%d") if pd.notna(slate_ts) else "",
+            "slate_key": str(slate_key or "").strip().lower(),
+            "source_name": str(source_name or "").strip() or "dk_slate_import",
+            "override_reason": all_matches["override_reason"].astype(str).str.strip(),
+        }
+    )
+
+    matched_key_set = set(
+        zip(
+            overrides["player_name"].astype(str),
+            overrides["team_abbr"].astype(str),
+            pd.to_numeric(overrides["salary"], errors="coerce").fillna(-1).astype(float),
+        )
+    )
+    remaining_unresolved = unresolved.loc[
+        ~unresolved.apply(
+            lambda row: (
+                str(row.get("player_name") or ""),
+                str(row.get("team_abbr") or ""),
+                float(row.get("salary")) if pd.notna(row.get("salary")) else -1.0,
+            )
+            in matched_key_set,
+            axis=1,
+        )
+    ].copy()
+
+    meta = {
+        "derived_override_count": int(len(overrides)),
+        "remaining_unresolved": int(len(remaining_unresolved)),
+        "exact_name_salary_count": int((overrides["override_reason"] == "dk_slate_exact_name_salary").sum()),
+        "loose_name_salary_count": int((overrides["override_reason"] == "dk_slate_loose_name_salary").sum()),
+    }
+    return overrides.reset_index(drop=True), remaining_unresolved.reset_index(drop=True), meta
 
 
 def parse_local_dk_slate_filename(filename: str) -> dict[str, Any]:

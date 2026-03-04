@@ -5,6 +5,7 @@ import pandas as pd
 from college_basketball_dfs.cbb_dk_registry import (
     build_dk_identity_registry,
     build_rotowire_dk_slate,
+    derive_manual_overrides_from_dk_slate,
     extract_registry_rows_from_dk_slate,
     manual_overrides_to_history_frame,
 )
@@ -205,3 +206,89 @@ def test_manual_overrides_to_history_frame_normalizes_override_rows() -> None:
     assert row["team_abbr"] == "ABC"
     assert row["position_base"] == "G"
     assert row["dk_id"] == "4111"
+
+
+def test_derive_manual_overrides_from_dk_slate_handles_exact_and_loose_name_matches() -> None:
+    rotowire_df = pd.DataFrame(
+        [
+            {
+                "player_name": "Jane Smith",
+                "team_abbr": "AWAY",
+                "opp_abbr": "HOME",
+                "salary": 6800,
+                "roto_position": "F",
+                "site_positions": "F",
+                "is_home": False,
+            },
+            {
+                "player_name": "Darius Acuff",
+                "team_abbr": "ARK",
+                "opp_abbr": "TEX",
+                "salary": 9900,
+                "roto_position": "G",
+                "site_positions": "G",
+                "is_home": True,
+            },
+        ]
+    )
+    resolution_df = pd.DataFrame(
+        [
+            {
+                "player_name": "Jane Smith",
+                "team_abbr": "AWAY",
+                "opp_abbr": "HOME",
+                "salary": 6800,
+                "position": "F",
+                "dk_resolution_status": "unresolved",
+            },
+            {
+                "player_name": "Darius Acuff",
+                "team_abbr": "ARK",
+                "opp_abbr": "TEX",
+                "salary": 9900,
+                "position": "G",
+                "dk_resolution_status": "conflict",
+            },
+        ]
+    )
+    dk_slate_df = pd.DataFrame(
+        [
+            {
+                "Position": "F",
+                "Name + ID": "Jane Smith (2002)",
+                "Name": "Jane Smith",
+                "ID": "2002",
+                "Roster Position": "F/UTIL",
+                "Salary": 6800,
+                "Game Info": "AWAY@HOME 02/22/2026 08:00PM ET",
+                "TeamAbbrev": "AWAY",
+            },
+            {
+                "Position": "G",
+                "Name + ID": "Darius Acuff Jr. (3003)",
+                "Name": "Darius Acuff Jr.",
+                "ID": "3003",
+                "Roster Position": "G/UTIL",
+                "Salary": 9900,
+                "Game Info": "TEX@ARK 02/22/2026 08:00PM ET",
+                "TeamAbbrev": "ARK",
+            },
+        ]
+    )
+
+    overrides_df, remaining_df, meta = derive_manual_overrides_from_dk_slate(
+        rotowire_df=rotowire_df,
+        resolution_df=resolution_df,
+        dk_slate_df=dk_slate_df,
+        slate_date="2026-02-22",
+        slate_key="main",
+        source_name="unit-test",
+    )
+
+    assert len(overrides_df) == 2
+    assert len(remaining_df) == 0
+    assert int(meta["exact_name_salary_count"]) == 1
+    assert int(meta["loose_name_salary_count"]) == 1
+    reasons = set(overrides_df["override_reason"].tolist())
+    assert "dk_slate_exact_name_salary" in reasons
+    assert "dk_slate_loose_name_salary" in reasons

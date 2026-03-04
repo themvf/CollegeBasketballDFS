@@ -22,6 +22,7 @@ except ModuleNotFoundError:  # pragma: no cover - optional dependency in some de
 
 ROOT = Path(__file__).resolve().parents[1]
 SRC = ROOT / "src"
+LOCAL_DK_MANUAL_OVERRIDES_PATH = ROOT / "data" / "dk_manual_overrides.csv"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
 
@@ -95,6 +96,7 @@ from college_basketball_dfs.cbb_dk_registry import (
     build_dk_identity_registry,
     build_registry_history_from_local_directory,
     build_rotowire_dk_slate,
+    derive_manual_overrides_from_dk_slate,
     extract_registry_rows_from_dk_slate,
     manual_overrides_to_history_frame,
 )
@@ -3397,24 +3399,42 @@ def load_dk_registry_manual_overrides_frame(
     service_account_json: str | None,
     service_account_json_b64: str | None,
 ) -> pd.DataFrame:
-    if not bucket_name:
+    frames: list[pd.DataFrame] = []
+
+    if LOCAL_DK_MANUAL_OVERRIDES_PATH.exists():
+        try:
+            frames.append(pd.read_csv(LOCAL_DK_MANUAL_OVERRIDES_PATH))
+        except Exception:
+            pass
+
+    if bucket_name:
+        try:
+            client = build_storage_client(
+                service_account_json=service_account_json,
+                service_account_json_b64=service_account_json_b64,
+                project=gcp_project,
+            )
+            store = CbbGcsStore(bucket_name=bucket_name, client=client)
+            csv_text = _read_dk_registry_manual_csv(store)
+            if csv_text and csv_text.strip():
+                frames.append(pd.read_csv(io.StringIO(csv_text)))
+        except Exception:
+            pass
+
+    if not frames:
         return pd.DataFrame()
-    try:
-        client = build_storage_client(
-            service_account_json=service_account_json,
-            service_account_json_b64=service_account_json_b64,
-            project=gcp_project,
-        )
-        store = CbbGcsStore(bucket_name=bucket_name, client=client)
-        csv_text = _read_dk_registry_manual_csv(store)
-    except Exception:
-        return pd.DataFrame()
-    if not csv_text or not csv_text.strip():
-        return pd.DataFrame()
-    try:
-        return pd.read_csv(io.StringIO(csv_text))
-    except Exception:
-        return pd.DataFrame()
+    merged = pd.concat(frames, ignore_index=True)
+    for col in ["player_name", "team_abbr", "slate_key"]:
+        if col in merged.columns:
+            merged[col] = merged[col].astype(str).str.strip()
+    if "team_abbr" in merged.columns:
+        merged["team_abbr"] = merged["team_abbr"].str.upper()
+    if "slate_key" in merged.columns:
+        merged["slate_key"] = merged["slate_key"].str.lower()
+    dedupe_cols = [c for c in ["player_name", "team_abbr", "salary", "slate_date", "slate_key"] if c in merged.columns]
+    if dedupe_cols:
+        merged = merged.drop_duplicates(subset=dedupe_cols, keep="last").reset_index(drop=True)
+    return merged
 
 
 @st.cache_data(ttl=1800, show_spinner=False)
