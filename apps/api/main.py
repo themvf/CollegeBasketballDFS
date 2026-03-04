@@ -4,13 +4,16 @@ from datetime import date
 from typing import Any
 
 from fastapi import FastAPI, File, Header, HTTPException, Query, UploadFile
+from fastapi.responses import FileResponse
 from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel, Field
 
 from college_basketball_dfs.cbb_api_service import (
     build_registry_coverage,
     import_dk_slate_overrides,
     list_rotowire_slates_for_date,
 )
+from college_basketball_dfs.cbb_lineup_jobs import LineupJobManager
 
 
 app = FastAPI(
@@ -26,6 +29,49 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+JOB_MANAGER = LineupJobManager()
+
+
+class LineupGenerateRequest(BaseModel):
+    selected_date: date
+    contest_type: str = Field(default="Large GPP")
+    slate_key: str = Field(default="main")
+    rotowire_contest_type: str = Field(default="Classic")
+    rotowire_slate_name: str = Field(default="All")
+    rotowire_slate_id: int | None = None
+    model_key: str = Field(default="salary_efficiency_ceiling_v1")
+    num_lineups: int = Field(default=150, ge=1, le=1000)
+    random_seed: int = Field(default=7, ge=0, le=999999)
+    max_salary_left: int = Field(default=400, ge=0, le=10000)
+    global_max_exposure_pct: float = Field(default=50.0, ge=0.0, le=100.0)
+    auto_preferred_game_count: int = Field(default=2, ge=0, le=8)
+    apply_focus_game_stack_guardrails: bool = True
+    apply_ownership_guardrails: bool = True
+    apply_uncertainty_shrink: bool = True
+    uncertainty_weight: float = Field(default=0.15, ge=0.0, le=0.5)
+    high_risk_extra_shrink: float = Field(default=0.08, ge=0.0, le=0.5)
+    dnp_risk_threshold: float = Field(default=0.35, ge=0.0, le=1.0)
+    projection_scale: float = Field(default=1.0, gt=0.0, le=3.0)
+    salary_left_target: int | None = Field(default=None, ge=0, le=1000)
+    low_own_bucket_exposure_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    low_own_bucket_min_per_lineup: int | None = Field(default=None, ge=0, le=4)
+    low_own_bucket_max_projected_ownership: float | None = Field(default=None, ge=0.0, le=100.0)
+    low_own_bucket_min_projection: float | None = Field(default=None, ge=0.0, le=100.0)
+    low_own_bucket_min_tail_score: float | None = Field(default=None, ge=0.0, le=100.0)
+    low_own_bucket_objective_bonus: float | None = Field(default=None, ge=0.0, le=10.0)
+    preferred_game_bonus: float | None = Field(default=None, ge=0.0, le=10.0)
+    preferred_game_stack_lineup_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    preferred_game_stack_min_players: int | None = Field(default=None, ge=0, le=8)
+    max_unsupported_false_chalk_per_lineup: int | None = Field(default=None, ge=0, le=8)
+    ceiling_boost_lineup_pct: float | None = Field(default=None, ge=0.0, le=100.0)
+    ceiling_boost_stack_bonus: float | None = Field(default=None, ge=0.0, le=10.0)
+    ceiling_boost_salary_left_target: int | None = Field(default=None, ge=0, le=1000)
+    preferred_game_keys: list[str] = Field(default_factory=list)
+    locked_ids: list[str] = Field(default_factory=list)
+    excluded_ids: list[str] = Field(default_factory=list)
+    exposure_caps_pct: dict[str, float] = Field(default_factory=dict)
+    site_id: int = Field(default=1, ge=1, le=10)
 
 
 @app.get("/health")
@@ -84,6 +130,61 @@ def registry_coverage(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result
+
+
+@app.post("/v1/lineups/generate")
+def lineups_generate(
+    payload: LineupGenerateRequest,
+    x_rotowire_cookie: str | None = Header(default=None),
+) -> dict[str, Any]:
+    request_data = payload.model_dump(mode="json")
+    request_data["selected_date"] = payload.selected_date.isoformat()
+    if x_rotowire_cookie:
+        request_data["rotowire_cookie"] = x_rotowire_cookie
+    job_id = JOB_MANAGER.submit(request_data)
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "status_url": f"/v1/lineups/jobs/{job_id}",
+        "artifacts_url": f"/v1/lineups/jobs/{job_id}/artifacts",
+    }
+
+
+@app.get("/v1/lineups/jobs/{job_id}")
+def lineups_job_status(job_id: str) -> dict[str, Any]:
+    job = JOB_MANAGER.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    return job
+
+
+@app.get("/v1/lineups/jobs/{job_id}/artifacts")
+def lineups_job_artifacts(job_id: str) -> dict[str, Any]:
+    job = JOB_MANAGER.get_job(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail="job not found")
+    artifacts = JOB_MANAGER.list_artifacts(job_id)
+    for item in artifacts:
+        item["download_url"] = f"/v1/lineups/jobs/{job_id}/artifacts/{item['name']}"
+    return {
+        "job_id": job_id,
+        "status": str(job.get("status") or ""),
+        "artifacts": artifacts,
+    }
+
+
+@app.get("/v1/lineups/jobs/{job_id}/artifacts/{artifact_name}")
+def lineups_job_artifact_download(job_id: str, artifact_name: str) -> FileResponse:
+    path = JOB_MANAGER.resolve_artifact_path(job_id, artifact_name)
+    if path is None:
+        raise HTTPException(status_code=404, detail="artifact not found")
+    media = "application/octet-stream"
+    suffix = path.suffix.lower()
+    if suffix == ".csv":
+        media = "text/csv"
+    elif suffix == ".json":
+        media = "application/json"
+    return FileResponse(path=str(path), media_type=media, filename=path.name)
 
 
 @app.post("/v1/registry/import-dk-slate")

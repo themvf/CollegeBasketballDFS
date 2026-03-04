@@ -46,12 +46,24 @@ Lineup generation and backfills are long-running and data-heavy. Vercel serverle
 
 Backed by `src/college_basketball_dfs/cbb_api_service.py` to avoid Streamlit imports.
 
-### Phase 2
+### Phase 2 (Implemented baseline in this repo)
 
 - `POST /v1/lineups/generate` -> returns job id
 - `GET /v1/lineups/jobs/{job_id}`
 - `GET /v1/lineups/jobs/{job_id}/artifacts`
+- `GET /v1/lineups/jobs/{job_id}/artifacts/{artifact_name}`
 - `POST /v1/review/postmortem/build`
+
+Current Phase 2 implementation:
+
+- Async lineup generation via local thread worker pool
+- Durable local job state + artifacts at `data/api_jobs`
+- Artifact outputs: summary, slots, DK upload CSV, warnings, run metadata
+
+Production hardening still needed:
+
+- replace local worker with queue-backed worker service
+- add persisted run metadata in Postgres
 
 ### Phase 3
 
