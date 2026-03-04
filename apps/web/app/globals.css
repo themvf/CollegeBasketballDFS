@@ -158,8 +158,142 @@ a {
   font-size: 0.9rem;
 }
 
+.form-grid {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(150px, 1fr));
+  gap: 10px;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  color: var(--muted);
+  font-size: 0.88rem;
+}
+
+.field input,
+.field select {
+  border-radius: 10px;
+  border: 1px solid rgba(157, 178, 187, 0.32);
+  background: rgba(6, 14, 19, 0.7);
+  color: var(--text);
+  padding: 10px 11px;
+  outline: none;
+}
+
+.field input:focus,
+.field select:focus {
+  border-color: rgba(242, 95, 76, 0.9);
+  box-shadow: 0 0 0 2px rgba(242, 95, 76, 0.18);
+}
+
+.action-btn,
+.ghost-btn {
+  border-radius: 10px;
+  border: 1px solid rgba(157, 178, 187, 0.35);
+  padding: 9px 13px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: 0.18s ease;
+}
+
+.action-btn {
+  color: #0a1014;
+  background: linear-gradient(135deg, var(--accent), var(--accent-alt));
+  border-color: transparent;
+}
+
+.action-btn:hover {
+  filter: brightness(1.03);
+  transform: translateY(-1px);
+}
+
+.ghost-btn {
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.03);
+}
+
+.ghost-btn:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.action-btn:disabled,
+.ghost-btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+  transform: none;
+}
+
+.progress-shell {
+  margin: 8px 0 10px;
+  width: 100%;
+  height: 10px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  overflow: hidden;
+}
+
+.progress-fill {
+  height: 100%;
+  background: linear-gradient(90deg, var(--accent), var(--accent-alt));
+  transition: width 0.25s ease;
+}
+
+.error-text {
+  margin: 8px 0 0;
+  color: var(--bad);
+  font-size: 0.88rem;
+  white-space: pre-wrap;
+}
+
+.artifact-list {
+  display: grid;
+  gap: 10px;
+}
+
+.artifact-row {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid rgba(157, 178, 187, 0.2);
+  background: rgba(255, 255, 255, 0.02);
+  border-radius: 10px;
+  padding: 10px;
+}
+
+.artifact-name {
+  margin: 0 0 3px;
+  font-size: 0.95rem;
+  font-weight: 600;
+}
+
+.download-link {
+  padding: 8px 10px;
+  border-radius: 8px;
+  text-decoration: none;
+  border: 1px solid rgba(157, 178, 187, 0.34);
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.download-link:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 @media (max-width: 980px) {
   .content-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .form-grid {
+    grid-template-columns: repeat(2, minmax(120px, 1fr));
+  }
+}
+
+@media (max-width: 620px) {
+  .form-grid {
     grid-template-columns: 1fr;
   }
 }

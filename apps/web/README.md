@@ -15,6 +15,11 @@ Default API base URL:
 
 - `NEXT_PUBLIC_API_BASE_URL=http://localhost:8000`
 
+## Implemented Pages
+
+- `/` migration dashboard + registry coverage
+- `/lineups` async lineup job submit/poll/download UI
+
 ## Deploy to Vercel
 
 1. Create a new Vercel project from this repository.

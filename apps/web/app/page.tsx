@@ -1,3 +1,4 @@
+import Link from "next/link";
 import { fetchHealth, fetchRegistryCoverage } from "../lib/api";
 
 type HomeProps = {
@@ -46,6 +47,9 @@ export default async function Home({ searchParams }: HomeProps) {
           <span className="badge">Date: {selectedDate}</span>
           <span className="badge">API: {healthOk ? "Connected" : "Unavailable"}</span>
           <span className="badge">Stack: Next.js + FastAPI</span>
+          <span className="badge">
+            <Link href="/lineups">Open Lineup Jobs</Link>
+          </span>
         </div>
       </section>
 
