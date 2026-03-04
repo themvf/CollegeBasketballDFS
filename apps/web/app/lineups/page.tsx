@@ -1,6 +1,5 @@
 "use client";
 
-import Link from "next/link";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 type LineupJobState = {
@@ -186,10 +185,7 @@ export default function LineupJobsPage() {
           <span className="badge">API: {base}</span>
           <span className="badge">Date: {selectedDate}</span>
           <span className="badge">Mode: Async</span>
-          <span className="badge">
-            <Link href="/">Back To Console</Link>
-          </span>
-        </div>
+                  </div>
       </section>
 
       <section className="content-grid">
@@ -334,7 +330,7 @@ export default function LineupJobsPage() {
                   <div>
                     <p className="artifact-name">{artifact.filename || artifact.name}</p>
                     <p className="meta" style={{ margin: 0 }}>
-                      {artifact.content_type || "application/octet-stream"} · {formatBytes(artifact.size_bytes)}
+                      {artifact.content_type || "application/octet-stream"} | {formatBytes(artifact.size_bytes)}
                     </p>
                   </div>
                   <a className="download-link" href={href} target="_blank" rel="noreferrer">
