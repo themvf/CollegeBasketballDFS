@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import io
-from datetime import date
+from datetime import date, timedelta
 import os
 from pathlib import Path
+import re
 from typing import Any
 
 import pandas as pd
@@ -330,6 +331,122 @@ def _serialize_records(frame: pd.DataFrame, limit: int | None = None) -> list[di
         out = out.head(int(limit)).copy()
     out = out.where(pd.notna(out), None)
     return out.to_dict(orient="records")
+
+
+def _extract_iso_date_from_blob_name(blob_name: str) -> str | None:
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", str(blob_name or ""))
+    if not match:
+        return None
+    try:
+        parsed = pd.to_datetime(match.group(1), errors="coerce")
+    except Exception:
+        return None
+    if pd.isna(parsed):
+        return None
+    return parsed.date().isoformat()
+
+
+def _collect_blob_dates(
+    store: CbbGcsStore,
+    prefix: str,
+    suffixes: list[str] | None = None,
+) -> set[str]:
+    out: set[str] = set()
+    suffix_list = [str(s).strip().lower() for s in (suffixes or []) if str(s).strip()]
+    for blob in store.bucket.list_blobs(prefix=prefix):
+        name = str(getattr(blob, "name", "") or "")
+        if not name:
+            continue
+        lower_name = name.lower()
+        if suffix_list and not any(lower_name.endswith(sfx) for sfx in suffix_list):
+            continue
+        iso_date = _extract_iso_date_from_blob_name(name)
+        if iso_date:
+            out.add(iso_date)
+    return out
+
+
+def _iter_iso_dates(start_date: date, end_date: date) -> list[str]:
+    cursor = start_date
+    out: list[str] = []
+    while cursor <= end_date:
+        out.append(cursor.isoformat())
+        cursor = cursor + timedelta(days=1)
+    return out
+
+
+def _coverage_stats(expected_dates: list[str], found_dates: set[str]) -> dict[str, Any]:
+    found = [d for d in expected_dates if d in found_dates]
+    missing = [d for d in expected_dates if d not in found_dates]
+    total = len(expected_dates)
+    count_found = len(found)
+    pct = 0.0 if total <= 0 else (100.0 * float(count_found) / float(total))
+    return {
+        "found_dates": count_found,
+        "total_dates": total,
+        "coverage_pct": round(pct, 2),
+        "missing_dates": missing[:180],
+        "sample_found_dates": found[-10:],
+    }
+
+
+def build_cache_coverage_payload(
+    *,
+    start_date: date | str,
+    end_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    parsed_start = pd.to_datetime(start_date, errors="coerce")
+    parsed_end = pd.to_datetime(end_date, errors="coerce")
+    if pd.isna(parsed_start) or pd.isna(parsed_end):
+        raise ValueError("start_date and end_date must be valid dates")
+    start_day = parsed_start.date()
+    end_day = parsed_end.date()
+    if end_day < start_day:
+        raise ValueError("end_date must be on or after start_date")
+
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+
+    expected_dates = _iter_iso_dates(start_day, end_day)
+    raw_dates = _collect_blob_dates(store, prefix="cbb/raw/", suffixes=[".json"])
+    odds_dates = _collect_blob_dates(store, prefix="cbb/odds/", suffixes=[".json"])
+    odds_games_dates = _collect_blob_dates(store, prefix="cbb/odds_games/", suffixes=["_odds.csv"])
+    props_dates = _collect_blob_dates(store, prefix="cbb/props/", suffixes=[".json"])
+    props_lines_dates = _collect_blob_dates(store, prefix="cbb/props_lines/", suffixes=["_props.csv"])
+    players_dates = _collect_blob_dates(store, prefix="cbb/players/", suffixes=["_players.csv"])
+    dk_slate_dates = _collect_blob_dates(store, prefix="cbb/dk_slates/", suffixes=["_dk_slate.csv"])
+    projections_dates = _collect_blob_dates(store, prefix="cbb/projections/", suffixes=["_projections.csv"])
+    ownership_dates = _collect_blob_dates(store, prefix="cbb/ownership/", suffixes=["_ownership.csv"])
+    injuries_feed_dates = _collect_blob_dates(store, prefix="cbb/injuries/feed/", suffixes=["_injuries_feed.csv"])
+
+    coverage = {
+        "raw_game_data": _coverage_stats(expected_dates, raw_dates),
+        "odds_data": _coverage_stats(expected_dates, odds_dates),
+        "odds_games_csv": _coverage_stats(expected_dates, odds_games_dates),
+        "props_data": _coverage_stats(expected_dates, props_dates),
+        "props_lines_csv": _coverage_stats(expected_dates, props_lines_dates),
+        "players_results": _coverage_stats(expected_dates, players_dates),
+        "dk_slates": _coverage_stats(expected_dates, dk_slate_dates),
+        "projections_snapshots": _coverage_stats(expected_dates, projections_dates),
+        "ownership_files": _coverage_stats(expected_dates, ownership_dates),
+        "injuries_feed": _coverage_stats(expected_dates, injuries_feed_dates),
+    }
+
+    return {
+        "bucket_name": store.bucket_name,
+        "start_date": start_day.isoformat(),
+        "end_date": end_day.isoformat(),
+        "total_dates": len(expected_dates),
+        "coverage": coverage,
+    }
 
 
 def _read_vegas_source_payloads(

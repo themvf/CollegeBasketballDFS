@@ -1,7 +1,12 @@
 import { notFound } from "next/navigation";
+import BackfillView from "../../../components/backfill-view";
+import DkSlateImportView from "../../../components/dk-slate-import-view";
 import GameDataView from "../../../components/game-data-view";
 import LineupGeneratorView from "../../../components/lineup-generator-view";
+import PropDataView from "../../../components/prop-data-view";
+import RotowireScraperView from "../../../components/rotowire-scraper-view";
 import SectionPlaceholder from "../../../components/section-placeholder";
+import SlateVegasView from "../../../components/slate-vegas-view";
 
 type GenerateLineupStepPageProps = {
   params: Promise<{ step: string }>;
@@ -95,12 +100,32 @@ function getTodayIsoDate(): string {
 
 export default async function GenerateLineupStepPage({ params, searchParams }: GenerateLineupStepPageProps) {
   const resolvedParams = await params;
+  const query = await searchParams;
+  const selectedDate = typeof query.date === "string" ? query.date : getTodayIsoDate();
   const step = String(resolvedParams.step || "").trim().toLowerCase();
 
   if (step === "game-data") {
-    const query = await searchParams;
-    const selectedDate = typeof query.date === "string" ? query.date : getTodayIsoDate();
     return <GameDataView selectedDate={selectedDate} />;
+  }
+
+  if (step === "prop-data") {
+    return <PropDataView selectedDate={selectedDate} />;
+  }
+
+  if (step === "backfill") {
+    return <BackfillView endDate={selectedDate} />;
+  }
+
+  if (step === "dk-slate") {
+    return <DkSlateImportView selectedDate={selectedDate} />;
+  }
+
+  if (step === "slate-vegas") {
+    return <SlateVegasView selectedDate={selectedDate} />;
+  }
+
+  if (step === "rotowire-scraper") {
+    return <RotowireScraperView selectedDate={selectedDate} />;
   }
 
   if (step === "lineup-generator") {

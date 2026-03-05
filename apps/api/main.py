@@ -9,6 +9,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from college_basketball_dfs.cbb_api_service import (
+    build_cache_coverage_payload,
     build_props_review_payload,
     build_registry_coverage,
     build_vegas_game_lines_payload,
@@ -184,6 +185,24 @@ def vegas_prop_data(
             bucket_name=bucket_name,
             gcp_project=gcp_project,
             row_limit=row_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/ops/cache-coverage")
+def ops_cache_coverage(
+    start_date: date = Query(..., description="Start date in YYYY-MM-DD"),
+    end_date: date = Query(..., description="End date in YYYY-MM-DD"),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_cache_coverage_payload(
+            start_date=start_date,
+            end_date=end_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
         )
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

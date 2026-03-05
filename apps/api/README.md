@@ -20,6 +20,7 @@ uvicorn main:app --reload --port 8000
 - `GET /v1/vegas/game-lines`
 - `GET /v1/vegas/market-context`
 - `GET /v1/vegas/prop-data`
+- `GET /v1/ops/cache-coverage`
 - `POST /v1/lineups/generate`
 - `GET /v1/lineups/jobs/{job_id}`
 - `GET /v1/lineups/jobs/{job_id}/artifacts`

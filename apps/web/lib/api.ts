@@ -144,12 +144,39 @@ export type VegasPropDataResponse = {
   }>;
 };
 
-function baseUrl(): string {
+export type CacheCoverageStats = {
+  found_dates?: number;
+  total_dates?: number;
+  coverage_pct?: number;
+  missing_dates?: string[];
+  sample_found_dates?: string[];
+};
+
+export type CacheCoverageResponse = {
+  bucket_name?: string;
+  start_date: string;
+  end_date: string;
+  total_dates: number;
+  coverage?: {
+    raw_game_data?: CacheCoverageStats;
+    odds_data?: CacheCoverageStats;
+    odds_games_csv?: CacheCoverageStats;
+    props_data?: CacheCoverageStats;
+    props_lines_csv?: CacheCoverageStats;
+    players_results?: CacheCoverageStats;
+    dk_slates?: CacheCoverageStats;
+    projections_snapshots?: CacheCoverageStats;
+    ownership_files?: CacheCoverageStats;
+    injuries_feed?: CacheCoverageStats;
+  };
+};
+
+export function getApiBaseUrl(): string {
   return process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 }
 
 export async function fetchRegistryCoverage(selectedDate: string): Promise<CoverageResponse | null> {
-  const url = `${baseUrl()}/v1/registry/coverage?selected_date=${encodeURIComponent(selectedDate)}&contest_type=Classic&slate_name=All&slate_key=main`;
+  const url = `${getApiBaseUrl()}/v1/registry/coverage?selected_date=${encodeURIComponent(selectedDate)}&contest_type=Classic&slate_name=All&slate_key=main`;
   try {
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
@@ -162,7 +189,7 @@ export async function fetchRegistryCoverage(selectedDate: string): Promise<Cover
 }
 
 export async function fetchHealth(): Promise<boolean> {
-  const url = `${baseUrl()}/health`;
+  const url = `${getApiBaseUrl()}/health`;
   try {
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
@@ -176,7 +203,7 @@ export async function fetchHealth(): Promise<boolean> {
 }
 
 export async function fetchVegasGameLines(selectedDate: string): Promise<VegasGameLinesResponse | null> {
-  const url = `${baseUrl()}/v1/vegas/game-lines?selected_date=${encodeURIComponent(selectedDate)}`;
+  const url = `${getApiBaseUrl()}/v1/vegas/game-lines?selected_date=${encodeURIComponent(selectedDate)}`;
   try {
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
@@ -189,7 +216,7 @@ export async function fetchVegasGameLines(selectedDate: string): Promise<VegasGa
 }
 
 export async function fetchVegasMarketContext(selectedDate: string): Promise<VegasMarketContextResponse | null> {
-  const url = `${baseUrl()}/v1/vegas/market-context?selected_date=${encodeURIComponent(selectedDate)}`;
+  const url = `${getApiBaseUrl()}/v1/vegas/market-context?selected_date=${encodeURIComponent(selectedDate)}`;
   try {
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
@@ -202,13 +229,26 @@ export async function fetchVegasMarketContext(selectedDate: string): Promise<Veg
 }
 
 export async function fetchVegasPropData(selectedDate: string): Promise<VegasPropDataResponse | null> {
-  const url = `${baseUrl()}/v1/vegas/prop-data?selected_date=${encodeURIComponent(selectedDate)}`;
+  const url = `${getApiBaseUrl()}/v1/vegas/prop-data?selected_date=${encodeURIComponent(selectedDate)}`;
   try {
     const response = await fetch(url, { cache: "no-store" });
     if (!response.ok) {
       return null;
     }
     return (await response.json()) as VegasPropDataResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchCacheCoverage(startDate: string, endDate: string): Promise<CacheCoverageResponse | null> {
+  const url = `${getApiBaseUrl()}/v1/ops/cache-coverage?start_date=${encodeURIComponent(startDate)}&end_date=${encodeURIComponent(endDate)}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as CacheCoverageResponse;
   } catch {
     return null;
   }
