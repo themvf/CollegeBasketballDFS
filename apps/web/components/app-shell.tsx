@@ -1,34 +1,52 @@
 "use client";
 
+import type { Route } from "next";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import { useEffect, useMemo, useState } from "react";
-import { NAV_ITEMS, getNavItem } from "../lib/navigation";
+import {
+  PRIMARY_NAV_ITEMS,
+  canonicalizePath,
+  getActiveSubNavItem,
+  getPrimaryNavItem,
+  getSubNavItems,
+  resolvePrimaryNavKey,
+} from "../lib/navigation";
 
 type AppShellProps = {
   children: React.ReactNode;
 };
 
-function isActive(pathname: string, href: string): boolean {
+function isRouteActive(pathname: string, href: string): boolean {
+  const normalized = canonicalizePath(pathname);
   if (href === "/") {
-    return pathname === "/";
+    return normalized === "/";
   }
-  return pathname === href || pathname.startsWith(`${href}/`);
+  return normalized === href || normalized.startsWith(`${href}/`);
 }
 
 export default function AppShell({ children }: AppShellProps) {
   const pathname = usePathname() || "/";
+  const canonicalPath = canonicalizePath(pathname);
   const [mobileOpen, setMobileOpen] = useState(false);
-  const active = getNavItem(pathname);
+  const activePrimary = getPrimaryNavItem(canonicalPath);
+  const activeSubNav = getActiveSubNavItem(canonicalPath);
+  const subNavItems = getSubNavItems(resolvePrimaryNavKey(canonicalPath));
+
   const crumbItems = useMemo(() => {
-    if (!active || active.href === "/") {
-      return [{ label: "Home", href: "/" as const }];
+    const crumbs: Array<{ label: string; href?: string }> = [];
+    crumbs.push({ label: activePrimary.label, href: activePrimary.href });
+    if (activeSubNav) {
+      crumbs.push({ label: activeSubNav.label });
     }
-    return [
-      { label: "Home", href: "/" as const },
-      { label: active.label, href: active.href },
-    ];
-  }, [active]);
+    if (crumbs.length === 0) {
+      return [{ label: "Generate Lineup" }];
+    }
+    return crumbs;
+  }, [activePrimary, activeSubNav]);
+
+  const activeHeadline = activeSubNav?.label ?? activePrimary.label;
+  const activeDescription = activeSubNav?.description ?? activePrimary.description;
 
   useEffect(() => {
     setMobileOpen(false);
@@ -52,28 +70,64 @@ export default function AppShell({ children }: AppShellProps) {
     };
   }, [mobileOpen]);
 
-  const renderGroup = (group: "overview" | "operations" | "analysis", label: string) => (
-    <div className="nav-group">
-      <p className="nav-group-label">{label}</p>
-      {NAV_ITEMS.filter((item) => item.group === group).map((item) => {
-        const activeState = isActive(pathname, item.href);
-        return (
-          <Link
-            key={item.href}
-            href={item.href}
-            className={`nav-item ${activeState ? "active" : ""}`}
-            aria-current={activeState ? "page" : undefined}
-          >
-            <span className="nav-title">{item.label}</span>
-            <span className="nav-desc">{item.description}</span>
-          </Link>
-        );
-      })}
-    </div>
-  );
-
   return (
     <div className="app-shell">
+      <header className="site-header" aria-label="Main navigation">
+        <div className="site-header-inner">
+          <div className="brand-wrap">
+            <span className="brand-mark" aria-hidden="true" />
+            <p className="brand-name">CollegeBasketballDFS</p>
+          </div>
+
+          <nav className="primary-nav" aria-label="Primary">
+            {PRIMARY_NAV_ITEMS.map((item) => {
+              const primaryActive = item.key === activePrimary.key;
+              return (
+                <Link
+                  key={item.key}
+                  href={item.href as Route}
+                  className={`primary-link ${primaryActive ? "active" : ""}`}
+                  aria-current={primaryActive ? "page" : undefined}
+                >
+                  {item.label}
+                </Link>
+              );
+            })}
+          </nav>
+
+          <button
+            type="button"
+            className="mobile-nav-toggle"
+            onClick={() => setMobileOpen((prev) => !prev)}
+            aria-expanded={mobileOpen}
+            aria-controls="mobile-nav-drawer"
+            aria-label="Toggle navigation"
+          >
+            {mobileOpen ? "Close" : "Menu"}
+          </button>
+        </div>
+      </header>
+
+      <nav className="subnav-shell" aria-label={`${activePrimary.label} sub-navigation`}>
+        <div className="subnav-inner">
+          <div className="subnav-scroll">
+            {subNavItems.map((item) => {
+              const subActive = isRouteActive(canonicalPath, item.href);
+              return (
+                <Link
+                  key={item.key}
+                  href={item.href as Route}
+                  className={`subnav-link ${subActive ? "active" : ""}`}
+                  aria-current={subActive ? "page" : undefined}
+                >
+                  {item.label}
+                </Link>
+              );
+            })}
+          </div>
+        </div>
+      </nav>
+
       {mobileOpen ? (
         <button
           type="button"
@@ -83,68 +137,66 @@ export default function AppShell({ children }: AppShellProps) {
         />
       ) : null}
 
-      <aside className={`app-sidebar ${mobileOpen ? "open" : ""}`} aria-label="Primary" id="primary-navigation">
-        <div className="brand-block">
-          <p className="brand-eyebrow">CollegeBasketballDFS</p>
-          <h2>Control Room</h2>
-          <p className="meta" style={{ marginTop: 8 }}>
-            Streamlit parity navigation with a cleaner operational UX.
-          </p>
-        </div>
+      <aside className={`mobile-drawer ${mobileOpen ? "open" : ""}`} id="mobile-nav-drawer" aria-label="Mobile menu">
+        <p className="mobile-heading">Sections</p>
+        <nav className="mobile-nav-list" aria-label="Primary mobile">
+          {PRIMARY_NAV_ITEMS.map((item) => {
+            const primaryActive = item.key === activePrimary.key;
+            return (
+              <Link
+                key={item.key}
+                href={item.href as Route}
+                className={`mobile-nav-item ${primaryActive ? "active" : ""}`}
+                aria-current={primaryActive ? "page" : undefined}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
 
-        {renderGroup("overview", "Overview")}
-        {renderGroup("operations", "Operations")}
-        {renderGroup("analysis", "Analysis")}
+        <p className="mobile-heading">Current Workflow</p>
+        <nav className="mobile-nav-list" aria-label="Sub-navigation mobile">
+          {subNavItems.map((item) => {
+            const subActive = isRouteActive(canonicalPath, item.href);
+            return (
+              <Link
+                key={item.key}
+                href={item.href as Route}
+                className={`mobile-nav-item ${subActive ? "active" : ""}`}
+                aria-current={subActive ? "page" : undefined}
+              >
+                {item.label}
+              </Link>
+            );
+          })}
+        </nav>
       </aside>
 
       <section className="app-main" id="main-content">
-        <header className="topbar">
-          <div className="topbar-main">
-            <button
-              type="button"
-              className="mobile-nav-toggle"
-              onClick={() => setMobileOpen((prev) => !prev)}
-              aria-expanded={mobileOpen}
-              aria-controls="primary-navigation"
-              aria-label="Toggle navigation"
-            >
-              {mobileOpen ? "Close" : "Menu"}
-            </button>
-
-            <div>
-              <nav aria-label="Breadcrumb" className="breadcrumbs">
-                <ol>
-                  {crumbItems.map((item, idx) => {
-                    const isLast = idx === crumbItems.length - 1;
-                    return (
-                      <li key={`${item.label}-${idx}`}>
-                        {idx > 0 ? <span className="crumb-sep">/</span> : null}
-                        {isLast ? (
-                          <span aria-current="page">{item.label}</span>
-                        ) : (
-                          <Link href={item.href}>{item.label}</Link>
-                        )}
-                      </li>
-                    );
-                  })}
-                </ol>
-              </nav>
-
-              <p className="topbar-eyebrow">Active Module</p>
-              <h1 className="topbar-title">{active?.label ?? "Dashboard"}</h1>
-              <p className="meta" style={{ marginTop: 6 }}>
-                {active?.description ?? "Migration workspace"}
-              </p>
-            </div>
-          </div>
-
-          <div className="topbar-actions">
-            <p className="topbar-eyebrow">Active Module</p>
-            <p className="meta" style={{ marginTop: 6 }}>
-              Route: <code>{pathname}</code>
-            </p>
-          </div>
-        </header>
+        <div className="page-header">
+          <nav aria-label="Breadcrumb" className="breadcrumbs">
+            <ol>
+              {crumbItems.map((item, idx) => {
+                const isLast = idx === crumbItems.length - 1;
+                return (
+                  <li key={`${item.label}-${idx}`}>
+                    {idx > 0 ? <span className="crumb-sep">/</span> : null}
+                    {item.href && !isLast ? (
+                      <Link href={item.href as Route}>{item.label}</Link>
+                    ) : (
+                      <span aria-current={isLast ? "page" : undefined}>{item.label}</span>
+                    )}
+                  </li>
+                );
+              })}
+            </ol>
+          </nav>
+          <h1 className="topbar-title">{activeHeadline}</h1>
+          <p className="meta" style={{ marginTop: 6 }}>
+            {activeDescription}
+          </p>
+        </div>
         <div className="app-content">{children}</div>
       </section>
     </div>
