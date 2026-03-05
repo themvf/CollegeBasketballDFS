@@ -500,6 +500,49 @@ a {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.table-shell {
+  width: 100%;
+  overflow-x: auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.015);
+}
+
+.data-table {
+  width: 100%;
+  border-collapse: collapse;
+  min-width: 720px;
+}
+
+.data-table th,
+.data-table td {
+  padding: 9px 10px;
+  text-align: left;
+  border-bottom: 1px solid rgba(137, 152, 176, 0.18);
+  white-space: nowrap;
+}
+
+.data-table th {
+  font-size: 0.76rem;
+  text-transform: uppercase;
+  letter-spacing: 0.7px;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.data-table td {
+  font-size: 0.9rem;
+  color: var(--text);
+}
+
+.data-table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.data-table tbody tr:hover td {
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .skeleton-grid {
   margin-top: 12px;
   display: grid;

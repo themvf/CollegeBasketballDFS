@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import io
 from datetime import date
+import os
 from pathlib import Path
 from typing import Any
 
@@ -14,7 +15,16 @@ from .cbb_dk_registry import (
     derive_manual_overrides_from_dk_slate,
     manual_overrides_to_history_frame,
 )
+from .cbb_gcs import CbbGcsStore, build_storage_client
 from .cbb_rotowire import RotoWireClient, flatten_slates, normalize_players, select_slate
+from .cbb_odds import flatten_player_props_payload
+from .cbb_vegas_review import (
+    build_calibration_models_frame,
+    build_spread_buckets_frame,
+    build_total_buckets_frame,
+    build_vegas_review_games_frame,
+    summarize_vegas_accuracy,
+)
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -36,6 +46,28 @@ MANUAL_OVERRIDE_COLUMNS = [
     "reason",
     "source_name",
 ]
+
+
+def _resolve_api_bucket_name(bucket_name: str | None = None) -> str:
+    resolved = (bucket_name or os.getenv("CBB_GCS_BUCKET", "")).strip()
+    if not resolved:
+        raise ValueError("CBB_GCS_BUCKET is required for Vegas and props review endpoints.")
+    return resolved
+
+
+def _build_api_store(
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> CbbGcsStore:
+    resolved_bucket = _resolve_api_bucket_name(bucket_name)
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=(gcp_project or os.getenv("GCP_PROJECT") or None),
+    )
+    return CbbGcsStore(bucket_name=resolved_bucket, client=client)
 
 
 def _dedupe_manual_overrides(frame: pd.DataFrame) -> pd.DataFrame:
@@ -287,4 +319,272 @@ def import_dk_slate_overrides(
         "derivation_meta": dict(derive_meta or {}),
         "persisted_manual_overrides_path": written_path,
         "persisted": bool(persist),
+    }
+
+
+def _serialize_records(frame: pd.DataFrame, limit: int | None = None) -> list[dict[str, Any]]:
+    if frame is None or frame.empty:
+        return []
+    out = frame.copy()
+    if limit is not None and limit > 0:
+        out = out.head(int(limit)).copy()
+    out = out.where(pd.notna(out), None)
+    return out.to_dict(orient="records")
+
+
+def _read_vegas_source_payloads(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> tuple[CbbGcsStore, dict[str, Any] | None, dict[str, Any] | None]:
+    parsed_date = pd.to_datetime(selected_date, errors="coerce")
+    if pd.isna(parsed_date):
+        raise ValueError("selected_date must be a valid date")
+    game_date = parsed_date.date()
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    raw_payload = store.read_raw_json(game_date)
+    odds_payload = store.read_odds_json(game_date)
+    return store, raw_payload, odds_payload
+
+
+def build_vegas_game_lines_payload(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+    row_limit: int = 300,
+) -> dict[str, Any]:
+    parsed_date = pd.to_datetime(selected_date, errors="coerce")
+    if pd.isna(parsed_date):
+        raise ValueError("selected_date must be a valid date")
+    game_date = parsed_date.date()
+    store, raw_payload, odds_payload = _read_vegas_source_payloads(
+        selected_date=game_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+
+    games_df = pd.DataFrame()
+    if isinstance(raw_payload, dict) and isinstance(odds_payload, dict):
+        games_df = build_vegas_review_games_frame(raw_payloads=[raw_payload], odds_payloads=[odds_payload])
+    summary = summarize_vegas_accuracy(games_df)
+    display_cols = [
+        "game_date",
+        "away_team",
+        "home_team",
+        "total_points",
+        "actual_total",
+        "total_error",
+        "spread_home",
+        "actual_home_margin",
+        "spread_error",
+        "moneyline_home",
+        "moneyline_away",
+        "winner_pick_correct",
+        "odds_match_type",
+    ]
+    rows_df = games_df[[c for c in display_cols if c in games_df.columns]].copy()
+    if "total_points" in rows_df.columns:
+        rows_df = rows_df.sort_values(["game_date", "total_points"], ascending=[False, False], na_position="last")
+    else:
+        rows_df = rows_df.sort_values(["game_date"], ascending=[False], na_position="last")
+
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "available": bool(not games_df.empty),
+        "source_status": {
+            "raw_cached": bool(isinstance(raw_payload, dict)),
+            "odds_cached": bool(isinstance(odds_payload, dict)),
+        },
+        "summary": summary,
+        "rows": _serialize_records(rows_df, limit=row_limit),
+    }
+
+
+def build_vegas_market_context_payload(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+    row_limit: int = 200,
+) -> dict[str, Any]:
+    parsed_date = pd.to_datetime(selected_date, errors="coerce")
+    if pd.isna(parsed_date):
+        raise ValueError("selected_date must be a valid date")
+    game_date = parsed_date.date()
+    store, raw_payload, odds_payload = _read_vegas_source_payloads(
+        selected_date=game_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+
+    games_df = pd.DataFrame()
+    if isinstance(raw_payload, dict) and isinstance(odds_payload, dict):
+        games_df = build_vegas_review_games_frame(raw_payloads=[raw_payload], odds_payloads=[odds_payload])
+
+    summary = summarize_vegas_accuracy(games_df)
+    calibration_df = build_calibration_models_frame(games_df)
+    total_buckets_df = build_total_buckets_frame(games_df)
+    spread_buckets_df = build_spread_buckets_frame(games_df)
+
+    ranked_games = games_df.copy()
+    if not ranked_games.empty:
+        for col in ["total_points", "spread_home", "moneyline_home", "moneyline_away"]:
+            if col in ranked_games.columns:
+                ranked_games[col] = pd.to_numeric(ranked_games[col], errors="coerce")
+        ranked_games["abs_spread"] = pd.to_numeric(ranked_games.get("spread_home"), errors="coerce").abs()
+        ranked_games = ranked_games.sort_values(
+            ["total_points", "abs_spread"],
+            ascending=[False, True],
+            na_position="last",
+        )
+    ranking_cols = [
+        "game_date",
+        "away_team",
+        "home_team",
+        "total_points",
+        "spread_home",
+        "moneyline_home",
+        "moneyline_away",
+        "bookmakers_count",
+    ]
+    ranked_games = ranked_games[[c for c in ranking_cols if c in ranked_games.columns]].copy()
+
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "available": bool(not games_df.empty),
+        "source_status": {
+            "raw_cached": bool(isinstance(raw_payload, dict)),
+            "odds_cached": bool(isinstance(odds_payload, dict)),
+        },
+        "summary": summary,
+        "calibration_models": _serialize_records(calibration_df),
+        "total_buckets": _serialize_records(total_buckets_df),
+        "spread_buckets": _serialize_records(spread_buckets_df),
+        "ranked_games": _serialize_records(ranked_games, limit=row_limit),
+    }
+
+
+def build_props_review_payload(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+    row_limit: int = 400,
+) -> dict[str, Any]:
+    parsed_date = pd.to_datetime(selected_date, errors="coerce")
+    if pd.isna(parsed_date):
+        raise ValueError("selected_date must be a valid date")
+    game_date = parsed_date.date()
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    props_payload = store.read_props_json(game_date)
+    if not isinstance(props_payload, dict):
+        return {
+            "selected_date": game_date.isoformat(),
+            "bucket_name": store.bucket_name,
+            "available": False,
+            "source_status": {"props_cached": False},
+            "summary": {
+                "rows": 0,
+                "markets": 0,
+                "players": 0,
+                "events": 0,
+                "bookmakers": 0,
+            },
+            "market_coverage": [],
+            "rows": [],
+        }
+
+    rows = flatten_player_props_payload(props_payload)
+    props_df = pd.DataFrame(rows)
+    if props_df.empty:
+        return {
+            "selected_date": game_date.isoformat(),
+            "bucket_name": store.bucket_name,
+            "available": False,
+            "source_status": {"props_cached": True},
+            "summary": {
+                "rows": 0,
+                "markets": 0,
+                "players": 0,
+                "events": 0,
+                "bookmakers": 0,
+            },
+            "market_coverage": [],
+            "rows": [],
+        }
+
+    props_df["game_date"] = pd.to_datetime(props_df.get("game_date"), errors="coerce").dt.strftime("%Y-%m-%d")
+    props_df["market"] = props_df.get("market", "").astype(str)
+    props_df["player_name"] = props_df.get("player_name", "").astype(str)
+    props_df["bookmaker"] = props_df.get("bookmaker", "").astype(str)
+    for col in ["line", "over_price", "under_price"]:
+        if col in props_df.columns:
+            props_df[col] = pd.to_numeric(props_df[col], errors="coerce")
+
+    market_coverage_df = (
+        props_df.groupby("market", dropna=False, observed=False)
+        .agg(
+            rows=("player_name", "count"),
+            players=("player_name", "nunique"),
+            events=("event_id", "nunique"),
+            avg_line=("line", "mean"),
+        )
+        .reset_index()
+        .sort_values(["rows", "players"], ascending=[False, False], na_position="last")
+    )
+
+    display_cols = [
+        "game_date",
+        "away_team",
+        "home_team",
+        "bookmaker",
+        "market",
+        "player_name",
+        "line",
+        "over_price",
+        "under_price",
+    ]
+    display_df = props_df[[c for c in display_cols if c in props_df.columns]].copy()
+    display_df = display_df.sort_values(["market", "player_name"], ascending=[True, True], na_position="last")
+
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "available": True,
+        "source_status": {"props_cached": True},
+        "summary": {
+            "rows": int(len(props_df)),
+            "markets": int(props_df["market"].nunique()),
+            "players": int(props_df["player_name"].nunique()),
+            "events": int(props_df["event_id"].nunique()) if "event_id" in props_df.columns else 0,
+            "bookmakers": int(props_df["bookmaker"].nunique()),
+        },
+        "market_coverage": _serialize_records(market_coverage_df),
+        "rows": _serialize_records(display_df, limit=row_limit),
     }

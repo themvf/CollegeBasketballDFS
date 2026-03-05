@@ -9,7 +9,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from college_basketball_dfs.cbb_api_service import (
+    build_props_review_payload,
     build_registry_coverage,
+    build_vegas_game_lines_payload,
+    build_vegas_market_context_payload,
     import_dk_slate_overrides,
     list_rotowire_slates_for_date,
 )
@@ -130,6 +133,60 @@ def registry_coverage(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result
+
+
+@app.get("/v1/vegas/game-lines")
+def vegas_game_lines(
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    row_limit: int = Query(default=300, ge=1, le=2000),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_vegas_game_lines_payload(
+            selected_date=selected_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            row_limit=row_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/vegas/market-context")
+def vegas_market_context(
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    row_limit: int = Query(default=200, ge=1, le=2000),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_vegas_market_context_payload(
+            selected_date=selected_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            row_limit=row_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/vegas/prop-data")
+def vegas_prop_data(
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    row_limit: int = Query(default=400, ge=1, le=3000),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_props_review_payload(
+            selected_date=selected_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            row_limit=row_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.post("/v1/lineups/generate")

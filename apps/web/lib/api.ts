@@ -24,6 +24,126 @@ export type CoverageResponse = {
   }>;
 };
 
+export type VegasGameLinesResponse = {
+  selected_date: string;
+  bucket_name?: string;
+  available: boolean;
+  source_status?: {
+    raw_cached?: boolean;
+    odds_cached?: boolean;
+  };
+  summary?: {
+    total_games?: number;
+    odds_matched_games?: number;
+    total_line_games?: number;
+    spread_line_games?: number;
+    total_mae?: number;
+    spread_mae?: number;
+    winner_pick_accuracy_pct?: number;
+  };
+  rows?: Array<{
+    game_date?: string;
+    away_team?: string;
+    home_team?: string;
+    total_points?: number;
+    actual_total?: number;
+    total_error?: number;
+    spread_home?: number;
+    actual_home_margin?: number;
+    spread_error?: number;
+    moneyline_home?: number;
+    moneyline_away?: number;
+    winner_pick_correct?: boolean;
+    odds_match_type?: string;
+  }>;
+};
+
+export type VegasMarketContextResponse = {
+  selected_date: string;
+  bucket_name?: string;
+  available: boolean;
+  source_status?: {
+    raw_cached?: boolean;
+    odds_cached?: boolean;
+  };
+  summary?: {
+    total_games?: number;
+    total_mae?: number;
+    spread_mae?: number;
+  };
+  calibration_models?: Array<{
+    model?: string;
+    samples?: number;
+    slope?: number;
+    intercept?: number;
+    r2?: number;
+    baseline_mae?: number;
+    calibrated_mae?: number;
+    mae_delta?: number;
+  }>;
+  total_buckets?: Array<{
+    vegas_total_bucket?: string;
+    games?: number;
+    avg_vegas_total?: number;
+    avg_actual_total?: number;
+    mae_total?: number;
+    over_rate_pct?: number;
+    under_rate_pct?: number;
+  }>;
+  spread_buckets?: Array<{
+    vegas_spread_bucket?: string;
+    games?: number;
+    avg_abs_vegas_margin?: number;
+    avg_abs_actual_margin?: number;
+    mae_spread?: number;
+    winner_pick_accuracy_pct?: number;
+  }>;
+  ranked_games?: Array<{
+    game_date?: string;
+    away_team?: string;
+    home_team?: string;
+    total_points?: number;
+    spread_home?: number;
+    moneyline_home?: number;
+    moneyline_away?: number;
+    bookmakers_count?: number;
+  }>;
+};
+
+export type VegasPropDataResponse = {
+  selected_date: string;
+  bucket_name?: string;
+  available: boolean;
+  source_status?: {
+    props_cached?: boolean;
+  };
+  summary?: {
+    rows?: number;
+    markets?: number;
+    players?: number;
+    events?: number;
+    bookmakers?: number;
+  };
+  market_coverage?: Array<{
+    market?: string;
+    rows?: number;
+    players?: number;
+    events?: number;
+    avg_line?: number;
+  }>;
+  rows?: Array<{
+    game_date?: string;
+    away_team?: string;
+    home_team?: string;
+    bookmaker?: string;
+    market?: string;
+    player_name?: string;
+    line?: number;
+    over_price?: number;
+    under_price?: number;
+  }>;
+};
+
 function baseUrl(): string {
   return process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 }
@@ -52,5 +172,44 @@ export async function fetchHealth(): Promise<boolean> {
     return Boolean(payload.ok);
   } catch {
     return false;
+  }
+}
+
+export async function fetchVegasGameLines(selectedDate: string): Promise<VegasGameLinesResponse | null> {
+  const url = `${baseUrl()}/v1/vegas/game-lines?selected_date=${encodeURIComponent(selectedDate)}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as VegasGameLinesResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchVegasMarketContext(selectedDate: string): Promise<VegasMarketContextResponse | null> {
+  const url = `${baseUrl()}/v1/vegas/market-context?selected_date=${encodeURIComponent(selectedDate)}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as VegasMarketContextResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchVegasPropData(selectedDate: string): Promise<VegasPropDataResponse | null> {
+  const url = `${baseUrl()}/v1/vegas/prop-data?selected_date=${encodeURIComponent(selectedDate)}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as VegasPropDataResponse;
+  } catch {
+    return null;
   }
 }
