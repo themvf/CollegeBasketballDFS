@@ -32,6 +32,28 @@ a {
   color: inherit;
 }
 
+:focus-visible {
+  outline: 2px solid rgba(242, 95, 76, 0.95);
+  outline-offset: 2px;
+}
+
+.skip-link {
+  position: absolute;
+  left: 14px;
+  top: -60px;
+  z-index: 200;
+  border-radius: 8px;
+  background: #061118;
+  border: 1px solid rgba(157, 178, 187, 0.35);
+  color: var(--text);
+  padding: 10px 12px;
+  text-decoration: none;
+}
+
+.skip-link:focus {
+  top: 12px;
+}
+
 .app-shell {
   min-height: 100vh;
   display: grid;
@@ -125,11 +147,26 @@ a {
 }
 
 .topbar {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
   margin-bottom: 14px;
   padding: 14px 16px;
   border-radius: 12px;
   border: 1px solid rgba(157, 178, 187, 0.2);
   background: rgba(255, 255, 255, 0.03);
+}
+
+.topbar-main {
+  display: flex;
+  gap: 14px;
+  min-width: 0;
+}
+
+.topbar-actions {
+  text-align: right;
+  min-width: 180px;
 }
 
 .topbar-eyebrow {
@@ -145,8 +182,46 @@ a {
   font-size: clamp(1.25rem, 2.2vw, 1.8rem);
 }
 
+.breadcrumbs {
+  margin: 0 0 6px;
+}
+
+.breadcrumbs ol {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px;
+  color: var(--muted);
+  font-size: 0.83rem;
+}
+
+.breadcrumbs a {
+  text-decoration: none;
+  color: var(--muted);
+}
+
+.breadcrumbs a:hover {
+  color: var(--text);
+}
+
+.crumb-sep {
+  margin-right: 4px;
+  opacity: 0.7;
+}
+
 .app-content {
   padding-bottom: 24px;
+}
+
+.mobile-nav-toggle {
+  display: none;
+}
+
+.mobile-backdrop {
+  display: none;
 }
 
 .page {
@@ -399,21 +474,125 @@ a {
   background: rgba(255, 255, 255, 0.08);
 }
 
+.skeleton-grid {
+  margin-top: 12px;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(120px, 1fr));
+  gap: 10px;
+}
+
+.skeleton-card {
+  height: 86px;
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(157, 178, 187, 0.14), rgba(157, 178, 187, 0.06), rgba(157, 178, 187, 0.14));
+  animation: pulse-shift 1.4s ease-in-out infinite;
+}
+
+.skeleton-line {
+  border-radius: 10px;
+  background: linear-gradient(90deg, rgba(157, 178, 187, 0.18), rgba(157, 178, 187, 0.08), rgba(157, 178, 187, 0.18));
+  animation: pulse-shift 1.4s ease-in-out infinite;
+}
+
+.skeleton-title {
+  height: 34px;
+  width: 320px;
+  max-width: 85%;
+}
+
+.skeleton-heading {
+  height: 24px;
+  width: 200px;
+  max-width: 70%;
+}
+
+.skeleton-text {
+  margin-top: 10px;
+  height: 14px;
+  width: 85%;
+}
+
+.skeleton-text.short {
+  width: 60%;
+}
+
+@keyframes pulse-shift {
+  0% {
+    opacity: 0.45;
+  }
+  50% {
+    opacity: 0.95;
+  }
+  100% {
+    opacity: 0.45;
+  }
+}
+
 @media (max-width: 980px) {
   .app-shell {
     grid-template-columns: 1fr;
   }
 
   .app-sidebar {
-    position: static;
-    height: auto;
-    border-right: none;
-    border-bottom: 1px solid rgba(157, 178, 187, 0.16);
-    padding: 14px 12px;
+    position: fixed;
+    top: 0;
+    left: 0;
+    width: min(86vw, 320px);
+    height: 100vh;
+    border-right: 1px solid rgba(157, 178, 187, 0.2);
+    border-bottom: none;
+    padding: 14px 12px 24px;
+    z-index: 80;
+    transform: translateX(-110%);
+    transition: transform 0.22s ease;
+  }
+
+  .app-sidebar.open {
+    transform: translateX(0);
   }
 
   .app-main {
     padding: 14px;
+  }
+
+  .topbar {
+    align-items: center;
+    gap: 10px;
+  }
+
+  .topbar-main {
+    width: 100%;
+    align-items: flex-start;
+  }
+
+  .topbar-actions {
+    display: none;
+  }
+
+  .mobile-nav-toggle {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 44px;
+    min-width: 44px;
+    padding: 0 12px;
+    border-radius: 10px;
+    border: 1px solid rgba(157, 178, 187, 0.3);
+    background: rgba(255, 255, 255, 0.04);
+    color: var(--text);
+    font-weight: 600;
+    cursor: pointer;
+    flex-shrink: 0;
+  }
+
+  .mobile-backdrop {
+    display: block;
+    position: fixed;
+    inset: 0;
+    border: none;
+    background: rgba(0, 0, 0, 0.52);
+    z-index: 70;
+    cursor: pointer;
   }
 
   .content-grid {
@@ -427,6 +606,14 @@ a {
 
 @media (max-width: 620px) {
   .form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .topbar-title {
+    font-size: 1.22rem;
+  }
+
+  .skeleton-grid {
     grid-template-columns: 1fr;
   }
 }
