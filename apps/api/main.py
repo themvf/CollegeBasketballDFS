@@ -10,11 +10,17 @@ from pydantic import BaseModel, Field
 
 from college_basketball_dfs.cbb_api_service import (
     build_cache_coverage_payload,
+    build_injuries_review_payload,
+    build_projection_review_payload,
     build_props_review_payload,
+    build_tournament_review_payload,
     build_registry_coverage,
     build_vegas_game_lines_payload,
     build_vegas_market_context_payload,
+    import_contest_standings_csv,
     import_dk_slate_overrides,
+    import_injuries_manual_csv,
+    import_projection_ownership_csv,
     list_rotowire_slates_for_date,
 )
 from college_basketball_dfs.cbb_lineup_jobs import LineupJobManager
@@ -201,6 +207,143 @@ def ops_cache_coverage(
         return build_cache_coverage_payload(
             start_date=start_date,
             end_date=end_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/injuries/review")
+def injuries_review(
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    row_limit: int = Query(default=300, ge=1, le=2000),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_injuries_review_payload(
+            selected_date=selected_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            row_limit=row_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/injuries/manual/upload")
+async def injuries_manual_upload(
+    file: UploadFile = File(..., description="Manual injuries CSV"),
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="file must be a CSV")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="file payload was empty")
+    try:
+        return import_injuries_manual_csv(
+            csv_bytes=payload,
+            selected_date=selected_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/reviews/projection")
+def projection_review(
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    slate_key: str = Query(default="main"),
+    row_limit: int = Query(default=500, ge=1, le=3000),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_projection_review_payload(
+            selected_date=selected_date,
+            slate_key=slate_key,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            row_limit=row_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/reviews/projection/ownership/upload")
+async def projection_ownership_upload(
+    file: UploadFile = File(..., description="Ownership CSV"),
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    slate_key: str = Query(default="main"),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="file must be a CSV")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="file payload was empty")
+    try:
+        return import_projection_ownership_csv(
+            csv_bytes=payload,
+            selected_date=selected_date,
+            slate_key=slate_key,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/reviews/tournament")
+def tournament_review(
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    contest_id: str = Query(..., description="Contest identifier used for standings blob naming"),
+    slate_key: str = Query(default="main"),
+    entries_limit: int = Query(default=200, ge=1, le=2000),
+    exposure_limit: int = Query(default=250, ge=1, le=3000),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_tournament_review_payload(
+            selected_date=selected_date,
+            contest_id=contest_id,
+            slate_key=slate_key,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            entries_limit=entries_limit,
+            exposure_limit=exposure_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/reviews/tournament/standings/upload")
+async def tournament_standings_upload(
+    file: UploadFile = File(..., description="Contest standings CSV"),
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    contest_id: str = Query(..., description="Contest identifier used for standings blob naming"),
+    slate_key: str = Query(default="main"),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="file must be a CSV")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="file payload was empty")
+    try:
+        return import_contest_standings_csv(
+            csv_bytes=payload,
+            selected_date=selected_date,
+            contest_id=contest_id,
+            slate_key=slate_key,
             bucket_name=bucket_name,
             gcp_project=gcp_project,
         )

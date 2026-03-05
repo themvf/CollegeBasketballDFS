@@ -171,6 +171,63 @@ export type CacheCoverageResponse = {
   };
 };
 
+export type InjuriesReviewResponse = {
+  selected_date: string;
+  bucket_name?: string;
+  available: boolean;
+  legacy_fallback_used?: boolean;
+  summary?: {
+    effective_rows?: number;
+    feed_rows?: number;
+    manual_rows?: number;
+    active_rows?: number;
+    remove_candidates?: number;
+  };
+  status_counts?: Array<{
+    status?: string;
+    rows?: number;
+    active?: number;
+  }>;
+  effective_rows?: Array<Record<string, unknown>>;
+  feed_rows?: Array<Record<string, unknown>>;
+  manual_rows?: Array<Record<string, unknown>>;
+};
+
+export type ProjectionReviewResponse = {
+  selected_date: string;
+  bucket_name?: string;
+  available: boolean;
+  summary?: {
+    projection_rows?: number;
+    actual_matched?: number;
+    blend_mae?: number | null;
+    our_mae?: number | null;
+    vegas_mae?: number | null;
+    ownership_rows?: number;
+    ownership_mae?: number | null;
+    ownership_bias?: number | null;
+    ownership_rank_spearman?: number | null;
+  };
+  rows?: Array<Record<string, unknown>>;
+};
+
+export type TournamentReviewResponse = {
+  selected_date: string;
+  contest_id: string;
+  bucket_name?: string;
+  available: boolean;
+  message?: string;
+  upload_profile?: Record<string, unknown>;
+  summary?: Record<string, unknown>;
+  ownership_summary?: Record<string, unknown>;
+  projection_summary?: Record<string, unknown>;
+  entries_rows?: Array<Record<string, unknown>>;
+  exposure_rows?: Array<Record<string, unknown>>;
+  ownership_buckets?: Array<Record<string, unknown>>;
+  ownership_top_misses?: Array<Record<string, unknown>>;
+  projection_rows?: Array<Record<string, unknown>>;
+};
+
 export function getApiBaseUrl(): string {
   return process.env.NEXT_PUBLIC_API_BASE_URL || "http://localhost:8000";
 }
@@ -249,6 +306,56 @@ export async function fetchCacheCoverage(startDate: string, endDate: string): Pr
       return null;
     }
     return (await response.json()) as CacheCoverageResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchInjuriesReview(selectedDate: string): Promise<InjuriesReviewResponse | null> {
+  const url = `${getApiBaseUrl()}/v1/injuries/review?selected_date=${encodeURIComponent(selectedDate)}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as InjuriesReviewResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchProjectionReview(
+  selectedDate: string,
+  slateKey = "main",
+): Promise<ProjectionReviewResponse | null> {
+  const url =
+    `${getApiBaseUrl()}/v1/reviews/projection?selected_date=${encodeURIComponent(selectedDate)}` +
+    `&slate_key=${encodeURIComponent(slateKey)}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as ProjectionReviewResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchTournamentReview(
+  selectedDate: string,
+  contestId: string,
+  slateKey = "main",
+): Promise<TournamentReviewResponse | null> {
+  const url =
+    `${getApiBaseUrl()}/v1/reviews/tournament?selected_date=${encodeURIComponent(selectedDate)}` +
+    `&contest_id=${encodeURIComponent(contestId)}&slate_key=${encodeURIComponent(slateKey)}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as TournamentReviewResponse;
   } catch {
     return null;
   }

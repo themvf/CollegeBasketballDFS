@@ -2,11 +2,14 @@ import { notFound } from "next/navigation";
 import BackfillView from "../../../components/backfill-view";
 import DkSlateImportView from "../../../components/dk-slate-import-view";
 import GameDataView from "../../../components/game-data-view";
+import InjuriesView from "../../../components/injuries-view";
 import LineupGeneratorView from "../../../components/lineup-generator-view";
+import ProjectionReviewView from "../../../components/projection-review-view";
 import PropDataView from "../../../components/prop-data-view";
 import RotowireScraperView from "../../../components/rotowire-scraper-view";
 import SectionPlaceholder from "../../../components/section-placeholder";
 import SlateVegasView from "../../../components/slate-vegas-view";
+import TournamentReviewView from "../../../components/tournament-review-view";
 
 type GenerateLineupStepPageProps = {
   params: Promise<{ step: string }>;
@@ -120,6 +123,10 @@ export default async function GenerateLineupStepPage({ params, searchParams }: G
     return <DkSlateImportView selectedDate={selectedDate} />;
   }
 
+  if (step === "injuries") {
+    return <InjuriesView selectedDate={selectedDate} />;
+  }
+
   if (step === "slate-vegas") {
     return <SlateVegasView selectedDate={selectedDate} />;
   }
@@ -130,6 +137,15 @@ export default async function GenerateLineupStepPage({ params, searchParams }: G
 
   if (step === "lineup-generator") {
     return <LineupGeneratorView />;
+  }
+
+  if (step === "projection-review") {
+    return <ProjectionReviewView selectedDate={selectedDate} />;
+  }
+
+  if (step === "tournament-review") {
+    const contestId = typeof query.contest_id === "string" ? query.contest_id : "contest";
+    return <TournamentReviewView selectedDate={selectedDate} defaultContestId={contestId} />;
   }
 
   const content = STEP_CONTENT[step];

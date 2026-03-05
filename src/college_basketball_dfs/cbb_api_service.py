@@ -16,9 +16,20 @@ from .cbb_dk_registry import (
     derive_manual_overrides_from_dk_slate,
     manual_overrides_to_history_frame,
 )
+from .cbb_dk_optimizer import normalize_injuries_frame
 from .cbb_gcs import CbbGcsStore, build_storage_client
 from .cbb_rotowire import RotoWireClient, flatten_slates, normalize_players, select_slate
 from .cbb_odds import flatten_player_props_payload
+from .cbb_tournament_review import (
+    build_entry_actual_points_comparison,
+    build_field_entries_and_players,
+    build_ownership_projection_diagnostics,
+    build_player_exposure_comparison,
+    build_projection_actual_comparison,
+    detect_contest_standings_upload,
+    extract_actual_ownership_from_standings,
+    normalize_contest_standings_frame,
+)
 from .cbb_vegas_review import (
     build_calibration_models_frame,
     build_spread_buckets_frame,
@@ -704,4 +715,819 @@ def build_props_review_payload(
         },
         "market_coverage": _serialize_records(market_coverage_df),
         "rows": _serialize_records(display_df, limit=row_limit),
+    }
+
+NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
+
+
+def _norm_name_key(value: Any) -> str:
+    return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
+
+
+def _norm_name_key_loose(value: Any) -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9\s]", " ", text)
+    tokens = [tok for tok in text.split() if tok and tok not in NAME_SUFFIX_TOKENS]
+    return "".join(tokens)
+
+
+def _normalize_player_id(value: Any) -> str:
+    if value is None:
+        return ""
+    text = str(value).strip()
+    if not text or text.lower() in {"nan", "none", "null"}:
+        return ""
+    text = text.replace(",", "")
+    if re.fullmatch(r"-?\d+(?:\.0+)?", text):
+        try:
+            return str(int(float(text)))
+        except (TypeError, ValueError):
+            return text
+    return re.sub(r"\s+", "", text)
+
+
+def _to_iso_date(value: date | str) -> date:
+    parsed = pd.to_datetime(value, errors="coerce")
+    if pd.isna(parsed):
+        raise ValueError("selected_date must be a valid date")
+    return parsed.date()
+
+
+def _read_csv_frame(csv_text: str | None) -> pd.DataFrame:
+    if not csv_text or not str(csv_text).strip():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(io.StringIO(str(csv_text)))
+    except Exception:
+        return pd.DataFrame()
+
+
+def _decode_csv_payload(csv_bytes: bytes) -> tuple[str, pd.DataFrame]:
+    if not csv_bytes:
+        return "", pd.DataFrame()
+    decode_attempts = ["utf-8-sig", "utf-8", "cp1252", "latin-1"]
+    for enc in decode_attempts:
+        try:
+            text = csv_bytes.decode(enc)
+            break
+        except Exception:
+            text = ""
+    frame = _read_csv_frame(text)
+    return text, frame
+
+
+def _read_actual_results_frame(store: CbbGcsStore, selected_date: date) -> pd.DataFrame:
+    blob_name = store.players_blob_name(selected_date)
+    try:
+        csv_text = store.read_players_csv_blob(blob_name)
+    except Exception:
+        return pd.DataFrame()
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+
+    raw = _read_csv_frame(csv_text)
+    if raw.empty:
+        return pd.DataFrame()
+
+    needed = [
+        "player_id",
+        "player_name",
+        "team_name",
+        "minutes_played",
+        "points",
+        "rebounds",
+        "assists",
+        "steals",
+        "blocks",
+        "turnovers",
+        "tpm",
+    ]
+    cols = [c for c in needed if c in raw.columns]
+    if not cols:
+        return pd.DataFrame()
+
+    out = raw[cols].copy().rename(
+        columns={
+            "player_id": "ID",
+            "player_name": "Name",
+            "team_name": "team_name",
+            "minutes_played": "actual_minutes",
+            "points": "actual_points",
+            "rebounds": "actual_rebounds",
+            "assists": "actual_assists",
+            "steals": "actual_steals",
+            "blocks": "actual_blocks",
+            "turnovers": "actual_turnovers",
+            "tpm": "actual_threes",
+        }
+    )
+    for col in [
+        "actual_minutes",
+        "actual_points",
+        "actual_rebounds",
+        "actual_assists",
+        "actual_steals",
+        "actual_blocks",
+        "actual_turnovers",
+        "actual_threes",
+    ]:
+        out[col] = pd.to_numeric(out.get(col), errors="coerce").fillna(0.0)
+
+    dd_count = (
+        (out["actual_points"] >= 10).astype(int)
+        + (out["actual_rebounds"] >= 10).astype(int)
+        + (out["actual_assists"] >= 10).astype(int)
+        + (out["actual_steals"] >= 10).astype(int)
+        + (out["actual_blocks"] >= 10).astype(int)
+    )
+    bonus = (dd_count >= 2).astype(float) * 1.5 + (dd_count >= 3).astype(float) * 3.0
+    out["actual_dk_points"] = (
+        out["actual_points"]
+        + (1.25 * out["actual_rebounds"])
+        + (1.5 * out["actual_assists"])
+        + (2.0 * out["actual_steals"])
+        + (2.0 * out["actual_blocks"])
+        - (0.5 * out["actual_turnovers"])
+        + (0.5 * out["actual_threes"])
+        + bonus
+    )
+    out["ID"] = out["ID"].map(_normalize_player_id)
+    out["Name"] = out["Name"].astype(str).str.strip()
+    out["team_name"] = out["team_name"].astype(str).str.strip()
+    return out
+
+
+def _read_projection_snapshot_frame(
+    store: CbbGcsStore,
+    selected_date: date,
+    slate_key: str | None = None,
+) -> pd.DataFrame:
+    csv_text = store.read_projections_csv(selected_date, slate_key=slate_key)
+    return _read_csv_frame(csv_text)
+
+
+def _ownership_to_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace("%", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def normalize_ownership_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
+    if df is None or df.empty:
+        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
+
+    out = df.copy()
+    normalized_columns = {re.sub(r"[^a-z0-9]", "", str(c).strip().lower()): c for c in out.columns}
+    rename_aliases = {
+        "id": "ID",
+        "playerid": "ID",
+        "dkid": "ID",
+        "draftkingsid": "ID",
+        "nameid": "ID",
+        "name": "Name",
+        "playername": "Name",
+        "player": "Name",
+        "athlete": "Name",
+        "team": "TeamAbbrev",
+        "teamabbrev": "TeamAbbrev",
+        "teamabbr": "TeamAbbrev",
+        "teamabbreviation": "TeamAbbrev",
+        "ownership": "actual_ownership",
+        "own": "actual_ownership",
+        "ownpct": "actual_ownership",
+        "actualown": "actual_ownership",
+        "actualownership": "actual_ownership",
+        "drafted": "actual_ownership",
+        "pctdrafted": "actual_ownership",
+        "fieldownership": "actual_ownership",
+    }
+    resolved_rename: dict[str, str] = {}
+    for alias, dest in rename_aliases.items():
+        source = normalized_columns.get(alias)
+        if source:
+            resolved_rename[source] = dest
+    if resolved_rename:
+        out = out.rename(columns=resolved_rename)
+
+    for col in ["ID", "Name", "TeamAbbrev", "actual_ownership"]:
+        if col not in out.columns:
+            out[col] = ""
+    out["ID"] = out["ID"].map(_normalize_player_id)
+    out["Name"] = out["Name"].astype(str).str.strip()
+    out["TeamAbbrev"] = out["TeamAbbrev"].astype(str).str.strip().str.upper()
+    out["actual_ownership"] = out["actual_ownership"].map(_ownership_to_float)
+    out["name_key"] = out["Name"].map(_norm_name_key)
+    out["name_key_loose"] = out["Name"].map(_norm_name_key_loose)
+    out = out.loc[(out["ID"] != "") | (out["Name"] != "")]
+    out = out.sort_values(["ID", "Name"], ascending=[True, True]).drop_duplicates(
+        subset=["ID", "name_key", "TeamAbbrev"], keep="last"
+    )
+    return out[["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"]].reset_index(drop=True)
+
+
+def _read_ownership_frame(
+    store: CbbGcsStore,
+    selected_date: date,
+    slate_key: str | None = None,
+) -> pd.DataFrame:
+    csv_text = store.read_ownership_csv(selected_date, slate_key=slate_key)
+    if not csv_text or not str(csv_text).strip():
+        return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
+    return normalize_ownership_upload_frame(_read_csv_frame(csv_text))
+
+
+def _read_contest_standings_frame(
+    store: CbbGcsStore,
+    selected_date: date,
+    contest_id: str,
+    slate_key: str | None = None,
+) -> pd.DataFrame:
+    csv_text = store.read_contest_standings_csv(selected_date, contest_id, slate_key=slate_key)
+    return _read_csv_frame(csv_text)
+
+
+def _read_dk_slate_frame(
+    store: CbbGcsStore,
+    selected_date: date,
+    slate_key: str | None = None,
+) -> pd.DataFrame:
+    csv_text = store.read_dk_slate_csv(selected_date, slate_key=slate_key)
+    return _read_csv_frame(csv_text)
+
+
+def _attach_actual_ownership(review_df: pd.DataFrame, own_df: pd.DataFrame) -> pd.DataFrame:
+    if review_df.empty:
+        return review_df
+    out = review_df.copy()
+    out["actual_ownership"] = pd.NA
+    if own_df is None or own_df.empty:
+        return out
+
+    own_lookup = own_df.copy()
+    if "ID" in out.columns and "ID" in own_lookup.columns:
+        out["ID"] = out["ID"].map(_normalize_player_id)
+        own_lookup["ID"] = own_lookup["ID"].map(_normalize_player_id)
+        by_id = own_lookup.loc[own_lookup["ID"] != "", ["ID", "actual_ownership"]].dropna(subset=["actual_ownership"])
+        if not by_id.empty:
+            by_id = by_id.drop_duplicates("ID").rename(columns={"actual_ownership": "actual_ownership_id"})
+            out = out.merge(by_id, on="ID", how="left")
+            out["actual_ownership"] = pd.to_numeric(out.get("actual_ownership_id"), errors="coerce")
+
+    if "Name" in out.columns and "Name" in own_lookup.columns:
+        out["name_key"] = out["Name"].map(_norm_name_key)
+        out["name_key_loose"] = out["Name"].map(_norm_name_key_loose)
+        own_lookup["name_key"] = own_lookup["Name"].map(_norm_name_key)
+        own_lookup["name_key_loose"] = own_lookup["Name"].map(_norm_name_key_loose)
+
+        by_name = (
+            own_lookup.loc[own_lookup["name_key"] != "", ["name_key", "actual_ownership"]]
+            .dropna(subset=["actual_ownership"])
+            .drop_duplicates("name_key")
+            .rename(columns={"actual_ownership": "actual_ownership_name"})
+        )
+        if not by_name.empty:
+            out = out.merge(by_name, on="name_key", how="left")
+
+        by_name_loose = (
+            own_lookup.loc[own_lookup["name_key_loose"] != "", ["name_key_loose", "actual_ownership"]]
+            .dropna(subset=["actual_ownership"])
+            .drop_duplicates("name_key_loose")
+            .rename(columns={"actual_ownership": "actual_ownership_name_loose"})
+        )
+        if not by_name_loose.empty:
+            out = out.merge(by_name_loose, on="name_key_loose", how="left")
+
+        out["actual_ownership"] = pd.to_numeric(out.get("actual_ownership"), errors="coerce").where(
+            pd.to_numeric(out.get("actual_ownership"), errors="coerce").notna(),
+            pd.to_numeric(out.get("actual_ownership_name"), errors="coerce"),
+        )
+        out["actual_ownership"] = pd.to_numeric(out.get("actual_ownership"), errors="coerce").where(
+            pd.to_numeric(out.get("actual_ownership"), errors="coerce").notna(),
+            pd.to_numeric(out.get("actual_ownership_name_loose"), errors="coerce"),
+        )
+
+    return out.drop(
+        columns=["actual_ownership_id", "actual_ownership_name", "actual_ownership_name_loose", "name_key", "name_key_loose"],
+        errors="ignore",
+    )
+
+def build_injuries_review_payload(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+    row_limit: int = 300,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+
+    feed_df = normalize_injuries_frame(_read_csv_frame(store.read_injuries_feed_csv(game_date)))
+    manual_df = normalize_injuries_frame(_read_csv_frame(store.read_injuries_manual_csv()))
+
+    legacy_fallback_used = False
+    effective_df = pd.DataFrame()
+    if feed_df.empty and manual_df.empty:
+        legacy_df = normalize_injuries_frame(_read_csv_frame(store.read_injuries_csv()))
+        if not legacy_df.empty:
+            legacy_fallback_used = True
+            effective_df = legacy_df.copy()
+    else:
+        frames: list[pd.DataFrame] = []
+        if not feed_df.empty:
+            one = feed_df.copy()
+            one["_source"] = "feed"
+            frames.append(one)
+        if not manual_df.empty:
+            one = manual_df.copy()
+            one["_source"] = "manual"
+            frames.append(one)
+        combined = pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
+        if not combined.empty:
+            combined["_injury_key"] = combined.apply(
+                lambda r: f"{str(r.get('player_name') or '').strip().lower()}|{str(r.get('team') or '').strip().lower()}",
+                axis=1,
+            )
+            combined = combined.drop_duplicates(subset=["_injury_key"], keep="last")
+            effective_df = combined.drop(columns=["_injury_key", "_source"], errors="ignore")
+
+    if effective_df.empty:
+        effective_df = normalize_injuries_frame(None)
+    else:
+        effective_df = normalize_injuries_frame(effective_df)
+
+    status_counts_df = (
+        effective_df.assign(status=effective_df.get("status", "").astype(str).str.strip().str.lower())
+        .groupby("status", as_index=False)
+        .agg(
+            rows=("player_name", "count"),
+            active=("active", lambda s: int(pd.Series(s).astype(bool).sum())),
+        )
+        .sort_values(["rows", "status"], ascending=[False, True], kind="stable")
+        .reset_index(drop=True)
+        if not effective_df.empty
+        else pd.DataFrame(columns=["status", "rows", "active"])
+    )
+    remove_candidates = (
+        effective_df.loc[
+            effective_df.get("active", False).astype(bool)
+            & effective_df.get("status", "").astype(str).str.strip().str.lower().isin({"out", "doubtful"})
+        ].copy()
+        if not effective_df.empty
+        else pd.DataFrame()
+    )
+
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "available": bool(not effective_df.empty),
+        "legacy_fallback_used": bool(legacy_fallback_used),
+        "summary": {
+            "effective_rows": int(len(effective_df)),
+            "feed_rows": int(len(feed_df)),
+            "manual_rows": int(len(manual_df)),
+            "active_rows": int(pd.Series(effective_df.get("active", False)).astype(bool).sum()) if not effective_df.empty else 0,
+            "remove_candidates": int(len(remove_candidates)),
+        },
+        "status_counts": _serialize_records(status_counts_df),
+        "effective_rows": _serialize_records(effective_df, limit=row_limit),
+        "feed_rows": _serialize_records(feed_df, limit=row_limit),
+        "manual_rows": _serialize_records(manual_df, limit=row_limit),
+    }
+
+
+def import_injuries_manual_csv(
+    *,
+    csv_bytes: bytes,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    _, frame = _decode_csv_payload(csv_bytes)
+    normalized = normalize_injuries_frame(frame)
+    if normalized.empty:
+        raise ValueError("Could not parse injuries rows. Include player, team, and status columns.")
+
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    blob_name = store.write_injuries_manual_csv(normalized.to_csv(index=False))
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "rows_saved": int(len(normalized)),
+        "blob_name": blob_name,
+        "status_counts": _serialize_records(
+            normalized.groupby("status", as_index=False).agg(rows=("player_name", "count")).sort_values(
+                ["rows", "status"], ascending=[False, True], kind="stable"
+            )
+        ),
+    }
+
+
+def import_projection_ownership_csv(
+    *,
+    csv_bytes: bytes,
+    selected_date: date | str,
+    slate_key: str | None = "main",
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    _, frame = _decode_csv_payload(csv_bytes)
+    normalized = normalize_ownership_upload_frame(frame)
+    if normalized.empty:
+        raise ValueError("Could not find ownership rows. Include player ID/name and ownership columns.")
+
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    blob_name = store.write_ownership_csv(game_date, normalized.to_csv(index=False), slate_key=slate_key)
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "rows_saved": int(len(normalized)),
+        "players": int(normalized["Name"].nunique()),
+        "blob_name": blob_name,
+    }
+
+
+def build_projection_review_payload(
+    *,
+    selected_date: date | str,
+    slate_key: str | None = "main",
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+    row_limit: int = 500,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    proj_df = _read_projection_snapshot_frame(store, game_date, slate_key=slate_key)
+    if proj_df.empty:
+        return {
+            "selected_date": game_date.isoformat(),
+            "bucket_name": store.bucket_name,
+            "available": False,
+            "summary": {
+                "projection_rows": 0,
+                "actual_matched": 0,
+                "blend_mae": None,
+                "our_mae": None,
+                "vegas_mae": None,
+                "ownership_rows": 0,
+                "ownership_mae": None,
+                "ownership_bias": None,
+                "ownership_rank_spearman": None,
+            },
+            "rows": [],
+        }
+
+    actual_df = _read_actual_results_frame(store, game_date)
+    own_df = _read_ownership_frame(store, game_date, slate_key=slate_key)
+
+    review = proj_df.copy()
+    if "ID" in review.columns:
+        review["ID"] = review["ID"].map(_normalize_player_id)
+    if "Name" in review.columns:
+        review["Name"] = review["Name"].astype(str).str.strip()
+    if "TeamAbbrev" in review.columns:
+        review["TeamAbbrev"] = review["TeamAbbrev"].astype(str).str.strip().str.upper()
+
+    if not actual_df.empty and "ID" in review.columns:
+        review = review.merge(actual_df, on="ID", how="left", suffixes=("", "_actual"))
+    elif not actual_df.empty and "Name" in review.columns:
+        review = review.merge(actual_df, on="Name", how="left", suffixes=("", "_actual"))
+
+    review = _attach_actual_ownership(review, own_df)
+
+    for col in [
+        "blended_projection",
+        "projected_dk_points",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "actual_dk_points",
+        "projected_ownership",
+        "actual_ownership",
+        "actual_points",
+        "actual_rebounds",
+        "actual_assists",
+        "actual_threes",
+        "actual_minutes",
+    ]:
+        if col in review.columns:
+            review[col] = pd.to_numeric(review[col], errors="coerce")
+
+    if "blended_projection" not in review.columns and "projected_dk_points" in review.columns:
+        review["blended_projection"] = pd.to_numeric(review["projected_dk_points"], errors="coerce")
+
+    review["blend_error"] = pd.to_numeric(review.get("actual_dk_points"), errors="coerce") - pd.to_numeric(
+        review.get("blended_projection"), errors="coerce"
+    )
+    review["our_error"] = pd.to_numeric(review.get("actual_dk_points"), errors="coerce") - pd.to_numeric(
+        review.get("our_dk_projection"), errors="coerce"
+    )
+    review["vegas_error"] = pd.to_numeric(review.get("actual_dk_points"), errors="coerce") - pd.to_numeric(
+        review.get("vegas_dk_projection"), errors="coerce"
+    )
+    review["ownership_error"] = pd.to_numeric(review.get("actual_ownership"), errors="coerce") - pd.to_numeric(
+        review.get("projected_ownership"), errors="coerce"
+    )
+
+    matched_actual = int(pd.to_numeric(review.get("actual_dk_points"), errors="coerce").notna().sum())
+    own_rows = int(pd.to_numeric(review.get("actual_ownership"), errors="coerce").notna().sum())
+
+    own_rank_corr: float | None = None
+    matched_own = review.loc[
+        pd.to_numeric(review.get("actual_ownership"), errors="coerce").notna()
+        & pd.to_numeric(review.get("projected_ownership"), errors="coerce").notna()
+    ].copy()
+    if len(matched_own) >= 3:
+        try:
+            corr = matched_own[["projected_ownership", "actual_ownership"]].corr(method="spearman", numeric_only=True).iloc[0, 1]
+            corr_num = pd.to_numeric(corr, errors="coerce")
+            if pd.notna(corr_num):
+                own_rank_corr = float(corr_num)
+        except Exception:
+            own_rank_corr = None
+
+    show_cols = [
+        "ID",
+        "Name + ID",
+        "Name",
+        "TeamAbbrev",
+        "Position",
+        "Salary",
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "vegas_markets_found",
+        "vegas_blend_weight",
+        "actual_dk_points",
+        "blend_error",
+        "our_error",
+        "vegas_error",
+        "projected_ownership",
+        "actual_ownership",
+        "ownership_error",
+        "actual_minutes",
+        "actual_points",
+        "actual_rebounds",
+        "actual_assists",
+        "actual_threes",
+    ]
+    view_df = review[[c for c in show_cols if c in review.columns]].copy()
+    sort_cols = [c for c in ["actual_dk_points", "blended_projection"] if c in view_df.columns]
+    if sort_cols:
+        view_df = view_df.sort_values(sort_cols, ascending=False, na_position="last")
+
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "available": True,
+        "summary": {
+            "projection_rows": int(len(review)),
+            "actual_matched": matched_actual,
+            "blend_mae": float(pd.to_numeric(review["blend_error"], errors="coerce").abs().mean()) if matched_actual else None,
+            "our_mae": float(pd.to_numeric(review["our_error"], errors="coerce").abs().mean()) if matched_actual else None,
+            "vegas_mae": float(pd.to_numeric(review["vegas_error"], errors="coerce").abs().mean()) if matched_actual else None,
+            "ownership_rows": own_rows,
+            "ownership_mae": float(pd.to_numeric(review["ownership_error"], errors="coerce").abs().mean()) if own_rows else None,
+            "ownership_bias": float(pd.to_numeric(review["ownership_error"], errors="coerce").mean()) if own_rows else None,
+            "ownership_rank_spearman": own_rank_corr,
+        },
+        "rows": _serialize_records(view_df, limit=row_limit),
+    }
+
+def import_contest_standings_csv(
+    *,
+    csv_bytes: bytes,
+    selected_date: date | str,
+    contest_id: str,
+    slate_key: str | None = "main",
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    csv_text, frame = _decode_csv_payload(csv_bytes)
+    if frame.empty:
+        raise ValueError("Could not parse uploaded standings CSV.")
+    profile = detect_contest_standings_upload(frame)
+    if str(profile.get("kind") or "") != "contest_standings":
+        raise ValueError(str(profile.get("message") or "Unrecognized tournament standings CSV format."))
+
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    blob_name = store.write_contest_standings_csv(game_date, contest_id, csv_text, slate_key=slate_key)
+    return {
+        "selected_date": game_date.isoformat(),
+        "contest_id": str(contest_id),
+        "bucket_name": store.bucket_name,
+        "blob_name": blob_name,
+        "profile": profile,
+    }
+
+
+def build_tournament_review_payload(
+    *,
+    selected_date: date | str,
+    contest_id: str,
+    slate_key: str | None = "main",
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+    entries_limit: int = 200,
+    exposure_limit: int = 250,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    if not str(contest_id or "").strip():
+        raise ValueError("contest_id is required")
+
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    standings_df = _read_contest_standings_frame(store, game_date, contest_id, slate_key=slate_key)
+    if standings_df.empty:
+        return {
+            "selected_date": game_date.isoformat(),
+            "contest_id": str(contest_id),
+            "bucket_name": store.bucket_name,
+            "available": False,
+            "message": "No contest standings loaded. Upload or save a standings CSV first.",
+            "upload_profile": detect_contest_standings_upload(None),
+            "summary": {},
+            "entries_rows": [],
+            "exposure_rows": [],
+            "ownership_buckets": [],
+            "ownership_top_misses": [],
+            "projection_rows": [],
+        }
+
+    upload_profile = detect_contest_standings_upload(standings_df)
+    normalized_standings = normalize_contest_standings_frame(standings_df)
+    slate_df = _read_dk_slate_frame(store, game_date, slate_key=slate_key)
+    proj_df = _read_projection_snapshot_frame(store, game_date, slate_key=slate_key)
+    actual_df = _read_actual_results_frame(store, game_date)
+
+    entries_df, expanded_df = build_field_entries_and_players(normalized_standings, slate_df)
+    if not entries_df.empty:
+        entries_df = build_entry_actual_points_comparison(
+            entry_summary_df=entries_df,
+            expanded_players_df=expanded_df,
+            actual_results_df=actual_df,
+        )
+
+    actual_own_df = extract_actual_ownership_from_standings(normalized_standings)
+    exposure_df = build_player_exposure_comparison(
+        expanded_players_df=expanded_df,
+        entry_count=int(len(entries_df)),
+        projection_df=proj_df,
+        actual_ownership_df=actual_own_df,
+        actual_results_df=actual_df,
+    )
+    own_diag = build_ownership_projection_diagnostics(exposure_df)
+    proj_compare_df = build_projection_actual_comparison(projection_df=proj_df, actual_results_df=actual_df)
+
+    projection_summary = {
+        "matched_players": int(pd.to_numeric(proj_compare_df.get("actual_dk_points"), errors="coerce").notna().sum())
+        if not proj_compare_df.empty
+        else 0,
+        "blend_mae": float(pd.to_numeric(proj_compare_df.get("blend_error"), errors="coerce").abs().mean())
+        if not proj_compare_df.empty
+        else None,
+        "our_mae": float(pd.to_numeric(proj_compare_df.get("our_error"), errors="coerce").abs().mean())
+        if not proj_compare_df.empty
+        else None,
+        "vegas_mae": float(pd.to_numeric(proj_compare_df.get("vegas_error"), errors="coerce").abs().mean())
+        if not proj_compare_df.empty
+        else None,
+        "minutes_mae_avg": float(pd.to_numeric(proj_compare_df.get("minutes_error_avg"), errors="coerce").abs().mean())
+        if not proj_compare_df.empty
+        else None,
+        "minutes_mae_last7": float(pd.to_numeric(proj_compare_df.get("minutes_error_last7"), errors="coerce").abs().mean())
+        if not proj_compare_df.empty
+        else None,
+    }
+
+    top_entry_df = entries_df.nsmallest(10, "Rank") if (not entries_df.empty and "Rank" in entries_df.columns) else pd.DataFrame()
+    summary = {
+        "field_entries": int(len(entries_df)),
+        "avg_salary_left": float(pd.to_numeric(entries_df.get("salary_left"), errors="coerce").mean())
+        if not entries_df.empty and "salary_left" in entries_df.columns
+        else None,
+        "avg_max_team_stack": float(pd.to_numeric(entries_df.get("max_team_stack"), errors="coerce").mean())
+        if not entries_df.empty and "max_team_stack" in entries_df.columns
+        else None,
+        "avg_max_game_stack": float(pd.to_numeric(entries_df.get("max_game_stack"), errors="coerce").mean())
+        if not entries_df.empty and "max_game_stack" in entries_df.columns
+        else None,
+        "top10_avg_salary_left": float(pd.to_numeric(top_entry_df.get("salary_left"), errors="coerce").mean())
+        if not top_entry_df.empty and "salary_left" in top_entry_df.columns
+        else None,
+        "top10_entries": int(len(top_entry_df)),
+        "exposure_rows": int(len(exposure_df)),
+        "ownership_samples": int((own_diag.get("summary") or {}).get("samples") or 0),
+    }
+
+    entry_cols = [
+        "Rank",
+        "rank_from_computed_points",
+        "rank_from_file",
+        "rank_from_points",
+        "EntryId",
+        "EntryName",
+        "Points",
+        "points_from_file",
+        "computed_actual_points",
+        "computed_minus_file_points",
+        "computed_players_matched",
+        "computed_coverage_pct",
+        "parsed_players",
+        "mapped_players",
+        "salary_used",
+        "salary_left",
+        "unique_teams",
+        "unique_games",
+        "max_team_stack",
+        "max_game_stack",
+    ]
+    entries_view_df = entries_df[[c for c in entry_cols if c in entries_df.columns]].copy() if not entries_df.empty else pd.DataFrame()
+
+    exposure_cols = [
+        "Name",
+        "TeamAbbrev",
+        "final_dk_points",
+        "high_points_low_own_flag",
+        "appearances",
+        "field_ownership_pct",
+        "projected_ownership",
+        "actual_ownership_from_file",
+        "ownership_diff_vs_proj",
+        "blended_projection",
+        "our_dk_projection",
+        "vegas_dk_projection",
+        "blend_error",
+    ]
+    exposure_view_df = (
+        exposure_df[[c for c in exposure_cols if c in exposure_df.columns]].copy()
+        if isinstance(exposure_df, pd.DataFrame) and not exposure_df.empty
+        else pd.DataFrame()
+    )
+
+    own_buckets_df = own_diag.get("buckets_df") if isinstance(own_diag, dict) else pd.DataFrame()
+    own_misses_df = own_diag.get("top_misses_df") if isinstance(own_diag, dict) else pd.DataFrame()
+
+    return {
+        "selected_date": game_date.isoformat(),
+        "contest_id": str(contest_id),
+        "bucket_name": store.bucket_name,
+        "available": True,
+        "upload_profile": upload_profile,
+        "summary": summary,
+        "ownership_summary": own_diag.get("summary") if isinstance(own_diag, dict) else {},
+        "projection_summary": projection_summary,
+        "entries_rows": _serialize_records(entries_view_df, limit=entries_limit),
+        "exposure_rows": _serialize_records(exposure_view_df, limit=exposure_limit),
+        "ownership_buckets": _serialize_records(own_buckets_df),
+        "ownership_top_misses": _serialize_records(own_misses_df),
+        "projection_rows": _serialize_records(proj_compare_df, limit=exposure_limit),
     }
