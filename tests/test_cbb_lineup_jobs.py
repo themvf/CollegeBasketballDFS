@@ -56,7 +56,10 @@ def test_annotate_lineups_with_model_metadata() -> None:
 
 
 def test_run_lineup_job_request_blocks_on_incomplete_registry_coverage(monkeypatch) -> None:
+    seen: dict[str, object] = {}
+
     def _fake_resolve_rotowire_slate(**_: object) -> dict[str, object]:
+        seen.update(_)
         return {
             "slate": {
                 "slate_id": 3400,
@@ -90,10 +93,20 @@ def test_run_lineup_job_request_blocks_on_incomplete_registry_coverage(monkeypat
 
     with pytest.raises(RuntimeError, match="DK registry resolution incomplete"):
         run_lineup_job_request(
-            request={"selected_date": "2026-03-05"},
+            request={
+                "selected_date": "2026-03-05",
+                "bucket_name": "test-bucket",
+                "gcp_project": "test-project",
+                "service_account_json": "{\"type\":\"service_account\"}",
+                "service_account_json_b64": "ZXhhbXBsZQ==",
+            },
             progress=lambda pct, message: None,
             write_artifact=lambda name, content, content_type: None,
         )
+    assert seen["bucket_name"] == "test-bucket"
+    assert seen["gcp_project"] == "test-project"
+    assert seen["service_account_json"] == "{\"type\":\"service_account\"}"
+    assert seen["service_account_json_b64"] == "ZXhhbXBsZQ=="
 
 
 def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) -> None:

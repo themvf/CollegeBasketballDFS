@@ -14,6 +14,7 @@ from .cbb_dk_registry import (
     build_registry_history_from_local_directory,
     build_rotowire_dk_slate,
     derive_manual_overrides_from_dk_slate,
+    extract_registry_rows_from_dk_slate,
     manual_overrides_to_history_frame,
 )
 from .cbb_dk_optimizer import normalize_injuries_frame
@@ -133,20 +134,159 @@ def merge_manual_overrides(existing_frame: pd.DataFrame, new_frame: pd.DataFrame
     return _dedupe_manual_overrides(merged)
 
 
+def _maybe_build_api_store(
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> CbbGcsStore | None:
+    resolved_bucket = str(bucket_name or os.getenv("CBB_GCS_BUCKET") or "").strip()
+    if not resolved_bucket:
+        return None
+    return _build_api_store(
+        bucket_name=resolved_bucket,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+
+
+def _load_manual_overrides_from_csv_text(csv_text: str | None) -> pd.DataFrame:
+    if not csv_text or not str(csv_text).strip():
+        return pd.DataFrame(columns=MANUAL_OVERRIDE_COLUMNS)
+    try:
+        frame = pd.read_csv(io.StringIO(csv_text))
+    except Exception:
+        return pd.DataFrame(columns=MANUAL_OVERRIDE_COLUMNS)
+    return _dedupe_manual_overrides(frame)
+
+
+def _load_manual_overrides_from_gcs_store(store: CbbGcsStore | None) -> pd.DataFrame:
+    if store is None:
+        return pd.DataFrame(columns=MANUAL_OVERRIDE_COLUMNS)
+    reader = getattr(store, "read_dk_registry_manual_csv", None)
+    if not callable(reader):
+        return pd.DataFrame(columns=MANUAL_OVERRIDE_COLUMNS)
+    return _load_manual_overrides_from_csv_text(reader())
+
+
+def _write_manual_overrides_to_gcs_store(store: CbbGcsStore | None, frame: pd.DataFrame) -> str | None:
+    if store is None:
+        return None
+    writer = getattr(store, "write_dk_registry_manual_csv", None)
+    if not callable(writer):
+        return None
+    payload = io.StringIO()
+    _dedupe_manual_overrides(frame).to_csv(payload, index=False)
+    return str(writer(payload.getvalue()))
+
+
+def _parse_gcs_dk_slate_blob_name(blob_name: str) -> tuple[str | None, str]:
+    normalized = str(blob_name or "").strip().replace("\\", "/")
+    match = re.search(r"(\d{4}-\d{2}-\d{2})", normalized)
+    if not match:
+        return None, "main"
+    iso_date = match.group(1)
+    parts = [part for part in normalized.split("/") if part]
+    filename = parts[-1] if parts else ""
+    if filename == f"{iso_date}_dk_slate.csv":
+        return iso_date, "main"
+    if filename.endswith("_dk_slate.csv") and len(parts) >= 2 and parts[-2] == iso_date:
+        slate_key = filename[: -len("_dk_slate.csv")] or "main"
+        return iso_date, str(slate_key).strip().lower() or "main"
+    return iso_date, "main"
+
+
+def _build_registry_history_from_gcs_store(store: CbbGcsStore | None) -> pd.DataFrame:
+    if store is None:
+        return pd.DataFrame()
+    lister = getattr(store, "list_dk_slate_blob_names", None)
+    if not callable(lister):
+        return pd.DataFrame()
+    reader = getattr(store, "read_players_csv_blob", None)
+
+    frames: list[pd.DataFrame] = []
+    for blob_name in list(lister() or []):
+        slate_date, slate_key = _parse_gcs_dk_slate_blob_name(str(blob_name))
+        if not slate_date:
+            continue
+        try:
+            csv_text = (
+                reader(blob_name)
+                if callable(reader)
+                else store.bucket.blob(blob_name).download_as_text(encoding="utf-8")
+            )
+            if not csv_text or not str(csv_text).strip():
+                continue
+            slate_df = pd.read_csv(io.StringIO(csv_text))
+        except Exception:
+            continue
+        history = extract_registry_rows_from_dk_slate(
+            slate_df,
+            slate_date=slate_date,
+            slate_key=slate_key,
+            source_name=f"gcs:{blob_name}",
+        )
+        if history is not None and not history.empty:
+            frames.append(history)
+
+    frames = [frame for frame in frames if frame is not None and not frame.empty]
+    if not frames:
+        return pd.DataFrame()
+    combined = pd.concat(frames, ignore_index=True)
+    if combined.empty:
+        return pd.DataFrame()
+    return combined.drop_duplicates(
+        subset=["dk_id", "team_abbr", "salary", "slate_date", "source_name"],
+        keep="last",
+    ).reset_index(drop=True)
+
+
+def _load_combined_manual_overrides(
+    *,
+    manual_overrides_path: str | Path | None = None,
+    manual_frame: pd.DataFrame | None = None,
+    store: CbbGcsStore | None = None,
+) -> pd.DataFrame:
+    merged = load_manual_overrides(manual_overrides_path)
+    merged = merge_manual_overrides(merged, _load_manual_overrides_from_gcs_store(store))
+    if manual_frame is not None and not manual_frame.empty:
+        merged = merge_manual_overrides(merged, manual_frame)
+    return merged
+
+
 def _build_registry_from_sources(
     *,
     draftkings_dir: str | Path | None = None,
     manual_overrides_path: str | Path | None = None,
     manual_frame: pd.DataFrame | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
 ) -> pd.DataFrame:
     draftkings_base = Path(draftkings_dir) if draftkings_dir else DEFAULT_DRAFTKINGS_DIR
     history_frames: list[pd.DataFrame] = []
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
 
     local_history = build_registry_history_from_local_directory(draftkings_base)
     if local_history is not None and not local_history.empty:
         history_frames.append(local_history)
 
-    manual_df = manual_frame.copy() if manual_frame is not None else load_manual_overrides(manual_overrides_path)
+    gcs_history = _build_registry_history_from_gcs_store(store)
+    if gcs_history is not None and not gcs_history.empty:
+        history_frames.append(gcs_history)
+
+    manual_df = _load_combined_manual_overrides(
+        manual_overrides_path=manual_overrides_path,
+        manual_frame=manual_frame,
+        store=store,
+    )
     manual_history = manual_overrides_to_history_frame(manual_df)
     if manual_history is not None and not manual_history.empty:
         history_frames.append(manual_history)
@@ -162,10 +302,18 @@ def _build_registry_from_sources(
 def load_registry(
     draftkings_dir: str | Path | None = None,
     manual_overrides_path: str | Path | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
 ) -> pd.DataFrame:
     return _build_registry_from_sources(
         draftkings_dir=draftkings_dir,
         manual_overrides_path=manual_overrides_path,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
 
 
@@ -273,6 +421,10 @@ def resolve_rotowire_slate(
     draftkings_dir: str | Path | None = None,
     manual_overrides_path: str | Path | None = None,
     manual_overrides_frame: pd.DataFrame | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
 ) -> dict[str, Any]:
     rotowire_df, slate_meta = load_rotowire_players_for_slate(
         selected_date=selected_date,
@@ -286,6 +438,10 @@ def resolve_rotowire_slate(
         draftkings_dir=draftkings_dir,
         manual_overrides_path=manual_overrides_path,
         manual_frame=manual_overrides_frame,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
     resolved_slate_df, resolution_df, coverage = build_rotowire_dk_slate(
         rotowire_df=rotowire_df,
@@ -332,6 +488,10 @@ def build_registry_coverage(
     cookie_header: str | None = None,
     draftkings_dir: str | Path | None = None,
     manual_overrides_path: str | Path | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
 ) -> dict[str, Any]:
     resolved = resolve_rotowire_slate(
         selected_date=selected_date,
@@ -343,6 +503,10 @@ def build_registry_coverage(
         cookie_header=cookie_header,
         draftkings_dir=draftkings_dir,
         manual_overrides_path=manual_overrides_path,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
     return {
         "slate": dict(resolved.get("slate") or {}),
@@ -383,9 +547,19 @@ def import_dk_slate_overrides(
     cookie_header: str | None = None,
     draftkings_dir: str | Path | None = None,
     manual_overrides_path: str | Path | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
     persist: bool = True,
 ) -> dict[str, Any]:
     dk_slate_df = pd.read_csv(io.BytesIO(dk_slate_csv_bytes))
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
     resolved_before = resolve_rotowire_slate(
         selected_date=selected_date,
         slate_key=slate_key,
@@ -396,6 +570,10 @@ def import_dk_slate_overrides(
         cookie_header=cookie_header,
         draftkings_dir=draftkings_dir,
         manual_overrides_path=manual_overrides_path,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
     rotowire_df = resolved_before.get("rotowire_df")
     slate_meta = dict(resolved_before.get("slate") or {})
@@ -411,12 +589,20 @@ def import_dk_slate_overrides(
         source_name=f"dk_import:{pd.to_datetime(selected_date, errors='coerce').date().isoformat()}:{slate_key}",
     )
 
-    existing_manual = load_manual_overrides(manual_overrides_path)
+    existing_manual = _load_combined_manual_overrides(
+        manual_overrides_path=manual_overrides_path,
+        store=store,
+    )
     merged_manual = merge_manual_overrides(existing_manual, derived_overrides)
     written_path: str | None = None
+    written_blob: str | None = None
     if persist:
-        written = write_manual_overrides(merged_manual, manual_overrides_path)
-        written_path = str(written)
+        if manual_overrides_path is not None or store is None:
+            written = write_manual_overrides(merged_manual, manual_overrides_path)
+            written_path = str(written)
+        written_blob = _write_manual_overrides_to_gcs_store(store, merged_manual)
+        if written_path is None:
+            written_path = written_blob
 
     resolved_after = resolve_rotowire_slate(
         selected_date=selected_date,
@@ -429,6 +615,10 @@ def import_dk_slate_overrides(
         draftkings_dir=draftkings_dir,
         manual_overrides_path=manual_overrides_path,
         manual_overrides_frame=merged_manual,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
     resolution_after = resolved_after.get("resolution_df")
     coverage_after = dict(resolved_after.get("coverage") or {})
@@ -447,6 +637,7 @@ def import_dk_slate_overrides(
         "derived_overrides": derived_overrides.to_dict(orient="records"),
         "derivation_meta": dict(derive_meta or {}),
         "persisted_manual_overrides_path": written_path,
+        "persisted_manual_overrides_blob": written_blob,
         "persisted": bool(persist),
     }
 
@@ -457,6 +648,10 @@ def save_manual_resolution_overrides(
     selected_date: date | str,
     slate_key: str = "main",
     manual_overrides_path: str | Path | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
     source_name: str | None = None,
     reason_default: str = "manual_alias_review",
 ) -> dict[str, Any]:
@@ -540,12 +735,26 @@ def save_manual_resolution_overrides(
         }
 
     overrides_only = out[MANUAL_OVERRIDE_COLUMNS].copy()
-    existing_manual = load_manual_overrides(manual_overrides_path)
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    existing_manual = _load_combined_manual_overrides(
+        manual_overrides_path=manual_overrides_path,
+        store=store,
+    )
     merged_manual = merge_manual_overrides(existing_manual, overrides_only)
-    written = write_manual_overrides(merged_manual, manual_overrides_path)
+    written_path: str | None = None
+    if manual_overrides_path is not None or store is None:
+        written = write_manual_overrides(merged_manual, manual_overrides_path)
+        written_path = str(written)
+    written_blob = _write_manual_overrides_to_gcs_store(store, merged_manual)
     return {
         "saved_override_count": int(len(overrides_only)),
-        "persisted_manual_overrides_path": str(written),
+        "persisted_manual_overrides_path": written_path or written_blob,
+        "persisted_manual_overrides_blob": written_blob,
         "saved_overrides": overrides_only.to_dict(orient="records"),
     }
 

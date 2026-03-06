@@ -385,6 +385,10 @@ def run_lineup_job_request(
         slate_id=request.get("rotowire_slate_id"),
         site_id=int(request.get("site_id") or 1),
         cookie_header=str(rotowire_cookie) if rotowire_cookie else None,
+        bucket_name=(str(request.get("bucket_name") or "").strip() or None),
+        gcp_project=(str(request.get("gcp_project") or "").strip() or None),
+        service_account_json=(str(request.get("service_account_json") or "").strip() or None),
+        service_account_json_b64=(str(request.get("service_account_json_b64") or "").strip() or None),
     )
     rotowire_df = resolved_bundle.get("rotowire_df")
     slate_meta = dict(resolved_bundle.get("slate") or {})

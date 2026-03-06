@@ -2499,6 +2499,10 @@ def load_resolved_rotowire_slate_context(
     slate_id: int | None,
     site_id: int,
     cookie_header: str | None,
+    bucket_name: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
 ) -> dict[str, Any]:
     bundle = resolve_rotowire_slate(
         selected_date=selected_date,
@@ -2508,6 +2512,10 @@ def load_resolved_rotowire_slate_context(
         slate_id=slate_id,
         site_id=site_id,
         cookie_header=cookie_header,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
     return {
         "slate": dict(bundle.get("slate") or {}),
@@ -2987,6 +2995,10 @@ def build_optimizer_pool_for_date(
         ),
         site_id=max(1, _safe_int_value(st.session_state.get("load_slate_rotowire_site_id"), default=1)),
         cookie_header=(str(st.session_state.get("load_slate_rotowire_cookie") or "").strip() or None),
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
     slate_df = rotowire_bundle.get("resolved_slate_df").copy() if isinstance(rotowire_bundle.get("resolved_slate_df"), pd.DataFrame) else pd.DataFrame()
     rotowire_df = rotowire_bundle.get("rotowire_df").copy() if isinstance(rotowire_bundle.get("rotowire_df"), pd.DataFrame) else pd.DataFrame()
@@ -3720,6 +3732,10 @@ with tab_dk:
                         slate_id=(_safe_int_value(rotowire_slate_id_text, default=0) or None),
                         site_id=int(rotowire_site_id),
                         cookie_header=(rotowire_cookie.strip() or None),
+                        bucket_name=bucket_name,
+                        gcp_project=gcp_project,
+                        service_account_json=service_account_json,
+                        service_account_json_b64=service_account_json_b64,
                         persist=True,
                     )
                     st.session_state["cbb_rotowire_dk_repair_summary"] = repair_summary
@@ -3765,6 +3781,10 @@ with tab_dk:
             slate_id=(_safe_int_value(rotowire_slate_id_text, default=0) or None),
             site_id=int(rotowire_site_id),
             cookie_header=(rotowire_cookie.strip() or None),
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
         )
         slate_meta = dict(resolved_context.get("slate") or {})
         coverage = dict(resolved_context.get("coverage") or {})
@@ -3849,6 +3869,10 @@ with tab_dk:
                         overrides_frame=manual_editor,
                         selected_date=dk_slate_date,
                         slate_key=dk_slate_key,
+                        bucket_name=bucket_name,
+                        gcp_project=gcp_project,
+                        service_account_json=service_account_json,
+                        service_account_json_b64=service_account_json_b64,
                     )
                     st.session_state["cbb_manual_resolution_summary"] = manual_summary
                     load_resolved_rotowire_slate_context.clear()

@@ -102,6 +102,42 @@ def test_load_registry_merges_local_slate_history_and_manual_overrides(tmp_path:
     assert set(registry["dk_id"].astype(str).tolist()) == {"1001", "2002"}
 
 
+def test_load_registry_merges_gcs_slate_history_and_manual_overrides(monkeypatch, tmp_path: Path) -> None:
+    class _FakeStore:
+        def list_dk_slate_blob_names(self) -> list[str]:
+            return ["cbb/dk_slates/2026-03-06/main_dk_slate.csv"]
+
+        def read_players_csv_blob(self, blob_name: str) -> str:
+            assert blob_name == "cbb/dk_slates/2026-03-06/main_dk_slate.csv"
+            return "\n".join(
+                [
+                    "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame",
+                    "G,John Doe (1001),John Doe,1001,G/UTIL,7200,AWAY@HOME 03/06/2026 08:00PM ET,AWAY,30.2",
+                ]
+            )
+
+        def read_dk_registry_manual_csv(self) -> str:
+            return "\n".join(
+                [
+                    "player_name,team_abbr,opp_abbr,salary,position,roster_position,game_key,dk_id,name_plus_id,slate_date,slate_key,reason,source_name",
+                    "Jane Smith,HOME,AWAY,6800,F,F/UTIL,AWAY@HOME,2002,Jane Smith (2002),2026-03-06,main,manual,test",
+                ]
+            )
+
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._build_api_store",
+        lambda **_: _FakeStore(),
+    )
+
+    registry = load_registry(
+        draftkings_dir=tmp_path / "empty_dk",
+        manual_overrides_path=tmp_path / "manual.csv",
+        bucket_name="test-bucket",
+    )
+    assert not registry.empty
+    assert set(registry["dk_id"].astype(str).tolist()) == {"1001", "2002"}
+
+
 def test_write_and_load_manual_overrides_round_trip(tmp_path: Path) -> None:
     target = tmp_path / "manual.csv"
     frame = pd.DataFrame(
@@ -199,6 +235,93 @@ def test_import_dk_slate_overrides_repairs_full_coverage(monkeypatch, tmp_path: 
     assert loaded.iloc[0]["dk_id"] == "2002"
 
 
+def test_import_dk_slate_overrides_persists_manual_overrides_to_gcs(monkeypatch, tmp_path: Path) -> None:
+    rotowire_df = pd.DataFrame(
+        [
+            {
+                "rw_id": 88,
+                "player_name": "Jane Smith",
+                "team_abbr": "AWAY",
+                "opp_abbr": "HOME",
+                "salary": 6800,
+                "roto_position": "F",
+                "site_positions": "F",
+                "avg_fpts_season": 24.2,
+                "is_home": False,
+                "game_datetime": "2026-03-05T20:00:00",
+            }
+        ]
+    )
+
+    def _fake_load_rotowire_players_for_slate(**_: object) -> tuple[pd.DataFrame, dict[str, object]]:
+        return rotowire_df.copy(), {
+            "slate_id": 3400,
+            "slate_date": "2026-03-05",
+            "contest_type": "Classic",
+            "slate_name": "All",
+            "game_count": 1,
+            "players": 1,
+        }
+
+    class _FakeStore:
+        def __init__(self) -> None:
+            self.saved_csv = ""
+
+        def list_dk_slate_blob_names(self) -> list[str]:
+            return []
+
+        def read_dk_registry_manual_csv(self) -> str | None:
+            return None
+
+        def write_dk_registry_manual_csv(self, csv_text: str) -> str:
+            self.saved_csv = csv_text
+            return "cbb/dk_registry/manual_overrides.csv"
+
+    fake_store = _FakeStore()
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service.load_rotowire_players_for_slate",
+        _fake_load_rotowire_players_for_slate,
+    )
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._build_api_store",
+        lambda **_: fake_store,
+    )
+
+    dk_csv = (
+        "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame\n"
+        "F,Jane Smith (2002),Jane Smith,2002,F/UTIL,6800,AWAY@HOME 03/05/2026 08:00PM ET,AWAY,24.2\n"
+    ).encode("utf-8")
+    draftkings_dir = tmp_path / "Draftkings"
+    draftkings_dir.mkdir(parents=True, exist_ok=True)
+    (draftkings_dir / "DKSalaries_3_4_2026.csv").write_text(
+        "\n".join(
+            [
+                "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame",
+                "G,John Doe (1001),John Doe,1001,G/UTIL,7200,AWAY@HOME 03/04/2026 08:00PM ET,AWAY,30.2",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    result = import_dk_slate_overrides(
+        dk_slate_csv_bytes=dk_csv,
+        selected_date="2026-03-05",
+        slate_key="main",
+        contest_type="Classic",
+        slate_name="All",
+        draftkings_dir=draftkings_dir,
+        manual_overrides_path=tmp_path / "manual.csv",
+        bucket_name="test-bucket",
+        persist=True,
+    )
+
+    assert bool(result["coverage_after"]["fully_resolved"]) is True
+    assert result["persisted_manual_overrides_blob"] == "cbb/dk_registry/manual_overrides.csv"
+    saved = pd.read_csv(io.StringIO(fake_store.saved_csv))
+    assert len(saved) == 1
+    assert str(saved.loc[0, "dk_id"]) == "2002"
+
+
 def test_save_manual_resolution_overrides_normalizes_editor_rows(tmp_path: Path) -> None:
     manual_path = tmp_path / "manual.csv"
     result = save_manual_resolution_overrides(
@@ -231,6 +354,53 @@ def test_save_manual_resolution_overrides_normalizes_editor_rows(tmp_path: Path)
     assert row["roster_position"] == "F/UTIL"
     assert row["reason"] == "manual_alias_review"
     assert row["source_name"] == "manual_alias_review:2026-03-05:main"
+
+
+def test_save_manual_resolution_overrides_persists_to_gcs(monkeypatch, tmp_path: Path) -> None:
+    class _FakeStore:
+        def __init__(self) -> None:
+            self.saved_csv = ""
+
+        def read_dk_registry_manual_csv(self) -> str | None:
+            return None
+
+        def write_dk_registry_manual_csv(self, csv_text: str) -> str:
+            self.saved_csv = csv_text
+            return "cbb/dk_registry/manual_overrides.csv"
+
+    fake_store = _FakeStore()
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._build_api_store",
+        lambda **_: fake_store,
+    )
+
+    result = save_manual_resolution_overrides(
+        overrides_frame=pd.DataFrame(
+            [
+                {
+                    "player_name": "Jane Smith",
+                    "team_abbr": "away",
+                    "opp_abbr": "home",
+                    "salary": "6800",
+                    "position": "f",
+                    "roster_position": "",
+                    "dk_id": "",
+                    "name_plus_id": "Jane Smith (2002)",
+                    "reason": "",
+                }
+            ]
+        ),
+        selected_date="2026-03-05",
+        slate_key="main",
+        manual_overrides_path=tmp_path / "manual.csv",
+        bucket_name="test-bucket",
+    )
+
+    assert int(result["saved_override_count"]) == 1
+    assert result["persisted_manual_overrides_blob"] == "cbb/dk_registry/manual_overrides.csv"
+    saved = pd.read_csv(io.StringIO(fake_store.saved_csv))
+    assert len(saved) == 1
+    assert saved.loc[0, "team_abbr"] == "AWAY"
 
 
 def test_normalize_lineupstarter_upload_frame_matches_resolved_slate_by_name_and_salary() -> None:
