@@ -1,182 +1,309 @@
-player_name,team_abbr,opp_abbr,salary,position,roster_position,game_key,dk_id,name_plus_id,slate_date,slate_key,source_name,override_reason
-Hannes Steinbach,WASH,USC,11100,F,F/UTIL,USC@UW,42168486,Hannes Steinbach (42168486),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Boopie Miller,SMU,MIA-FL,8400,G,G/UTIL,MIA@SMU,42168520,Boopie Miller (42168520),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Braden Smith,PURDUE,NW,9800,G,G/UTIL,PUR@NW,42168492,Braden Smith (42168492),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Tre Donaldson,MIA-FL,SMU,8200,G,G/UTIL,MIA@SMU,42168526,Tre Donaldson (42168526),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Malik Reneau,MIA-FL,SMU,7900,F,F/UTIL,MIA@SMU,42168541,Malik Reneau (42168541),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Kingston Flemings,HOU,BAYLOR,8700,G,G/UTIL,BAY@UH,42168509,Kingston Flemings (42168509),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Trey Kaufman-Renn,PURDUE,NW,8800,F,F/UTIL,PUR@NW,42168507,Trey Kaufman-Renn (42168507),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Lamar Wilkerson,IND,MINN,9000,G,G/UTIL,MINN@IU,42168503,Lamar Wilkerson (42168503),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Duke Brennan,VILL,DEPAUL,8500,F,F/UTIL,VU@DPU,42168513,Duke Brennan (42168513),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Solomon Washington,MD,WISC,8600,F,F/UTIL,UMD@WISC,42168511,Solomon Washington (42168511),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Zoom Diallo,WASH,USC,7900,G,G/UTIL,USC@UW,42168543,Zoom Diallo (42168543),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Acaden Lewis,VILL,DEPAUL,7200,G,G/UTIL,VU@DPU,42168577,Acaden Lewis (42168577),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Tucker DeVries,IND,MINN,8000,F,F/UTIL,MINN@IU,42168535,Tucker DeVries (42168535),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Tyler Perkins,VILL,DEPAUL,7500,G,G/UTIL,VU@DPU,42168563,Tyler Perkins (42168563),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Cameron Carr,BAYLOR,HOU,9100,G,G/UTIL,BAY@UH,42168501,Cameron Carr (42168501),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Tounde Yessoufou,BAYLOR,HOU,8000,G,G/UTIL,BAY@UH,42168537,Tounde Yessoufou (42168537),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Lajae Jones,FLAST,PITT,6400,G,G/UTIL,FSU@PITT,42168610,Lajae Jones (42168610),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Andre Mills,MD,WISC,7700,G,G/UTIL,UMD@WISC,42168553,Andre Mills (42168553),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Shelton Henderson,MIA-FL,SMU,7000,F,F/UTIL,MIA@SMU,42168585,Shelton Henderson (42168585),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-NJ Benson,DEPAUL,VILL,7600,F,F/UTIL,VU@DPU,42168555,NJ Benson (42168555),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Emanuel Sharp,HOU,BAYLOR,6500,G,G/UTIL,BAY@UH,42168604,Emanuel Sharp (42168604),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Milos Uzan,HOU,BAYLOR,6600,G,G/UTIL,BAY@UH,42168600,Milos Uzan (42168600),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Layden Blocker,DEPAUL,VILL,5500,G,G/UTIL,VU@DPU,42168650,Layden Blocker (42168650),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Fletcher Loyer,PURDUE,NW,5700,G,G/UTIL,PUR@NW,42168636,Fletcher Loyer (42168636),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Oscar Cluff,PURDUE,NW,5500,F,F/UTIL,PUR@NW,42168648,Oscar Cluff (42168648),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Tru Washington,MIA-FL,SMU,5900,G,G/UTIL,MIA@SMU,42168628,Tru Washington (42168628),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Brandon Maclin,DEPAUL,VILL,7400,G,G/UTIL,VU@DPU,42168567,Brandon Maclin (42168567),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Chauncey Wiggins,FLAST,PITT,5300,F,F/UTIL,FSU@PITT,42168660,Chauncey Wiggins (42168660),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Dante Allen,MIA-FL,SMU,4700,G,G/UTIL,MIA@SMU,42168694,Dante Allen (42168694),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Martin Somerville,FLAST,PITT,5100,G,G/UTIL,FSU@PITT,42168674,Martin Somerville (42168674),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Sam Alexis,IND,MINN,5700,F,F/UTIL,MINN@IU,42168638,Sam Alexis (42168638),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Joseph Tugler,HOU,BAYLOR,5000,F,F/UTIL,BAY@UH,42168678,Joseph Tugler (42168678),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Elijah Saunders,MD,WISC,6300,F,F/UTIL,UMD@WISC,42168614,Elijah Saunders (42168614),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Bryce Lindsay,VILL,DEPAUL,4400,G,G/UTIL,VU@DPU,42168725,Bryce Lindsay (42168725),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Franck Kepnang,WASH,USC,4600,F,F/UTIL,USC@UW,42168700,Franck Kepnang (42168700),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Quimari Peterson,WASH,USC,4600,G,G/UTIL,USC@UW,42168702,Quimari Peterson (42168702),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-CJ Gunn,DEPAUL,VILL,5600,G,G/UTIL,VU@DPU,42168640,CJ Gunn (42168640),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Obi Agbim,BAYLOR,HOU,5200,G,G/UTIL,BAY@UH,42168664,Obi Agbim (42168664),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-RJ Smith,DEPAUL,VILL,4900,G,G/UTIL,VU@DPU,42168686,RJ Smith (42168686),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Darius Adams,MD,WISC,4900,G,G/UTIL,UMD@WISC,42168682,Darius Adams (42168682),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Devin Askew,VILL,DEPAUL,4700,G,G/UTIL,VU@DPU,42168696,Devin Askew (42168696),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Conor Enright,IND,MINN,4600,G,G/UTIL,MINN@IU,42168704,Conor Enright (42168704),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Thomas Bassong,FLAST,PITT,4800,F,F/UTIL,FSU@PITT,42168690,Thomas Bassong (42168690),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-David Coit,MD,WISC,4800,G,G/UTIL,UMD@WISC,42168692,David Coit (42168692),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Nick Dorn,IND,MINN,4300,G,G/UTIL,MINN@IU,42168727,Nick Dorn (42168727),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-C.J. Cox,PURDUE,NW,4400,G,G/UTIL,PUR@NW,42168723,C.J. Cox (42168723),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Caden Powell,BAYLOR,HOU,4500,F,F/UTIL,BAY@UH,42168712,Caden Powell (42168712),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Kobe MaGee,FLAST,PITT,3600,G,G/UTIL,FSU@PITT,42168806,Kobe MaGee (42168806),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Daniel Jacobsen,PURDUE,NW,3500,F,F/UTIL,PUR@NW,42168816,Daniel Jacobsen (42168816),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Alex Steen,FLAST,PITT,5100,F,F/UTIL,FSU@PITT,42168670,Alex Steen (42168670),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Michael Rataj,BAYLOR,HOU,4000,G,G/UTIL,BAY@UH,42168761,Michael Rataj (42168761),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Reed Bailey,IND,MINN,3700,F,F/UTIL,MINN@IU,42168788,Reed Bailey (42168788),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Bryson Tucker,WASH,USC,3600,F,F/UTIL,USC@UW,42168796,Bryson Tucker (42168796),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Isiah Harwell,HOU,BAYLOR,3200,G,G/UTIL,BAY@UH,42168862,Isiah Harwell (42168862),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Fabian Flores,DEPAUL,VILL,3300,F,F/UTIL,VU@DPU,42168848,Fabian Flores (42168848),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jack Benter,PURDUE,NW,3800,G,G/UTIL,PUR@NW,42168773,Jack Benter (42168773),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-AJ Swinton,FLAST,PITT,4200,F,F/UTIL,FSU@PITT,42168739,AJ Swinton (42168739),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Gicarri Harris,PURDUE,NW,3500,G,G/UTIL,PUR@NW,42168810,Gicarri Harris (42168810),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Omer Mayer,PURDUE,NW,3400,G,G/UTIL,PUR@NW,42168826,Omer Mayer (42168826),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Kalifa Sakho,HOU,BAYLOR,3900,F,F/UTIL,BAY@UH,42168765,Kalifa Sakho (42168765),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Cam Miles,FLAST,PITT,3200,G,G/UTIL,FSU@PITT,42168856,Cam Miles (42168856),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jacob Ognacevic,WASH,USC,3000,F,F/UTIL,USC@UW,42168908,Jacob Ognacevic (42168908),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Noam Dovrat,MIA-FL,SMU,3300,G,G/UTIL,MIA@SMU,42168838,Noam Dovrat (42168838),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Salih Altuntas,MIA-FL,SMU,3000,F,F/UTIL,MIA@SMU,42169049,Salih Altuntas (42169049),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Malachi Palmer,VILL,DEPAUL,3600,G,G/UTIL,VU@DPU,42168798,Malachi Palmer (42168798),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Theo Pierre-Justin,DEPAUL,VILL,4400,F,F/UTIL,VU@DPU,42168721,Theo Pierre-Justin (42168721),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Alier Maluk,FLAST,PITT,3000,F,F/UTIL,FSU@PITT,42169031,Alier Maluk (42169031),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-James Nnaji,BAYLOR,HOU,3200,F,F/UTIL,BAY@UH,42168869,James Nnaji (42168869),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Sam Walters,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169035,Sam Walters (42169035),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Kaleb Banks,DEPAUL,VILL,3400,F,F/UTIL,VU@DPU,42168822,Kaleb Banks (42168822),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jasai Miles,IND,MINN,3200,G,G/UTIL,MINN@IU,42168858,Jasai Miles (42168858),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Chris Jeffrey,VILL,DEPAUL,3200,G,G/UTIL,VU@DPU,42168854,Chris Jeffrey (42168854),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Guillermo Del Pino,MD,WISC,3500,G,G/UTIL,UMD@WISC,42168818,Guillermo Del Pino (42168818),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Nikola Dzepina,WASH,USC,3500,F,F/UTIL,USC@UW,42168812,Nikola Dzepina (42168812),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Courtland Muldrew,WASH,USC,4100,G,G/UTIL,USC@UW,42168755,Courtland Muldrew (42168755),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Ilija Milijasevic,DEPAUL,VILL,3000,G,G/UTIL,VU@DPU,42168887,Ilija Milijasevic (42168887),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Mercy Miller,HOU,BAYLOR,3900,G,G/UTIL,BAY@UH,42168767,Mercy Miller (42168767),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Mitchell Holmes,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169041,Mitchell Holmes (42169041),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Khaman Maker,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168924,Khaman Maker (42168924),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Kruz McClure,DEPAUL,VILL,3700,G,G/UTIL,VU@DPU,42168786,Kruz McClure (42168786),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Isaiah Watts,MD,WISC,3200,G,G/UTIL,UMD@WISC,42168860,Isaiah Watts (42168860),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Chase McCarty,HOU,BAYLOR,3800,F,F/UTIL,BAY@UH,42168779,Chase McCarty (42168779),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Aleks Alston,MD,WISC,3000,F,F/UTIL,UMD@WISC,42169043,Aleks Alston (42169043),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Nate Kasher,DEPAUL,VILL,3000,G,G/UTIL,VU@DPU,42169091,Nate Kasher (42169091),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Drew Perry,BAYLOR,HOU,3000,G,G/UTIL,BAY@UH,42169119,Drew Perry (42169119),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jack Robison,WISC,MD,3000,F,F/UTIL,UMD@WISC,42169025,Jack Robison (42169025),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jacob McFarland,HOU,BAYLOR,3000,F,F/UTIL,BAY@UH,42168960,Jacob McFarland (42168960),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Nigel Walls,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169011,Nigel Walls (42169011),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jordyn Kee,MIA-FL,SMU,3000,G,G/UTIL,MIA@SMU,42169133,Jordyn Kee (42169133),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Aaron Fine,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169147,Aaron Fine (42169147),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jalen Crawford,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42169089,Jalen Crawford (42169089),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Malcolm Flaggs,VILL,DEPAUL,3000,G,G/UTIL,VU@DPU,42169053,Malcolm Flaggs (42169053),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Chance Puryear,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169013,Chance Puryear (42169013),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Drew Snively,IND,MINN,3000,G,G/UTIL,MINN@IU,42169125,Drew Snively (42169125),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Isaac Gard,WISC,MD,3000,G,G/UTIL,UMD@WISC,42169151,Isaac Gard (42169151),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Hayden Jones,WISC,MD,3000,G,G/UTIL,UMD@WISC,42169157,Hayden Jones (42169157),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Zion Stanford,VILL,DEPAUL,3000,G,G/UTIL,VU@DPU,42169121,Zion Stanford (42169121),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Collin Metcalf,MD,WISC,4200,F,F/UTIL,UMD@WISC,42168737,Collin Metcalf (42168737),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-BJ Roy,WASH,USC,3000,G,G/UTIL,USC@UW,42169107,BJ Roy (42169107),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Aleksa Ristic,IND,MINN,3000,G,G/UTIL,MINN@IU,42169137,Aleksa Ristic (42169137),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Ian Stephens,IND,MINN,3000,G,G/UTIL,MINN@IU,42169141,Ian Stephens (42169141),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Trent Sisley,IND,MINN,3000,F,F/UTIL,MINN@IU,42169047,Trent Sisley (42169047),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Riccardo Greppi,WISC,MD,3000,F,F/UTIL,UMD@WISC,42169019,Riccardo Greppi (42169019),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jack Lusk,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169149,Jack Lusk (42169149),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Tayton Conerway,IND,MINN,4300,G,G/UTIL,MINN@IU,42168729,Tayton Conerway (42168729),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Trey Utter,SMU,MIA-FL,3000,G,G/UTIL,MIA@SMU,42169093,Trey Utter (42169093),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Tryce Grensing,IND,MINN,3000,G,G/UTIL,MINN@IU,42169117,Tryce Grensing (42169117),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jaziah Harper,MD,WISC,3000,G/F,G/F/UTIL,UMD@WISC,42169167,Jaziah Harper (42169167),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Nick Blake,MD,WISC,3000,G,G/UTIL,UMD@WISC,42169077,Nick Blake (42169077),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jace Rayl,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169131,Jace Rayl (42169131),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Raleigh Burgess,PURDUE,NW,3000,F,F/UTIL,PUR@NW,42168976,Raleigh Burgess (42168976),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Sam King,PURDUE,NW,3000,F,F/UTIL,PUR@NW,42169001,Sam King (42169001),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jonah Goorin,USC,WASH,3000,G,G/UTIL,USC@UW,42169059,Jonah Goorin (42169059),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Patrick O'Brien,USC,WASH,3000,G,G/UTIL,USC@UW,42169057,Patrick O'Brien (42169057),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Maximo Garcia-Plata,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42169103,Maximo Garcia-Plata (42169103),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Andrej Acimovic,IND,MINN,3000,F,F/UTIL,MINN@IU,42168962,Andrej Acimovic (42168962),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Nico Onyekwere,VILL,DEPAUL,3400,F,F/UTIL,VU@DPU,42168832,Nico Onyekwere (42168832),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jonas Johnson,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168997,Jonas Johnson (42168997),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Niccolo Kalischer-Stork,SMU,MIA-FL,3000,G,G/UTIL,MIA@SMU,42169095,Niccolo Kalischer-Stork (42169095),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Ryan Cornish,USC,WASH,3000,G,G/UTIL,USC@UW,42169162,Ryan Cornish (42169162),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Amarion Dickerson,USC,WASH,3800,G/F,G/F/UTIL,USC@UW,42168781,Amarion Dickerson (42168781),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Myles Rice,MD,WISC,3700,G,G/UTIL,UMD@WISC,42168794,Myles Rice (42168794),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Lathan Sommerville,WASH,USC,3800,F,F/UTIL,USC@UW,42168775,Lathan Sommerville (42168775),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Liam Murphy,PURDUE,NW,3000,F,F/UTIL,PUR@NW,42169015,Liam Murphy (42169015),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Braden Pierce,VILL,DEPAUL,3100,F,F/UTIL,VU@DPU,42168873,Braden Pierce (42168873),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Zach Kinziger,WISC,MD,3000,G,G/UTIL,UMD@WISC,42169155,Zach Kinziger (42169155),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Pharrel Payne,MD,WISC,8000,F,F/UTIL,UMD@WISC,42168539,Pharrel Payne (42168539),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-B.J. Edwards,SMU,MIA-FL,7400,G,G/UTIL,MIA@SMU,42168569,B.J. Edwards (42168569),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-JJ White,BAYLOR,HOU,4600,G,G/UTIL,BAY@UH,42168708,JJ White (42168708),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Amsal Delalic,DEPAUL,VILL,3000,G,G/UTIL,VU@DPU,42168928,Amsal Delalic (42168928),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Andre Iguodala II,BAYLOR,HOU,3000,G/F,G/F/UTIL,BAY@UH,42168984,Andre Iguodala II (42168984),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Brit Burden,USC,WASH,3000,F,F/UTIL,USC@UW,42168968,Brit Burden (42168968),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Bryce Jackson,HOU,BAYLOR,3000,G,G/UTIL,BAY@UH,42169063,Bryce Jackson (42169063),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Cedric Lath,HOU,BAYLOR,3000,F,F/UTIL,BAY@UH,42169033,Cedric Lath (42169033),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Christian Nitu,WASH,USC,3000,F,F/UTIL,USC@UW,42168920,Christian Nitu (42168920),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Desmond Claude,WASH,USC,3000,G,G/UTIL,USC@UW,42168902,Desmond Claude (42168902),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Isaiah Medina,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168926,Isaiah Medina (42168926),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-JJ Mandaquit,WASH,USC,3000,G,G/UTIL,USC@UW,42168904,JJ Mandaquit (42168904),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-James Goodis,BAYLOR,HOU,3000,G,G/UTIL,BAY@UH,42169065,James Goodis (42169065),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jasen Lopez,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42168889,Jasen Lopez (42168889),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jasir Rencher,WASH,USC,3000,F,F/UTIL,USC@UW,42168906,Jasir Rencher (42168906),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jeremy Lorenz,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168922,Jeremy Lorenz (42168922),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Jordan Rayford,IND,MINN,3000,G,G/UTIL,MINN@IU,42168934,Jordan Rayford (42168934),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Juslin Bodo Bodo,BAYLOR,HOU,3000,F,F/UTIL,BAY@UH,42168987,Juslin Bodo Bodo (42168987),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Kordel Jefferson,HOU,BAYLOR,3000,G,G/UTIL,BAY@UH,42168918,Kordel Jefferson (42168918),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Lukas Sotell,MD,WISC,3000,G,G/UTIL,UMD@WISC,42169085,Lukas Sotell (42169085),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Mady Traore,WASH,USC,3000,F,F/UTIL,USC@UW,42169061,Mady Traore (42169061),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Maikcol Perez,BAYLOR,HOU,3000,F,F/UTIL,BAY@UH,42168991,Maikcol Perez (42168991),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Marcus Allen,MIA-FL,SMU,3000,G/F,G/F/UTIL,MIA@SMU,42169159,Marcus Allen (42169159),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Mayo Soyoye,BAYLOR,HOU,3000,F,F/UTIL,BAY@UH,42168989,Mayo Soyoye (42168989),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Rakease Passmore,MD,WISC,3000,G,G/UTIL,UMD@WISC,42168952,Rakease Passmore (42168952),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Rodney Rice,USC,WASH,3000,G,G/UTIL,USC@UW,42168950,Rodney Rice (42168950),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Treyvon Maddox,MIA-FL,SMU,3000,F,F/UTIL,MIA@SMU,42169170,Treyvon Maddox (42169170),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Wade Chiddick,VILL,DEPAUL,3000,G,G/UTIL,VU@DPU,42169021,Wade Chiddick (42169021),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Will Kuykendall,BAYLOR,HOU,3000,G,G/UTIL,BAY@UH,42169145,Will Kuykendall (42169145),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Xavier Osceola,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42169139,Xavier Osceola (42169139),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_exact_name_salary
-Darius Acuff,ARK,TEX,9900,G,G/UTIL,TEX@ARK,42168490,Darius Acuff Jr. (42168490),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Nigel James,MARQ,PROV,10000,G,G/UTIL,MARQ@PROV,42168488,Nigel James Jr. (42168488),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Jaron Pierre,SMU,MIA-FL,7300,G,G/UTIL,MIA@SMU,42168573,Jaron Pierre Jr. (42168573),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Robert McCray,FLAST,PITT,8300,G,G/UTIL,FSU@PITT,42168524,Robert McCray V (42168524),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Billy Richmond,ARK,TEX,8100,G/F,G/F/UTIL,TEX@ARK,42168532,Billy Richmond III (42168532),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Wesley Yates,WASH,USC,5400,G,G/UTIL,USC@UW,42168656,Wesley Yates III (42168656),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Chris Cenac,HOU,BAYLOR,6300,F,F/UTIL,BAY@UH,42168612,Chris Cenac Jr. (42168612),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Ernest Udeh,MIA-FL,SMU,7400,F,F/UTIL,MIA@SMU,42168565,Ernest Udeh Jr. (42168565),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Corey Floyd,PROV,MARQ,4200,G,G/UTIL,MARQ@PROV,42168735,Corey Floyd Jr. (42168735),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Barry Dunning,PITT,FLAST,6700,G/F,G/F/UTIL,FSU@PITT,42168597,Barry Dunning Jr. (42168597),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Isaac Williams,BAYLOR,HOU,5600,G,G/UTIL,BAY@UH,42168642,Isaac Williams IV (42168642),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Jerry Easter,USC,WASH,3900,G,G/UTIL,USC@UW,42168769,Jerry Easter II (42168769),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Dan Skillings,BAYLOR,HOU,4600,G,G/UTIL,BAY@UH,42168706,Dan Skillings Jr. (42168706),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Michael Phillips,MARQ,PROV,3000,F,F/UTIL,MARQ@PROV,42169045,Michael Phillips II (42169045),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Ramon Walker,HOU,BAYLOR,3000,G,G/UTIL,BAY@UH,42168916,Ramon Walker Jr. (42168916),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Declan Duru,TEX,ARK,3000,F,F/UTIL,TEX@ARK,42169017,Declan Duru Jr. (42169017),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-EJ Neal,USC,WASH,3000,G,G/UTIL,USC@UW,42169109,EJ Neal Jr. (42169109),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Billy White,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42168995,Billy White III (42168995),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Antione West,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169087,Antione West Jr. (42169087),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Terrance Williams,USC,WASH,3900,F,F/UTIL,USC@UW,42168763,Terrance Williams II (42168763),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Anthony Batson,STAN,ND,3000,G,G/UTIL,STAN@ND,42168966,Anthony Batson Jr. (42168966),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Chansey Willis,MINN,IND,3000,G,G/UTIL,MINN@IU,42169071,Chansey Willis Jr (42169071),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-George Turkson,MD,WISC,3000,G/F,G/F/UTIL,UMD@WISC,42168891,George Turkson Jr. (42168891),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-John Laboy,MIA-FL,SMU,3000,G,G/UTIL,MIA@SMU,42169105,John Laboy II (42169105),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
-Mark Zachery,ND,STAN,3000,G,G/UTIL,STAN@ND,42169055,Mark Zachery IV (42169055),2026-03-04,main,local_dk_slate_import:2026-03-04:main,dk_slate_loose_name_salary
+player_name,team_abbr,opp_abbr,salary,position,roster_position,game_key,dk_id,name_plus_id,slate_date,slate_key,reason,source_name
+Hannes Steinbach,WASH,USC,11100,F,F/UTIL,USC@UW,42168486,Hannes Steinbach (42168486),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Boopie Miller,SMU,MIA-FL,8400,G,G/UTIL,MIA@SMU,42168520,Boopie Miller (42168520),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Braden Smith,PURDUE,NW,9800,G,G/UTIL,PUR@NW,42168492,Braden Smith (42168492),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Tre Donaldson,MIA-FL,SMU,8200,G,G/UTIL,MIA@SMU,42168526,Tre Donaldson (42168526),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Malik Reneau,MIA-FL,SMU,7900,F,F/UTIL,MIA@SMU,42168541,Malik Reneau (42168541),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Kingston Flemings,HOU,BAYLOR,8700,G,G/UTIL,BAY@UH,42168509,Kingston Flemings (42168509),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Trey Kaufman-Renn,PURDUE,NW,8800,F,F/UTIL,PUR@NW,42168507,Trey Kaufman-Renn (42168507),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Lamar Wilkerson,IND,MINN,9000,G,G/UTIL,MINN@IU,42168503,Lamar Wilkerson (42168503),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Duke Brennan,VILL,DEPAUL,8500,F,F/UTIL,VU@DPU,42168513,Duke Brennan (42168513),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Solomon Washington,MD,WISC,8600,F,F/UTIL,UMD@WISC,42168511,Solomon Washington (42168511),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Zoom Diallo,WASH,USC,7900,G,G/UTIL,USC@UW,42168543,Zoom Diallo (42168543),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Acaden Lewis,VILL,DEPAUL,7200,G,G/UTIL,VU@DPU,42168577,Acaden Lewis (42168577),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Tucker DeVries,IND,MINN,8000,F,F/UTIL,MINN@IU,42168535,Tucker DeVries (42168535),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Tyler Perkins,VILL,DEPAUL,7500,G,G/UTIL,VU@DPU,42168563,Tyler Perkins (42168563),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Cameron Carr,BAYLOR,HOU,9100,G,G/UTIL,BAY@UH,42168501,Cameron Carr (42168501),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Tounde Yessoufou,BAYLOR,HOU,8000,G,G/UTIL,BAY@UH,42168537,Tounde Yessoufou (42168537),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Lajae Jones,FLAST,PITT,6400,G,G/UTIL,FSU@PITT,42168610,Lajae Jones (42168610),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Andre Mills,MD,WISC,7700,G,G/UTIL,UMD@WISC,42168553,Andre Mills (42168553),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Shelton Henderson,MIA-FL,SMU,7000,F,F/UTIL,MIA@SMU,42168585,Shelton Henderson (42168585),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+NJ Benson,DEPAUL,VILL,7600,F,F/UTIL,VU@DPU,42168555,NJ Benson (42168555),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Emanuel Sharp,HOU,BAYLOR,6500,G,G/UTIL,BAY@UH,42168604,Emanuel Sharp (42168604),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Milos Uzan,HOU,BAYLOR,6600,G,G/UTIL,BAY@UH,42168600,Milos Uzan (42168600),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Layden Blocker,DEPAUL,VILL,5500,G,G/UTIL,VU@DPU,42168650,Layden Blocker (42168650),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Fletcher Loyer,PURDUE,NW,5700,G,G/UTIL,PUR@NW,42168636,Fletcher Loyer (42168636),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Oscar Cluff,PURDUE,NW,5500,F,F/UTIL,PUR@NW,42168648,Oscar Cluff (42168648),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Tru Washington,MIA-FL,SMU,5900,G,G/UTIL,MIA@SMU,42168628,Tru Washington (42168628),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Brandon Maclin,DEPAUL,VILL,7400,G,G/UTIL,VU@DPU,42168567,Brandon Maclin (42168567),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Chauncey Wiggins,FLAST,PITT,5300,F,F/UTIL,FSU@PITT,42168660,Chauncey Wiggins (42168660),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Dante Allen,MIA-FL,SMU,4700,G,G/UTIL,MIA@SMU,42168694,Dante Allen (42168694),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Martin Somerville,FLAST,PITT,5100,G,G/UTIL,FSU@PITT,42168674,Martin Somerville (42168674),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Sam Alexis,IND,MINN,5700,F,F/UTIL,MINN@IU,42168638,Sam Alexis (42168638),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Joseph Tugler,HOU,BAYLOR,5000,F,F/UTIL,BAY@UH,42168678,Joseph Tugler (42168678),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Elijah Saunders,MD,WISC,6300,F,F/UTIL,UMD@WISC,42168614,Elijah Saunders (42168614),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Bryce Lindsay,VILL,DEPAUL,4400,G,G/UTIL,VU@DPU,42168725,Bryce Lindsay (42168725),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Franck Kepnang,WASH,USC,4600,F,F/UTIL,USC@UW,42168700,Franck Kepnang (42168700),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Quimari Peterson,WASH,USC,4600,G,G/UTIL,USC@UW,42168702,Quimari Peterson (42168702),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+CJ Gunn,DEPAUL,VILL,5600,G,G/UTIL,VU@DPU,42168640,CJ Gunn (42168640),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Obi Agbim,BAYLOR,HOU,5200,G,G/UTIL,BAY@UH,42168664,Obi Agbim (42168664),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+RJ Smith,DEPAUL,VILL,4900,G,G/UTIL,VU@DPU,42168686,RJ Smith (42168686),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Darius Adams,MD,WISC,4900,G,G/UTIL,UMD@WISC,42168682,Darius Adams (42168682),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Devin Askew,VILL,DEPAUL,4700,G,G/UTIL,VU@DPU,42168696,Devin Askew (42168696),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Conor Enright,IND,MINN,4600,G,G/UTIL,MINN@IU,42168704,Conor Enright (42168704),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Thomas Bassong,FLAST,PITT,4800,F,F/UTIL,FSU@PITT,42168690,Thomas Bassong (42168690),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+David Coit,MD,WISC,4800,G,G/UTIL,UMD@WISC,42168692,David Coit (42168692),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Nick Dorn,IND,MINN,4300,G,G/UTIL,MINN@IU,42168727,Nick Dorn (42168727),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+C.J. Cox,PURDUE,NW,4400,G,G/UTIL,PUR@NW,42168723,C.J. Cox (42168723),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Caden Powell,BAYLOR,HOU,4500,F,F/UTIL,BAY@UH,42168712,Caden Powell (42168712),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Kobe MaGee,FLAST,PITT,3600,G,G/UTIL,FSU@PITT,42168806,Kobe MaGee (42168806),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Daniel Jacobsen,PURDUE,NW,3500,F,F/UTIL,PUR@NW,42168816,Daniel Jacobsen (42168816),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Alex Steen,FLAST,PITT,5100,F,F/UTIL,FSU@PITT,42168670,Alex Steen (42168670),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Michael Rataj,BAYLOR,HOU,4000,G,G/UTIL,BAY@UH,42168761,Michael Rataj (42168761),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Reed Bailey,IND,MINN,3700,F,F/UTIL,MINN@IU,42168788,Reed Bailey (42168788),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Bryson Tucker,WASH,USC,3600,F,F/UTIL,USC@UW,42168796,Bryson Tucker (42168796),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Isiah Harwell,HOU,BAYLOR,3200,G,G/UTIL,BAY@UH,42168862,Isiah Harwell (42168862),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Fabian Flores,DEPAUL,VILL,3300,F,F/UTIL,VU@DPU,42168848,Fabian Flores (42168848),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jack Benter,PURDUE,NW,3800,G,G/UTIL,PUR@NW,42168773,Jack Benter (42168773),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+AJ Swinton,FLAST,PITT,4200,F,F/UTIL,FSU@PITT,42168739,AJ Swinton (42168739),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Gicarri Harris,PURDUE,NW,3500,G,G/UTIL,PUR@NW,42168810,Gicarri Harris (42168810),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Omer Mayer,PURDUE,NW,3400,G,G/UTIL,PUR@NW,42168826,Omer Mayer (42168826),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Kalifa Sakho,HOU,BAYLOR,3900,F,F/UTIL,BAY@UH,42168765,Kalifa Sakho (42168765),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Cam Miles,FLAST,PITT,3200,G,G/UTIL,FSU@PITT,42168856,Cam Miles (42168856),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jacob Ognacevic,WASH,USC,3000,F,F/UTIL,USC@UW,42168908,Jacob Ognacevic (42168908),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Noam Dovrat,MIA-FL,SMU,3300,G,G/UTIL,MIA@SMU,42168838,Noam Dovrat (42168838),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Salih Altuntas,MIA-FL,SMU,3000,F,F/UTIL,MIA@SMU,42169049,Salih Altuntas (42169049),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Malachi Palmer,VILL,DEPAUL,3600,G,G/UTIL,VU@DPU,42168798,Malachi Palmer (42168798),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Theo Pierre-Justin,DEPAUL,VILL,4400,F,F/UTIL,VU@DPU,42168721,Theo Pierre-Justin (42168721),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Alier Maluk,FLAST,PITT,3000,F,F/UTIL,FSU@PITT,42169031,Alier Maluk (42169031),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+James Nnaji,BAYLOR,HOU,3200,F,F/UTIL,BAY@UH,42168869,James Nnaji (42168869),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Sam Walters,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169035,Sam Walters (42169035),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Kaleb Banks,DEPAUL,VILL,3400,F,F/UTIL,VU@DPU,42168822,Kaleb Banks (42168822),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jasai Miles,IND,MINN,3200,G,G/UTIL,MINN@IU,42168858,Jasai Miles (42168858),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Chris Jeffrey,VILL,DEPAUL,3200,G,G/UTIL,VU@DPU,42168854,Chris Jeffrey (42168854),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Guillermo Del Pino,MD,WISC,3500,G,G/UTIL,UMD@WISC,42168818,Guillermo Del Pino (42168818),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Nikola Dzepina,WASH,USC,3500,F,F/UTIL,USC@UW,42168812,Nikola Dzepina (42168812),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Courtland Muldrew,WASH,USC,4100,G,G/UTIL,USC@UW,42168755,Courtland Muldrew (42168755),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Ilija Milijasevic,DEPAUL,VILL,3000,G,G/UTIL,VU@DPU,42168887,Ilija Milijasevic (42168887),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Mercy Miller,HOU,BAYLOR,3900,G,G/UTIL,BAY@UH,42168767,Mercy Miller (42168767),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Mitchell Holmes,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169041,Mitchell Holmes (42169041),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Khaman Maker,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168924,Khaman Maker (42168924),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Kruz McClure,DEPAUL,VILL,3700,G,G/UTIL,VU@DPU,42168786,Kruz McClure (42168786),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Isaiah Watts,MD,WISC,3200,G,G/UTIL,UMD@WISC,42168860,Isaiah Watts (42168860),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Chase McCarty,HOU,BAYLOR,3800,F,F/UTIL,BAY@UH,42168779,Chase McCarty (42168779),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Aleks Alston,MD,WISC,3000,F,F/UTIL,UMD@WISC,42169043,Aleks Alston (42169043),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Nate Kasher,DEPAUL,VILL,3000,G,G/UTIL,VU@DPU,42169091,Nate Kasher (42169091),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Drew Perry,BAYLOR,HOU,3000,G,G/UTIL,BAY@UH,42169119,Drew Perry (42169119),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jack Robison,WISC,MD,3000,F,F/UTIL,UMD@WISC,42169025,Jack Robison (42169025),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jacob McFarland,HOU,BAYLOR,3000,F,F/UTIL,BAY@UH,42168960,Jacob McFarland (42168960),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Nigel Walls,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169011,Nigel Walls (42169011),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jordyn Kee,MIA-FL,SMU,3000,G,G/UTIL,MIA@SMU,42169133,Jordyn Kee (42169133),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Aaron Fine,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169147,Aaron Fine (42169147),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jalen Crawford,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42169089,Jalen Crawford (42169089),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Malcolm Flaggs,VILL,DEPAUL,3000,G,G/UTIL,VU@DPU,42169053,Malcolm Flaggs (42169053),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Chance Puryear,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42169013,Chance Puryear (42169013),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Drew Snively,IND,MINN,3000,G,G/UTIL,MINN@IU,42169125,Drew Snively (42169125),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Isaac Gard,WISC,MD,3000,G,G/UTIL,UMD@WISC,42169151,Isaac Gard (42169151),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Hayden Jones,WISC,MD,3000,G,G/UTIL,UMD@WISC,42169157,Hayden Jones (42169157),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Zion Stanford,VILL,DEPAUL,3000,G,G/UTIL,VU@DPU,42169121,Zion Stanford (42169121),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Collin Metcalf,MD,WISC,4200,F,F/UTIL,UMD@WISC,42168737,Collin Metcalf (42168737),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+BJ Roy,WASH,USC,3000,G,G/UTIL,USC@UW,42169107,BJ Roy (42169107),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Aleksa Ristic,IND,MINN,3000,G,G/UTIL,MINN@IU,42169137,Aleksa Ristic (42169137),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Ian Stephens,IND,MINN,3000,G,G/UTIL,MINN@IU,42169141,Ian Stephens (42169141),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Trent Sisley,IND,MINN,3000,F,F/UTIL,MINN@IU,42169047,Trent Sisley (42169047),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Riccardo Greppi,WISC,MD,3000,F,F/UTIL,UMD@WISC,42169019,Riccardo Greppi (42169019),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jack Lusk,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169149,Jack Lusk (42169149),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Tayton Conerway,IND,MINN,4300,G,G/UTIL,MINN@IU,42168729,Tayton Conerway (42168729),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Trey Utter,SMU,MIA-FL,3000,G,G/UTIL,MIA@SMU,42169093,Trey Utter (42169093),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Tryce Grensing,IND,MINN,3000,G,G/UTIL,MINN@IU,42169117,Tryce Grensing (42169117),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jaziah Harper,MD,WISC,3000,G/F,G/F/UTIL,UMD@WISC,42169167,Jaziah Harper (42169167),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Nick Blake,MD,WISC,3000,G,G/UTIL,UMD@WISC,42169077,Nick Blake (42169077),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jace Rayl,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169131,Jace Rayl (42169131),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Raleigh Burgess,PURDUE,NW,3000,F,F/UTIL,PUR@NW,42168976,Raleigh Burgess (42168976),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Sam King,PURDUE,NW,3000,F,F/UTIL,PUR@NW,42169001,Sam King (42169001),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jonah Goorin,USC,WASH,3000,G,G/UTIL,USC@UW,42169059,Jonah Goorin (42169059),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Patrick O'Brien,USC,WASH,3000,G,G/UTIL,USC@UW,42169057,Patrick O'Brien (42169057),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Maximo Garcia-Plata,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42169103,Maximo Garcia-Plata (42169103),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Andrej Acimovic,IND,MINN,3000,F,F/UTIL,MINN@IU,42168962,Andrej Acimovic (42168962),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Nico Onyekwere,VILL,DEPAUL,3400,F,F/UTIL,VU@DPU,42168832,Nico Onyekwere (42168832),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jonas Johnson,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168997,Jonas Johnson (42168997),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Niccolo Kalischer-Stork,SMU,MIA-FL,3000,G,G/UTIL,MIA@SMU,42169095,Niccolo Kalischer-Stork (42169095),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Ryan Cornish,USC,WASH,3000,G,G/UTIL,USC@UW,42169162,Ryan Cornish (42169162),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Amarion Dickerson,USC,WASH,3800,G/F,G/F/UTIL,USC@UW,42168781,Amarion Dickerson (42168781),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Myles Rice,MD,WISC,3700,G,G/UTIL,UMD@WISC,42168794,Myles Rice (42168794),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Lathan Sommerville,WASH,USC,3800,F,F/UTIL,USC@UW,42168775,Lathan Sommerville (42168775),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Liam Murphy,PURDUE,NW,3000,F,F/UTIL,PUR@NW,42169015,Liam Murphy (42169015),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Braden Pierce,VILL,DEPAUL,3100,F,F/UTIL,VU@DPU,42168873,Braden Pierce (42168873),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Zach Kinziger,WISC,MD,3000,G,G/UTIL,UMD@WISC,42169155,Zach Kinziger (42169155),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Pharrel Payne,MD,WISC,8000,F,F/UTIL,UMD@WISC,42168539,Pharrel Payne (42168539),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+B.J. Edwards,SMU,MIA-FL,7400,G,G/UTIL,MIA@SMU,42168569,B.J. Edwards (42168569),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+JJ White,BAYLOR,HOU,4600,G,G/UTIL,BAY@UH,42168708,JJ White (42168708),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Amsal Delalic,DEPAUL,VILL,3000,G,G/UTIL,VU@DPU,42168928,Amsal Delalic (42168928),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Andre Iguodala II,BAYLOR,HOU,3000,G/F,G/F/UTIL,BAY@UH,42168984,Andre Iguodala II (42168984),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Brit Burden,USC,WASH,3000,F,F/UTIL,USC@UW,42168968,Brit Burden (42168968),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Bryce Jackson,HOU,BAYLOR,3000,G,G/UTIL,BAY@UH,42169063,Bryce Jackson (42169063),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Cedric Lath,HOU,BAYLOR,3000,F,F/UTIL,BAY@UH,42169033,Cedric Lath (42169033),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Christian Nitu,WASH,USC,3000,F,F/UTIL,USC@UW,42168920,Christian Nitu (42168920),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Desmond Claude,WASH,USC,3000,G,G/UTIL,USC@UW,42168902,Desmond Claude (42168902),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Isaiah Medina,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168926,Isaiah Medina (42168926),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+JJ Mandaquit,WASH,USC,3000,G,G/UTIL,USC@UW,42168904,JJ Mandaquit (42168904),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+James Goodis,BAYLOR,HOU,3000,G,G/UTIL,BAY@UH,42169065,James Goodis (42169065),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jasen Lopez,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42168889,Jasen Lopez (42168889),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jasir Rencher,WASH,USC,3000,F,F/UTIL,USC@UW,42168906,Jasir Rencher (42168906),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jeremy Lorenz,DEPAUL,VILL,3000,F,F/UTIL,VU@DPU,42168922,Jeremy Lorenz (42168922),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jordan Rayford,IND,MINN,3000,G,G/UTIL,MINN@IU,42168934,Jordan Rayford (42168934),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Juslin Bodo Bodo,BAYLOR,HOU,3000,F,F/UTIL,BAY@UH,42168987,Juslin Bodo Bodo (42168987),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Kordel Jefferson,HOU,BAYLOR,3000,G,G/UTIL,BAY@UH,42168918,Kordel Jefferson (42168918),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Lukas Sotell,MD,WISC,3000,G,G/UTIL,UMD@WISC,42169085,Lukas Sotell (42169085),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Mady Traore,WASH,USC,3000,F,F/UTIL,USC@UW,42169061,Mady Traore (42169061),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Maikcol Perez,BAYLOR,HOU,3000,F,F/UTIL,BAY@UH,42168991,Maikcol Perez (42168991),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Marcus Allen,MIA-FL,SMU,3000,G/F,G/F/UTIL,MIA@SMU,42169159,Marcus Allen (42169159),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Mayo Soyoye,BAYLOR,HOU,3000,F,F/UTIL,BAY@UH,42168989,Mayo Soyoye (42168989),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Rakease Passmore,MD,WISC,3000,G,G/UTIL,UMD@WISC,42168952,Rakease Passmore (42168952),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Rodney Rice,USC,WASH,3000,G,G/UTIL,USC@UW,42168950,Rodney Rice (42168950),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Treyvon Maddox,MIA-FL,SMU,3000,F,F/UTIL,MIA@SMU,42169170,Treyvon Maddox (42169170),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Wade Chiddick,VILL,DEPAUL,3000,G,G/UTIL,VU@DPU,42169021,Wade Chiddick (42169021),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Will Kuykendall,BAYLOR,HOU,3000,G,G/UTIL,BAY@UH,42169145,Will Kuykendall (42169145),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Xavier Osceola,FLAST,PITT,3000,G,G/UTIL,FSU@PITT,42169139,Xavier Osceola (42169139),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Darius Acuff,ARK,TEX,9900,G,G/UTIL,TEX@ARK,42168490,Darius Acuff Jr. (42168490),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Nigel James,MARQ,PROV,10000,G,G/UTIL,MARQ@PROV,42168488,Nigel James Jr. (42168488),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jaron Pierre,SMU,MIA-FL,7300,G,G/UTIL,MIA@SMU,42168573,Jaron Pierre Jr. (42168573),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Robert McCray,FLAST,PITT,8300,G,G/UTIL,FSU@PITT,42168524,Robert McCray V (42168524),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Billy Richmond,ARK,TEX,8100,G/F,G/F/UTIL,TEX@ARK,42168532,Billy Richmond III (42168532),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Wesley Yates,WASH,USC,5400,G,G/UTIL,USC@UW,42168656,Wesley Yates III (42168656),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Chris Cenac,HOU,BAYLOR,6300,F,F/UTIL,BAY@UH,42168612,Chris Cenac Jr. (42168612),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Ernest Udeh,MIA-FL,SMU,7400,F,F/UTIL,MIA@SMU,42168565,Ernest Udeh Jr. (42168565),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Corey Floyd,PROV,MARQ,4200,G,G/UTIL,MARQ@PROV,42168735,Corey Floyd Jr. (42168735),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Barry Dunning,PITT,FLAST,6700,G/F,G/F/UTIL,FSU@PITT,42168597,Barry Dunning Jr. (42168597),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Isaac Williams,BAYLOR,HOU,5600,G,G/UTIL,BAY@UH,42168642,Isaac Williams IV (42168642),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Jerry Easter,USC,WASH,3900,G,G/UTIL,USC@UW,42168769,Jerry Easter II (42168769),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Dan Skillings,BAYLOR,HOU,4600,G,G/UTIL,BAY@UH,42168706,Dan Skillings Jr. (42168706),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Michael Phillips,MARQ,PROV,3000,F,F/UTIL,MARQ@PROV,42169045,Michael Phillips II (42169045),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Ramon Walker,HOU,BAYLOR,3000,G,G/UTIL,BAY@UH,42168916,Ramon Walker Jr. (42168916),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Declan Duru,TEX,ARK,3000,F,F/UTIL,TEX@ARK,42169017,Declan Duru Jr. (42169017),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+EJ Neal,USC,WASH,3000,G,G/UTIL,USC@UW,42169109,EJ Neal Jr. (42169109),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Billy White,SMU,MIA-FL,3000,F,F/UTIL,MIA@SMU,42168995,Billy White III (42168995),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Antione West,PURDUE,NW,3000,G,G/UTIL,PUR@NW,42169087,Antione West Jr. (42169087),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Terrance Williams,USC,WASH,3900,F,F/UTIL,USC@UW,42168763,Terrance Williams II (42168763),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Anthony Batson,STAN,ND,3000,G,G/UTIL,STAN@ND,42168966,Anthony Batson Jr. (42168966),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Chansey Willis,MINN,IND,3000,G,G/UTIL,MINN@IU,42169071,Chansey Willis Jr (42169071),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+George Turkson,MD,WISC,3000,G/F,G/F/UTIL,UMD@WISC,42168891,George Turkson Jr. (42168891),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+John Laboy,MIA-FL,SMU,3000,G,G/UTIL,MIA@SMU,42169105,John Laboy II (42169105),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Mark Zachery,ND,STAN,3000,G,G/UTIL,STAN@ND,42169055,Mark Zachery IV (42169055),2026-03-04,main,,local_dk_slate_import:2026-03-04:main
+Styles Phipps,PEPPER,POR,8400,G,G/UTIL,PEP@POR,42177370,Styles Phipps (42177370),2026-03-05,main,,dk_import:2026-03-05:main
+Rowan Brumbaugh,TULANE,TEMPLE,8900,G,G/UTIL,TUL@TEMP,42177360,Rowan Brumbaugh (42177360),2026-03-05,main,,dk_import:2026-03-05:main
+David Green,TULSA,ECU,9200,F,F/UTIL,TLSA@ECU,42177354,David Green (42177354),2026-03-05,main,,dk_import:2026-03-05:main
+Aaron Clark,PEPPER,POR,7200,G,G/UTIL,PEP@POR,42177404,Aaron Clark (42177404),2026-03-05,main,,dk_import:2026-03-05:main
+Jan Vide,LYMNT,SD,6200,G,G/UTIL,SD@LYM,42177446,Jan Vide (42177446),2026-03-05,main,,dk_import:2026-03-05:main
+Tylen Riley,TULSA,ECU,7700,G,G/UTIL,TLSA@ECU,42177384,Tylen Riley (42177384),2026-03-05,main,,dk_import:2026-03-05:main
+Stefan Cicic,PEPPER,POR,5400,F,F/UTIL,PEP@POR,42177483,Stefan Cicic (42177483),2026-03-05,main,,dk_import:2026-03-05:main
+Rodney Brown,LYMNT,SD,5500,G,G/UTIL,SD@LYM,42177477,Rodney Brown (42177477),2026-03-05,main,,dk_import:2026-03-05:main
+JT Pettigrew,VALPO,INST,7600,F,F/UTIL,INST@VALP,42177386,JT Pettigrew (42177386),2026-03-05,main,,dk_import:2026-03-05:main
+Curtis Williams Jr.,TULANE,TEMPLE,7300,G,G/UTIL,TUL@TEMP,42177398,Curtis Williams Jr. (42177398),2026-03-05,main,,dk_import:2026-03-05:main
+Ade Popoola,TULSA,ECU,6500,G,G/UTIL,TLSA@ECU,42177432,Ade Popoola (42177432),2026-03-05,main,,dk_import:2026-03-05:main
+Miles Barnstable,TULSA,ECU,7100,G,G/UTIL,TLSA@ECU,42177408,Miles Barnstable (42177408),2026-03-05,main,,dk_import:2026-03-05:main
+Tariq Francis,RUT,MSU,8000,G,G/UTIL,RU@MSU,42177378,Tariq Francis (42177378),2026-03-05,main,,dk_import:2026-03-05:main
+Gavin Griffiths,TEMPLE,TULANE,6700,G,G/UTIL,TUL@TEMP,42177422,Gavin Griffiths (42177422),2026-03-05,main,,dk_import:2026-03-05:main
+Rakim Chaney,VALPO,INST,7500,G,G/UTIL,INST@VALP,42177392,Rakim Chaney (42177392),2026-03-05,main,,dk_import:2026-03-05:main
+Aiden Tobiason,TEMPLE,TULANE,8500,G,G/UTIL,TUL@TEMP,42177368,Aiden Tobiason (42177368),2026-03-05,main,,dk_import:2026-03-05:main
+Asher Woods,TULANE,TEMPLE,6300,G,G/UTIL,TUL@TEMP,42177440,Asher Woods (42177440),2026-03-05,main,,dk_import:2026-03-05:main
+Javon Cooley,PEPPER,POR,4900,G/F,G/F/UTIL,PEP@POR,42177517,Javon Cooley (42177517),2026-03-05,main,,dk_import:2026-03-05:main
+Coen Carr,MSU,RUT,6800,F,F/UTIL,RU@MSU,42177418,Coen Carr (42177418),2026-03-05,main,,dk_import:2026-03-05:main
+Owen Dease,VALPO,INST,6400,F,F/UTIL,INST@VALP,42177436,Owen Dease (42177436),2026-03-05,main,,dk_import:2026-03-05:main
+Tyler Ringgold,TULANE,TEMPLE,6000,F,F/UTIL,TUL@TEMP,42177452,Tyler Ringgold (42177452),2026-03-05,main,,dk_import:2026-03-05:main
+Aaron McBride,LYMNT,SD,5700,F,F/UTIL,SD@LYM,42177467,Aaron McBride (42177467),2026-03-05,main,,dk_import:2026-03-05:main
+Shon Tupuola,VALPO,INST,5300,F,F/UTIL,INST@VALP,42177489,Shon Tupuola (42177489),2026-03-05,main,,dk_import:2026-03-05:main
+Brody Whitaker,VALPO,INST,5200,G,G/UTIL,INST@VALP,42177495,Brody Whitaker (42177495),2026-03-05,main,,dk_import:2026-03-05:main
+Yonatan Levy,PEPPER,POR,5200,F,F/UTIL,PEP@POR,42177499,Yonatan Levy (42177499),2026-03-05,main,,dk_import:2026-03-05:main
+Tyler Behrend,TULSA,ECU,6400,F,F/UTIL,TLSA@ECU,42177438,Tyler Behrend (42177438),2026-03-05,main,,dk_import:2026-03-05:main
+Justus McNair,VALPO,INST,4900,G,G/UTIL,INST@VALP,42177522,Justus McNair (42177522),2026-03-05,main,,dk_import:2026-03-05:main
+Masiah Gilyard,TEMPLE,TULANE,4700,G,G/UTIL,TUL@TEMP,42177528,Masiah Gilyard (42177528),2026-03-05,main,,dk_import:2026-03-05:main
+Jamichael Davis,RUT,MSU,6000,G,G/UTIL,RU@MSU,42177454,Jamichael Davis (42177454),2026-03-05,main,,dk_import:2026-03-05:main
+Kaden Powers,RUT,MSU,4200,G,G/UTIL,RU@MSU,42177558,Kaden Powers (42177558),2026-03-05,main,,dk_import:2026-03-05:main
+Jaylen Lawal,TULSA,ECU,4000,G,G/UTIL,TLSA@ECU,42177578,Jaylen Lawal (42177578),2026-03-05,main,,dk_import:2026-03-05:main
+AJ Thomas,LYMNT,SD,3400,G,G/UTIL,SD@LYM,42177634,AJ Thomas (42177634),2026-03-05,main,,dk_import:2026-03-05:main
+Emmanuel Ogbole,RUT,MSU,4000,F,F/UTIL,RU@MSU,42177576,Emmanuel Ogbole (42177576),2026-03-05,main,,dk_import:2026-03-05:main
+Ian Smikle,TULSA,ECU,3800,F,F/UTIL,TLSA@ECU,42177594,Ian Smikle (42177594),2026-03-05,main,,dk_import:2026-03-05:main
+Babatunde Durodola,TEMPLE,TULANE,4000,F,F/UTIL,TUL@TEMP,42177574,Babatunde Durodola (42177574),2026-03-05,main,,dk_import:2026-03-05:main
+Luke Rasmussen,TULANE,TEMPLE,4100,G,G/UTIL,TUL@TEMP,42177570,Luke Rasmussen (42177570),2026-03-05,main,,dk_import:2026-03-05:main
+Carter Hopoi,VALPO,INST,3900,F,F/UTIL,INST@VALP,42177586,Carter Hopoi (42177586),2026-03-05,main,,dk_import:2026-03-05:main
+Dylan Grant,RUT,MSU,5000,F,F/UTIL,RU@MSU,42177511,Dylan Grant (42177511),2026-03-05,main,,dk_import:2026-03-05:main
+Percy Daniels,TULANE,TEMPLE,3700,F,F/UTIL,TUL@TEMP,42177602,Percy Daniels (42177602),2026-03-05,main,,dk_import:2026-03-05:main
+Rokas Jocius,LYMNT,SD,3600,F,F/UTIL,SD@LYM,42177610,Rokas Jocius (42177610),2026-03-05,main,,dk_import:2026-03-05:main
+Scotty Middleton,TULANE,TEMPLE,6100,F,F/UTIL,TUL@TEMP,42177448,Scotty Middleton (42177448),2026-03-05,main,,dk_import:2026-03-05:main
+Josh Dalton,LYMNT,SD,3200,F,F/UTIL,SD@LYM,42177656,Josh Dalton (42177656),2026-03-05,main,,dk_import:2026-03-05:main
+Lino Mark,RUT,MSU,4800,G,G/UTIL,RU@MSU,42177524,Lino Mark (42177524),2026-03-05,main,,dk_import:2026-03-05:main
+Myles Rigsby,TULSA,ECU,3800,G,G/UTIL,TLSA@ECU,42177590,Myles Rigsby (42177590),2026-03-05,main,,dk_import:2026-03-05:main
+Rick Issanza,LYMNT,SD,3900,F,F/UTIL,SD@LYM,42177584,Rick Issanza (42177584),2026-03-05,main,,dk_import:2026-03-05:main
+Preston Phillips,PEPPER,POR,3000,F,F/UTIL,PEP@POR,42177731,Preston Phillips (42177731),2026-03-05,main,,dk_import:2026-03-05:main
+Isaiah Barnes,VALPO,INST,3200,G,G/UTIL,INST@VALP,42177662,Isaiah Barnes (42177662),2026-03-05,main,,dk_import:2026-03-05:main
+Tucker Tornatta,VALPO,INST,3000,F,F/UTIL,INST@VALP,42177791,Tucker Tornatta (42177791),2026-03-05,main,,dk_import:2026-03-05:main
+Luka Vudragovic,PEPPER,POR,3400,G,G/UTIL,PEP@POR,42177632,Luka Vudragovic (42177632),2026-03-05,main,,dk_import:2026-03-05:main
+Harun Zrno,RUT,MSU,3500,G,G/UTIL,RU@MSU,42177622,Harun Zrno (42177622),2026-03-05,main,,dk_import:2026-03-05:main
+Sader Servilus,VALPO,INST,3300,G,G/UTIL,INST@VALP,42177652,Sader Servilus (42177652),2026-03-05,main,,dk_import:2026-03-05:main
+KJ Greene,TULANE,TEMPLE,3300,G,G/UTIL,TUL@TEMP,42177650,KJ Greene (42177650),2026-03-05,main,,dk_import:2026-03-05:main
+Bryce Dortch,RUT,MSU,3200,F,F/UTIL,RU@MSU,42177660,Bryce Dortch (42177660),2026-03-05,main,,dk_import:2026-03-05:main
+David Mager,PEPPER,POR,3500,G,G/UTIL,PEP@POR,42177624,David Mager (42177624),2026-03-05,main,,dk_import:2026-03-05:main
+Leon Sifferlin,TULSA,ECU,3000,G,G/UTIL,TLSA@ECU,42177869,Leon Sifferlin (42177869),2026-03-05,main,,dk_import:2026-03-05:main
+Cam Wallace,TEMPLE,TULANE,3000,G,G/UTIL,TUL@TEMP,42177881,Cam Wallace (42177881),2026-03-05,main,,dk_import:2026-03-05:main
+Jael Martin,LYMNT,SD,3000,F,F/UTIL,SD@LYM,42177779,Jael Martin (42177779),2026-03-05,main,,dk_import:2026-03-05:main
+Connor Gal,TEMPLE,TULANE,3100,G,G/UTIL,TUL@TEMP,42177680,Connor Gal (42177680),2026-03-05,main,,dk_import:2026-03-05:main
+Nikola Radovanovic,PEPPER,POR,3000,F,F/UTIL,PEP@POR,42177781,Nikola Radovanovic (42177781),2026-03-05,main,,dk_import:2026-03-05:main
+Mohamed Keita,TEMPLE,TULANE,3000,F,F/UTIL,TUL@TEMP,42177787,Mohamed Keita (42177787),2026-03-05,main,,dk_import:2026-03-05:main
+Chris Nwuli,RUT,MSU,3000,F,F/UTIL,RU@MSU,42177797,Chris Nwuli (42177797),2026-03-05,main,,dk_import:2026-03-05:main
+Cooper Smith,LYMNT,SD,3000,G,G/UTIL,SD@LYM,42177825,Cooper Smith (42177825),2026-03-05,main,,dk_import:2026-03-05:main
+Vasilije Kuridza,TULANE,TEMPLE,3000,F,F/UTIL,TUL@TEMP,42177747,Vasilije Kuridza (42177747),2026-03-05,main,,dk_import:2026-03-05:main
+Vladimir Sudar,PEPPER,POR,3000,F,F/UTIL,PEP@POR,42177783,Vladimir Sudar (42177783),2026-03-05,main,,dk_import:2026-03-05:main
+Kevin Carney,LYMNT,SD,3000,G,G/UTIL,SD@LYM,42177815,Kevin Carney (42177815),2026-03-05,main,,dk_import:2026-03-05:main
+Robert Moore,TULANE,TEMPLE,3000,G,G/UTIL,TUL@TEMP,42177859,Robert Moore (42177859),2026-03-05,main,,dk_import:2026-03-05:main
+Pasha Shemirani,PEPPER,POR,3000,F,F/UTIL,PEP@POR,42177775,Pasha Shemirani (42177775),2026-03-05,main,,dk_import:2026-03-05:main
+Jake Shapiro,TULANE,TEMPLE,3000,G,G/UTIL,TUL@TEMP,42177857,Jake Shapiro (42177857),2026-03-05,main,,dk_import:2026-03-05:main
+Luke Cronin,TULANE,TEMPLE,3000,F,F/UTIL,TUL@TEMP,42177745,Luke Cronin (42177745),2026-03-05,main,,dk_import:2026-03-05:main
+Davion Bradford,TULANE,TEMPLE,3000,F,F/UTIL,TUL@TEMP,42177751,Davion Bradford (42177751),2026-03-05,main,,dk_import:2026-03-05:main
+Camden Webster,VALPO,INST,3000,G,G/UTIL,INST@VALP,42177819,Camden Webster (42177819),2026-03-05,main,,dk_import:2026-03-05:main
+Spencer Mahoney,TEMPLE,TULANE,3000,F,F/UTIL,TUL@TEMP,42177769,Spencer Mahoney (42177769),2026-03-05,main,,dk_import:2026-03-05:main
+Cal Conroy,TULSA,ECU,3000,G,G/UTIL,TLSA@ECU,42177865,Cal Conroy (42177865),2026-03-05,main,,dk_import:2026-03-05:main
+Kyonte Thomas,VALPO,INST,3000,G,G/UTIL,INST@VALP,42177893,Kyonte Thomas (42177893),2026-03-05,main,,dk_import:2026-03-05:main
+Gevonte Ware,RUT,MSU,3000,F,F/UTIL,RU@MSU,42177907,Gevonte Ware (42177907),2026-03-05,main,,dk_import:2026-03-05:main
+Joe Vick,VALPO,INST,3000,G,G/UTIL,INST@VALP,42177817,Joe Vick (42177817),2026-03-05,main,,dk_import:2026-03-05:main
+Brennan Walton,MSU,RUT,3000,F,F/UTIL,RU@MSU,42177763,Brennan Walton (42177763),2026-03-05,main,,dk_import:2026-03-05:main
+Carter Benton,TULSA,ECU,3000,G,G/UTIL,TLSA@ECU,42177829,Carter Benton (42177829),2026-03-05,main,,dk_import:2026-03-05:main
+Josiah Moore,TULANE,TEMPLE,3100,G,G/UTIL,TUL@TEMP,42177686,Josiah Moore (42177686),2026-03-05,main,,dk_import:2026-03-05:main
+Nick Sanders,MSU,RUT,3000,G,G/UTIL,RU@MSU,42177871,Nick Sanders (42177871),2026-03-05,main,,dk_import:2026-03-05:main
+Anto Balian,PEPPER,POR,3000,G,G/UTIL,PEP@POR,42177801,Anto Balian (42177801),2026-03-05,main,,dk_import:2026-03-05:main
+Ty Virgil,PEPPER,POR,3000,G,G/UTIL,PEP@POR,42177803,Ty Virgil (42177803),2026-03-05,main,,dk_import:2026-03-05:main
+Marley Zeller,LYMNT,SD,3000,G,G/UTIL,SD@LYM,42177827,Marley Zeller (42177827),2026-03-05,main,,dk_import:2026-03-05:main
+Tanner Thomas,LYMNT,SD,3000,G,G/UTIL,SD@LYM,42177813,Tanner Thomas (42177813),2026-03-05,main,,dk_import:2026-03-05:main
+Gregg Glenn III,TULANE,TEMPLE,3000,F,F/UTIL,TUL@TEMP,42177735,Gregg Glenn III (42177735),2026-03-05,main,,dk_import:2026-03-05:main
+Joseph Teich,TULANE,TEMPLE,3000,G,G/UTIL,TUL@TEMP,42177849,Joseph Teich (42177849),2026-03-05,main,,dk_import:2026-03-05:main
+Jayden Watson,VALPO,INST,3000,F,F/UTIL,INST@VALP,42177720,Jayden Watson (42177720),2026-03-05,main,,dk_import:2026-03-05:main
+Kobe Walker,VALPO,INST,3000,F,F/UTIL,INST@VALP,42177722,Kobe Walker (42177722),2026-03-05,main,,dk_import:2026-03-05:main
+Nick Lombardi,VALPO,INST,3000,G,G/UTIL,INST@VALP,42177821,Nick Lombardi (42177821),2026-03-05,main,,dk_import:2026-03-05:main
+Colin Walton,MSU,RUT,3000,F,F/UTIL,RU@MSU,42177765,Colin Walton (42177765),2026-03-05,main,,dk_import:2026-03-05:main
+Jesse McCulloch,MSU,RUT,3000,F,F/UTIL,RU@MSU,42177793,Jesse McCulloch (42177793),2026-03-05,main,,dk_import:2026-03-05:main
+Max Fradkin,RUT,MSU,3000,G,G/UTIL,RU@MSU,42177833,Max Fradkin (42177833),2026-03-05,main,,dk_import:2026-03-05:main
+Denham Wojcik,MSU,RUT,3000,G,G/UTIL,RU@MSU,42177895,Denham Wojcik (42177895),2026-03-05,main,,dk_import:2026-03-05:main
+Denis Badalau,RUT,MSU,3100,F,F/UTIL,RU@MSU,42177670,Denis Badalau (42177670),2026-03-05,main,,dk_import:2026-03-05:main
+Jalen Shelley,LYMNT,SD,5900,F,F/UTIL,SD@LYM,42177456,Jalen Shelley (42177456),2026-03-05,main,,dk_import:2026-03-05:main
+Danilo Dozic,PEPPER,POR,5100,F,F/UTIL,PEP@POR,42177507,Danilo Dozic (42177507),2026-03-05,main,,dk_import:2026-03-05:main
+Romad Dean,TULSA,ECU,4200,F,F/UTIL,TLSA@ECU,42177562,Romad Dean (42177562),2026-03-05,main,,dk_import:2026-03-05:main
+Nakyel Shelton,LYMNT,SD,3300,G,G/UTIL,SD@LYM,42177642,Nakyel Shelton (42177642),2026-03-05,main,,dk_import:2026-03-05:main
+A.J. Smith,TEMPLE,TULANE,3000,G,G/UTIL,TUL@TEMP,42177696,AJ Smith (42177696),2026-03-05,main,,dk_import:2026-03-05:main
+Divine Ugochukwu,MSU,RUT,3000,G,G/UTIL,RU@MSU,42177709,Divine Ugochukwu (42177709),2026-03-05,main,,dk_import:2026-03-05:main
+Dorian Jones,RUT,MSU,3000,G,G/UTIL,RU@MSU,42177911,Dorian Jones (42177911),2026-03-05,main,,dk_import:2026-03-05:main
+George Tupy,LYMNT,SD,3000,F,F/UTIL,SD@LYM,42177739,George Tupy (42177739),2026-03-05,main,,dk_import:2026-03-05:main
+Kaleb Glenn,MSU,RUT,3000,F,F/UTIL,RU@MSU,42177711,Kaleb Glenn (42177711),2026-03-05,main,,dk_import:2026-03-05:main
+Jeremy Fears,MSU,RUT,9600,G,G/UTIL,RU@MSU,42177350,Jeremy Fears Jr. (42177350),2026-03-05,main,,dk_import:2026-03-05:main
+Myron Amey,LYMNT,SD,5100,G,G/UTIL,SD@LYM,42177503,Myron Amey Jr. (42177503),2026-03-05,main,,dk_import:2026-03-05:main
+Morez Johnson,MICH,IOWA,7200,F,F/UTIL,MICH@IOWA,42177402,Morez Johnson Jr. (42177402),2026-03-05,main,,dk_import:2026-03-05:main
+Leon Bond,UNI,EVAN,6700,G/F,G/F/UTIL,EVAN@UNI,42177424,Leon Bond III (42177424),2026-03-05,main,,dk_import:2026-03-05:main
+Curtis Givens,MEM,USF,6100,G,G/UTIL,USF@MEM,42177450,Curtis Givens III (42177450),2026-03-05,main,,dk_import:2026-03-05:main
+Tim Moore,SD,LYMNT,5800,F,F/UTIL,SD@LYM,42177465,Tim Moore Jr. (42177465),2026-03-05,main,,dk_import:2026-03-05:main
+Darren Buchanan,RUT,MSU,5700,G,G/UTIL,RU@MSU,42177469,Darren Buchanan Jr. (42177469),2026-03-05,main,,dk_import:2026-03-05:main
+Roddy Gayle,MICH,IOWA,3700,G,G/UTIL,MICH@IOWA,42177598,Roddy Gayle Jr. (42177598),2026-03-05,main,,dk_import:2026-03-05:main
+Mark Brown,VALPO,INST,3000,G,G/UTIL,INST@VALP,42177891,Mark Brown Jr. (42177891),2026-03-05,main,,dk_import:2026-03-05:main
+Ayuba Bryant,TEMPLE,TULANE,3000,F,F/UTIL,TUL@TEMP,42177795,Ayuba Bryant Jr. (42177795),2026-03-05,main,,dk_import:2026-03-05:main
+Marlon Barnes,EVAN,UNI,3000,F,F/UTIL,EVAN@UNI,42177743,Marlon Barnes Jr. (42177743),2026-03-05,main,,dk_import:2026-03-05:main
+KJ Martin,TULSA,ECU,3100,F,F/UTIL,TLSA@ECU,42177674,KJ Martin Jr. (42177674),2026-03-05,main,,dk_import:2026-03-05:main
+Kjay Bradley,SD,LYMNT,3000,G,G/UTIL,SD@LYM,42177805,Kjay Bradley Jr. (42177805),2026-03-05,main,,dk_import:2026-03-05:main
+Olin Chamberlain,TEMPLE,TULANE,3000,G,G/UTIL,TUL@TEMP,42177823,Olin Chamberlain Jr. (42177823),2026-03-05,main,,dk_import:2026-03-05:main
+Leo Amari,EVAN,UNI,3000,G,G/UTIL,EVAN@UNI,42177841,Leo Amari IV (42177841),2026-03-05,main,,dk_import:2026-03-05:main
+Zachary Davis,MEM,USF,3800,G,G/UTIL,USF@MEM,42177596,Zach Davis (42177596),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Derr Ford,TEMPLE,TULANE,8600,G,G/UTIL,TUL@TEMP,42177366,Derrian Ford (42177366),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Jord Mason,TEMPLE,TULANE,6900,F,G/UTIL,TUL@TEMP,42177414,Jordan Mason (42177414),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Jhermaine Webb,POR,PEPPER,5500,F,F/UTIL,PEP@POR,42177479,Jermaine Ballisager Webb (42177479),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Jaai Felt,TEMPLE,TULANE,4500,F,F/UTIL,TUL@TEMP,42177540,Jamai Felt (42177540),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Dev Haid,USF,MEM,3900,G,G/UTIL,USF@MEM,42177588,Devin Haid (42177588),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Pavle Stasic,PEPPER,POR,3300,G,F/UTIL,PEP@POR,42177646,Pavle Stosic (42177646),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Byae Fell,RUT,MSU,3000,F,F/UTIL,RU@MSU,42177903,Baye Fall (42177903),2026-03-05,main,,manual_alias_review:2026-03-05:main
+Terrence Ford Jr.,TULSA,ECU,3000,G,G/UTIL,TLSA@ECU,42177847,Terrance Ford Jr. (42177847),2026-03-05,main,,manual_alias_review:2026-03-05:main

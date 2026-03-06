@@ -12,7 +12,7 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from .cbb_api_service import load_registry, load_rotowire_players_for_slate
+from .cbb_api_service import ensure_full_registry_coverage, resolve_rotowire_slate
 from .cbb_dk_optimizer import (
     build_dk_upload_csv,
     build_player_pool,
@@ -20,9 +20,6 @@ from .cbb_dk_optimizer import (
     lineups_slots_frame,
     lineups_summary_frame,
 )
-from .cbb_dk_registry import build_rotowire_dk_slate
-
-
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_JOBS_ROOT = REPO_ROOT / "data" / "api_jobs"
 
@@ -376,36 +373,25 @@ def run_lineup_job_request(
     rotowire_cookie = request.get("rotowire_cookie")
 
     progress(5, "Loading RotoWire slate")
-    rotowire_df, slate_meta = load_rotowire_players_for_slate(
+    resolved_bundle = resolve_rotowire_slate(
         selected_date=selected_date,
+        slate_key=slate_key,
         contest_type=rotowire_contest_type,
         slate_name=rotowire_slate_name,
         slate_id=request.get("rotowire_slate_id"),
         site_id=int(request.get("site_id") or 1),
         cookie_header=str(rotowire_cookie) if rotowire_cookie else None,
     )
+    rotowire_df = resolved_bundle.get("rotowire_df")
+    slate_meta = dict(resolved_bundle.get("slate") or {})
     if rotowire_df.empty:
         raise RuntimeError("No RotoWire players returned for selected slate.")
 
     progress(14, "Resolving DK IDs from registry")
-    registry_df = load_registry()
-    resolved_slate, resolution_df, coverage = build_rotowire_dk_slate(
-        rotowire_df=rotowire_df,
-        registry_df=registry_df,
-        slate_date=selected_date,
-        slate_key=slate_key,
-    )
-    if not bool((coverage or {}).get("fully_resolved")):
-        unresolved = resolution_df.loc[
-            resolution_df["dk_resolution_status"] != "resolved",
-            ["player_name", "team_abbr", "dk_resolution_status", "dk_match_reason"],
-        ].head(25)
-        unresolved_rows = unresolved.to_dict(orient="records")
-        raise RuntimeError(
-            "DK registry resolution incomplete. Resolve mismatches first. "
-            f"coverage={coverage.get('coverage_pct')} unresolved={coverage.get('unresolved_players')} "
-            f"conflicts={coverage.get('conflict_players')} sample={unresolved_rows}"
-        )
+    resolved_slate = resolved_bundle.get("resolved_slate_df")
+    resolution_df = resolved_bundle.get("resolution_df")
+    coverage = dict(resolved_bundle.get("coverage") or {})
+    ensure_full_registry_coverage(coverage, resolution_df)
 
     progress(22, "Building player pool")
     pool_df = build_player_pool(

@@ -133,9 +133,11 @@ def merge_manual_overrides(existing_frame: pd.DataFrame, new_frame: pd.DataFrame
     return _dedupe_manual_overrides(merged)
 
 
-def load_registry(
+def _build_registry_from_sources(
+    *,
     draftkings_dir: str | Path | None = None,
     manual_overrides_path: str | Path | None = None,
+    manual_frame: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     draftkings_base = Path(draftkings_dir) if draftkings_dir else DEFAULT_DRAFTKINGS_DIR
     history_frames: list[pd.DataFrame] = []
@@ -144,7 +146,7 @@ def load_registry(
     if local_history is not None and not local_history.empty:
         history_frames.append(local_history)
 
-    manual_df = load_manual_overrides(manual_overrides_path)
+    manual_df = manual_frame.copy() if manual_frame is not None else load_manual_overrides(manual_overrides_path)
     manual_history = manual_overrides_to_history_frame(manual_df)
     if manual_history is not None and not manual_history.empty:
         history_frames.append(manual_history)
@@ -155,6 +157,16 @@ def load_registry(
     if history.empty:
         return pd.DataFrame()
     return build_dk_identity_registry(history)
+
+
+def load_registry(
+    draftkings_dir: str | Path | None = None,
+    manual_overrides_path: str | Path | None = None,
+) -> pd.DataFrame:
+    return _build_registry_from_sources(
+        draftkings_dir=draftkings_dir,
+        manual_overrides_path=manual_overrides_path,
+    )
 
 
 def list_rotowire_slates_for_date(
@@ -226,6 +238,89 @@ def load_rotowire_players_for_slate(
     return normalized, meta
 
 
+def format_registry_coverage_error(
+    coverage: dict[str, Any] | None,
+    resolution_df: pd.DataFrame | None,
+    *,
+    sample_limit: int = 25,
+) -> str:
+    unresolved_rows: list[dict[str, Any]] = []
+    if isinstance(resolution_df, pd.DataFrame) and not resolution_df.empty:
+        unresolved = resolution_df.loc[
+            resolution_df["dk_resolution_status"] != "resolved",
+            ["player_name", "team_abbr", "dk_resolution_status", "dk_match_reason"],
+        ].head(max(1, int(sample_limit)))
+        unresolved_rows = unresolved.to_dict(orient="records")
+    coverage_dict = dict(coverage or {})
+    return (
+        "DK registry resolution incomplete. Resolve mismatches first. "
+        f"coverage={coverage_dict.get('coverage_pct')} "
+        f"unresolved={coverage_dict.get('unresolved_players')} "
+        f"conflicts={coverage_dict.get('conflict_players')} "
+        f"sample={unresolved_rows}"
+    )
+
+
+def resolve_rotowire_slate(
+    *,
+    selected_date: date | str,
+    slate_key: str = "main",
+    contest_type: str = "Classic",
+    slate_name: str = "All",
+    slate_id: int | None = None,
+    site_id: int = 1,
+    cookie_header: str | None = None,
+    draftkings_dir: str | Path | None = None,
+    manual_overrides_path: str | Path | None = None,
+    manual_overrides_frame: pd.DataFrame | None = None,
+) -> dict[str, Any]:
+    rotowire_df, slate_meta = load_rotowire_players_for_slate(
+        selected_date=selected_date,
+        contest_type=contest_type,
+        slate_name=slate_name,
+        slate_id=slate_id,
+        site_id=site_id,
+        cookie_header=cookie_header,
+    )
+    registry_df = _build_registry_from_sources(
+        draftkings_dir=draftkings_dir,
+        manual_overrides_path=manual_overrides_path,
+        manual_frame=manual_overrides_frame,
+    )
+    resolved_slate_df, resolution_df, coverage = build_rotowire_dk_slate(
+        rotowire_df=rotowire_df,
+        registry_df=registry_df,
+        slate_date=pd.to_datetime(selected_date, errors="coerce").date().isoformat(),
+        slate_key=slate_key,
+    )
+    unresolved_df = resolution_df.loc[resolution_df["dk_resolution_status"] != "resolved"].copy()
+    coverage_error = (
+        ""
+        if bool((coverage or {}).get("fully_resolved"))
+        else format_registry_coverage_error(coverage, resolution_df)
+    )
+    return {
+        "slate": dict(slate_meta or {}),
+        "coverage": dict(coverage or {}),
+        "coverage_error": coverage_error,
+        "rotowire_df": rotowire_df,
+        "resolved_slate_df": resolved_slate_df,
+        "resolution_df": resolution_df,
+        "unresolved_players": unresolved_df.to_dict(orient="records"),
+    }
+
+
+def ensure_full_registry_coverage(
+    coverage: dict[str, Any] | None,
+    resolution_df: pd.DataFrame | None,
+    *,
+    sample_limit: int = 25,
+) -> None:
+    if bool((coverage or {}).get("fully_resolved")):
+        return
+    raise RuntimeError(format_registry_coverage_error(coverage, resolution_df, sample_limit=sample_limit))
+
+
 def build_registry_coverage(
     *,
     selected_date: date | str,
@@ -238,27 +333,42 @@ def build_registry_coverage(
     draftkings_dir: str | Path | None = None,
     manual_overrides_path: str | Path | None = None,
 ) -> dict[str, Any]:
-    rotowire_df, slate_meta = load_rotowire_players_for_slate(
+    resolved = resolve_rotowire_slate(
         selected_date=selected_date,
+        slate_key=slate_key,
         contest_type=contest_type,
         slate_name=slate_name,
         slate_id=slate_id,
         site_id=site_id,
         cookie_header=cookie_header,
+        draftkings_dir=draftkings_dir,
+        manual_overrides_path=manual_overrides_path,
     )
-    registry_df = load_registry(draftkings_dir=draftkings_dir, manual_overrides_path=manual_overrides_path)
-    _, resolution_df, coverage = build_rotowire_dk_slate(
-        rotowire_df=rotowire_df,
-        registry_df=registry_df,
-        slate_date=pd.to_datetime(selected_date, errors="coerce").date().isoformat(),
-        slate_key=slate_key,
-    )
-    unresolved = resolution_df.loc[resolution_df["dk_resolution_status"] != "resolved"].copy()
     return {
-        "slate": slate_meta,
-        "coverage": dict(coverage or {}),
-        "unresolved_players": unresolved.to_dict(orient="records"),
+        "slate": dict(resolved.get("slate") or {}),
+        "coverage": dict(resolved.get("coverage") or {}),
+        "unresolved_players": list(resolved.get("unresolved_players") or []),
     }
+
+
+def _default_roster_position(value: Any) -> str:
+    position = str(value or "").strip().upper()
+    if not position:
+        return ""
+    if position.startswith("G"):
+        return "G/UTIL"
+    if position.startswith("F"):
+        return "F/UTIL"
+    if position.startswith("C"):
+        return "C/UTIL"
+    return position
+
+
+def _extract_dk_id_from_name_plus_id(value: Any) -> str:
+    match = re.search(r"\(([^()]+)\)\s*$", str(value or "").strip())
+    if not match:
+        return ""
+    return str(match.group(1) or "").strip()
 
 
 def import_dk_slate_overrides(
@@ -276,21 +386,21 @@ def import_dk_slate_overrides(
     persist: bool = True,
 ) -> dict[str, Any]:
     dk_slate_df = pd.read_csv(io.BytesIO(dk_slate_csv_bytes))
-    rotowire_df, slate_meta = load_rotowire_players_for_slate(
+    resolved_before = resolve_rotowire_slate(
         selected_date=selected_date,
+        slate_key=slate_key,
         contest_type=contest_type,
         slate_name=slate_name,
         slate_id=slate_id,
         site_id=site_id,
         cookie_header=cookie_header,
+        draftkings_dir=draftkings_dir,
+        manual_overrides_path=manual_overrides_path,
     )
-    registry_before = load_registry(draftkings_dir=draftkings_dir, manual_overrides_path=manual_overrides_path)
-    _, resolution_before, coverage_before = build_rotowire_dk_slate(
-        rotowire_df=rotowire_df,
-        registry_df=registry_before,
-        slate_date=pd.to_datetime(selected_date, errors="coerce").date().isoformat(),
-        slate_key=slate_key,
-    )
+    rotowire_df = resolved_before.get("rotowire_df")
+    slate_meta = dict(resolved_before.get("slate") or {})
+    resolution_before = resolved_before.get("resolution_df")
+    coverage_before = dict(resolved_before.get("coverage") or {})
 
     derived_overrides, still_unresolved, derive_meta = derive_manual_overrides_from_dk_slate(
         rotowire_df=rotowire_df,
@@ -308,13 +418,20 @@ def import_dk_slate_overrides(
         written = write_manual_overrides(merged_manual, manual_overrides_path)
         written_path = str(written)
 
-    registry_after = load_registry(draftkings_dir=draftkings_dir, manual_overrides_path=manual_overrides_path)
-    _, resolution_after, coverage_after = build_rotowire_dk_slate(
-        rotowire_df=rotowire_df,
-        registry_df=registry_after,
-        slate_date=pd.to_datetime(selected_date, errors="coerce").date().isoformat(),
+    resolved_after = resolve_rotowire_slate(
+        selected_date=selected_date,
         slate_key=slate_key,
+        contest_type=contest_type,
+        slate_name=slate_name,
+        slate_id=slate_id,
+        site_id=site_id,
+        cookie_header=cookie_header,
+        draftkings_dir=draftkings_dir,
+        manual_overrides_path=manual_overrides_path,
+        manual_overrides_frame=merged_manual,
     )
+    resolution_after = resolved_after.get("resolution_df")
+    coverage_after = dict(resolved_after.get("coverage") or {})
 
     return {
         "slate": slate_meta,
@@ -331,6 +448,105 @@ def import_dk_slate_overrides(
         "derivation_meta": dict(derive_meta or {}),
         "persisted_manual_overrides_path": written_path,
         "persisted": bool(persist),
+    }
+
+
+def save_manual_resolution_overrides(
+    *,
+    overrides_frame: pd.DataFrame | list[dict[str, Any]],
+    selected_date: date | str,
+    slate_key: str = "main",
+    manual_overrides_path: str | Path | None = None,
+    source_name: str | None = None,
+    reason_default: str = "manual_alias_review",
+) -> dict[str, Any]:
+    frame = overrides_frame.copy() if isinstance(overrides_frame, pd.DataFrame) else pd.DataFrame(overrides_frame or [])
+    if frame.empty:
+        return {
+            "saved_override_count": 0,
+            "persisted_manual_overrides_path": None,
+            "saved_overrides": [],
+        }
+
+    out = frame.copy()
+    empty_series = pd.Series([""] * len(out), index=out.index, dtype="object")
+
+    def _text_col(name: str) -> pd.Series:
+        return out.get(name, empty_series).where(pd.notna(out.get(name, empty_series)), "").astype(str).str.strip()
+
+    out["player_name"] = _text_col("player_name")
+    out["team_abbr"] = _text_col("team_abbr").str.upper()
+    out["opp_abbr"] = _text_col("opp_abbr").str.upper()
+    out["position"] = _text_col("position").str.upper()
+    out["roster_position"] = _text_col("roster_position").str.upper()
+    out["game_key"] = _text_col("game_key").str.upper()
+    out["dk_id"] = _text_col("dk_id")
+    out["name_plus_id"] = _text_col("name_plus_id")
+    out["reason"] = _text_col("reason")
+    out["source_name"] = _text_col("source_name")
+    out["salary"] = pd.to_numeric(out.get("salary"), errors="coerce")
+
+    missing_position = out["position"] == ""
+    out.loc[missing_position, "position"] = out.loc[missing_position, "roster_position"].str.split("/", n=1).str[0]
+
+    missing_roster = out["roster_position"] == ""
+    out.loc[missing_roster, "roster_position"] = out.loc[missing_roster, "position"].map(_default_roster_position)
+
+    missing_dk_id = out["dk_id"] == ""
+    out.loc[missing_dk_id, "dk_id"] = out.loc[missing_dk_id, "name_plus_id"].map(_extract_dk_id_from_name_plus_id)
+
+    missing_name_plus_id = out["name_plus_id"] == ""
+    out.loc[missing_name_plus_id, "name_plus_id"] = out.loc[missing_name_plus_id].apply(
+        lambda row: (
+            f"{str(row.get('player_name') or '').strip()} ({str(row.get('dk_id') or '').strip()})"
+            if str(row.get("player_name") or "").strip() and str(row.get("dk_id") or "").strip()
+            else ""
+        ),
+        axis=1,
+    )
+
+    missing_game_key = out["game_key"] == ""
+    out.loc[missing_game_key, "game_key"] = out.loc[missing_game_key].apply(
+        lambda row: (
+            f"{str(row.get('team_abbr') or '').strip().upper()}@{str(row.get('opp_abbr') or '').strip().upper()}"
+            if str(row.get("team_abbr") or "").strip() and str(row.get("opp_abbr") or "").strip()
+            else ""
+        ),
+        axis=1,
+    )
+
+    iso_date = pd.to_datetime(selected_date, errors="coerce").date().isoformat()
+    resolved_source_name = (
+        str(source_name).strip()
+        if str(source_name or "").strip()
+        else f"manual_alias_review:{iso_date}:{str(slate_key or '').strip().lower() or 'main'}"
+    )
+    out["slate_date"] = iso_date
+    out["slate_key"] = str(slate_key or "").strip().lower() or "main"
+    out.loc[out["reason"] == "", "reason"] = str(reason_default or "manual_alias_review").strip()
+    out.loc[out["source_name"] == "", "source_name"] = resolved_source_name
+
+    out = out.loc[
+        (out["player_name"] != "")
+        & (out["team_abbr"] != "")
+        & (out["dk_id"] != "")
+        & (out["name_plus_id"] != "")
+    ].copy()
+    if out.empty:
+        return {
+            "saved_override_count": 0,
+            "persisted_manual_overrides_path": None,
+            "saved_overrides": [],
+        }
+
+    overrides_only = out[MANUAL_OVERRIDE_COLUMNS].copy()
+    existing_manual = load_manual_overrides(manual_overrides_path)
+    merged_manual = merge_manual_overrides(existing_manual, overrides_only)
+    written = write_manual_overrides(merged_manual, manual_overrides_path)
+    return {
+        "saved_override_count": int(len(overrides_only)),
+        "persisted_manual_overrides_path": str(written),
+        "saved_overrides": overrides_only.to_dict(orient="records"),
     }
 
 
