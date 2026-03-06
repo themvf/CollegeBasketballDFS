@@ -12,7 +12,11 @@ from typing import Any, Callable
 
 import pandas as pd
 
-from .cbb_api_service import ensure_full_registry_coverage, resolve_rotowire_slate
+from .cbb_api_service import (
+    ensure_full_registry_coverage,
+    load_lineupstarter_projection_frame,
+    resolve_rotowire_slate,
+)
 from .cbb_dk_optimizer import (
     build_dk_upload_csv,
     build_player_pool,
@@ -393,6 +397,19 @@ def run_lineup_job_request(
     coverage = dict(resolved_bundle.get("coverage") or {})
     ensure_full_registry_coverage(coverage, resolution_df)
 
+    progress(18, "Loading saved LineupStarter priors")
+    try:
+        lineupstarter_df = load_lineupstarter_projection_frame(
+            selected_date=selected_date,
+            slate_key=slate_key,
+            bucket_name=(str(request.get("bucket_name") or "").strip() or None),
+            gcp_project=(str(request.get("gcp_project") or "").strip() or None),
+            service_account_json=(str(request.get("service_account_json") or "").strip() or None),
+            service_account_json_b64=(str(request.get("service_account_json_b64") or "").strip() or None),
+        )
+    except ValueError:
+        lineupstarter_df = pd.DataFrame()
+
     progress(22, "Building player pool")
     pool_df = build_player_pool(
         slate_df=resolved_slate,
@@ -403,6 +420,7 @@ def run_lineup_job_request(
         odds_games_df=None,
         recent_form_games=int(request.get("recent_form_games") or 7),
         recent_points_weight=float(request.get("recent_points_weight") or 0.0),
+        lineupstarter_df=lineupstarter_df,
     )
     if pool_df.empty:
         raise RuntimeError("Player pool is empty after build_player_pool.")
@@ -483,6 +501,8 @@ def run_lineup_job_request(
                 "request": request,
                 "slate": slate_meta,
                 "coverage": coverage,
+                "lineupstarter_loaded": bool(not lineupstarter_df.empty),
+                "lineupstarter_players": int(lineupstarter_df["ID"].nunique()) if not lineupstarter_df.empty else 0,
                 "model": model_cfg,
                 "lineups_generated": len(annotated_lineups),
                 "warnings_count": len(warnings),
@@ -499,6 +519,7 @@ def run_lineup_job_request(
         "warnings": [str(w) for w in warnings],
         "slate": slate_meta,
         "coverage": coverage,
+        "lineupstarter_loaded": bool(not lineupstarter_df.empty),
         "model": model_cfg,
         "runtime_controls": controls,
     }

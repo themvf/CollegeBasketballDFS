@@ -1,14 +1,17 @@
 from __future__ import annotations
 
+import io
 from pathlib import Path
 
 import pandas as pd
 
 from college_basketball_dfs.cbb_api_service import (
     import_dk_slate_overrides,
+    import_lineupstarter_projection_csv,
     load_manual_overrides,
     load_registry,
     merge_manual_overrides,
+    normalize_lineupstarter_upload_frame,
     save_manual_resolution_overrides,
     write_manual_overrides,
 )
@@ -228,3 +231,93 @@ def test_save_manual_resolution_overrides_normalizes_editor_rows(tmp_path: Path)
     assert row["roster_position"] == "F/UTIL"
     assert row["reason"] == "manual_alias_review"
     assert row["source_name"] == "manual_alias_review:2026-03-05:main"
+
+
+def test_normalize_lineupstarter_upload_frame_matches_resolved_slate_by_name_and_salary() -> None:
+    resolved_slate = pd.DataFrame(
+        [
+            {
+                "Position": "G",
+                "Name + ID": "John Doe (1001)",
+                "Name": "John Doe",
+                "ID": "1001",
+                "Roster Position": "G/UTIL",
+                "Salary": 6200,
+                "Game Info": "AAA@BBB 03/05/2026 07:00PM ET",
+                "TeamAbbrev": "AAA",
+                "AvgPointsPerGame": 28.4,
+            }
+        ]
+    )
+    upload = pd.DataFrame(
+        [
+            {
+                "Player": "John Doe",
+                "Pos": "G",
+                "Team": "AAA",
+                "Salary": "$6,200",
+                "Proj": "34.5",
+                "projOwn%": "18.4%",
+            }
+        ]
+    )
+
+    normalized, coverage = normalize_lineupstarter_upload_frame(upload, slate_df=resolved_slate)
+    assert bool(coverage["fully_resolved"]) is True
+    assert int(coverage["matched_rows"]) == 1
+    row = normalized.iloc[0]
+    assert str(row["ID"]) == "1001"
+    assert row["Name"] == "John Doe"
+    assert row["lineupstarter_match_status"] == "matched"
+    assert round(float(row["lineupstarter_projected_points"]), 2) == 34.5
+    assert round(float(row["lineupstarter_projected_ownership"]), 2) == 18.4
+
+
+def test_import_lineupstarter_projection_csv_writes_normalized_rows(monkeypatch) -> None:
+    class _FakeStore:
+        bucket_name = "test-bucket"
+
+        def __init__(self) -> None:
+            self.saved_csv = ""
+
+        def write_lineupstarter_csv(self, game_date, csv_text: str, slate_key: str | None = None) -> str:
+            self.saved_csv = csv_text
+            assert str(game_date) == "2026-03-05"
+            assert slate_key == "main"
+            return "cbb/lineupstarter/2026-03-05_lineupstarter.csv"
+
+    fake_store = _FakeStore()
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._build_api_store",
+        lambda **_: fake_store,
+    )
+    resolved_slate = pd.DataFrame(
+        [
+            {
+                "Position": "G",
+                "Name + ID": "John Doe (1001)",
+                "Name": "John Doe",
+                "ID": "1001",
+                "Roster Position": "G/UTIL",
+                "Salary": 6200,
+                "Game Info": "AAA@BBB 03/05/2026 07:00PM ET",
+                "TeamAbbrev": "AAA",
+                "AvgPointsPerGame": 28.4,
+            }
+        ]
+    )
+
+    result = import_lineupstarter_projection_csv(
+        csv_bytes=b"Player,Pos,Team,Salary,Proj,projOwn%\nJohn Doe,G,AAA,6200,34.5,18.4%\n",
+        resolved_slate_df=resolved_slate,
+        selected_date="2026-03-05",
+        slate_key="main",
+        bucket_name="test-bucket",
+    )
+
+    assert result["blob_name"] == "cbb/lineupstarter/2026-03-05_lineupstarter.csv"
+    assert int(result["rows_saved"]) == 1
+    saved = pd.read_csv(io.StringIO(fake_store.saved_csv))
+    assert str(saved.loc[0, "ID"]) == "1001"
+    assert round(float(saved.loc[0, "lineupstarter_projected_points"]), 2) == 34.5
+    assert round(float(saved.loc[0, "lineupstarter_projected_ownership"]), 2) == 18.4

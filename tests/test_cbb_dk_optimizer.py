@@ -152,6 +152,31 @@ def _sample_rotowire_players() -> pd.DataFrame:
     )
 
 
+def _sample_lineupstarter_players() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "ID": "1001",
+                "Name": "Guard 1",
+                "TeamAbbrev": "CCC",
+                "lineupstarter_projected_points": 43.7,
+                "lineupstarter_projected_ownership": 24.5,
+                "lineupstarter_match_status": "matched",
+                "lineupstarter_match_method": "uploaded_dk_id_salary",
+            },
+            {
+                "ID": "1006",
+                "Name": "Guard 6",
+                "TeamAbbrev": "AAA",
+                "lineupstarter_projected_points": 33.2,
+                "lineupstarter_projected_ownership": 28.0,
+                "lineupstarter_match_status": "matched",
+                "lineupstarter_match_method": "uploaded_dk_id_salary",
+            },
+        ]
+    )
+
+
 def test_remove_injured_players_filters_out_and_doubtful() -> None:
     slate = _sample_slate()
     injuries = pd.DataFrame(
@@ -342,6 +367,36 @@ def test_build_player_pool_rotowire_value_signal_lifts_cheap_player_ownership() 
     assert float(rw_g6["rotowire_ownership_bonus"]) > 0.0
     assert float(rw_g6["rotowire_value_signal"]) > 0.0
     assert float(rw_g6["rotowire_blend_weight"]) > 0.0
+
+
+def test_build_player_pool_blends_lineupstarter_projection_and_ownership_prior() -> None:
+    rw_pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        rotowire_df=_sample_rotowire_players(),
+        bookmaker_filter="fanduel",
+    )
+    ls_pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        rotowire_df=_sample_rotowire_players(),
+        lineupstarter_df=_sample_lineupstarter_players(),
+        bookmaker_filter="fanduel",
+    )
+
+    rw_g1 = rw_pool.loc[rw_pool["Name"] == "Guard 1"].iloc[0]
+    ls_g1 = ls_pool.loc[ls_pool["Name"] == "Guard 1"].iloc[0]
+
+    assert bool(ls_g1["lineupstarter_projection_available"]) is True
+    assert bool(ls_g1["lineupstarter_ownership_available"]) is True
+    assert ls_g1["ownership_external_prior_source"] == "lineupstarter"
+    assert round(float(ls_g1["ownership_external_prior"]), 2) == 24.5
+    assert float(ls_g1["lineupstarter_blend_weight"]) > 0.0
+    assert float(ls_g1["lineupstarter_ownership_blend_weight"]) > 0.0
+    assert abs(float(ls_g1["projected_dk_points"]) - float(rw_g1["projected_dk_points"])) > 0.01
+    assert abs(float(ls_g1["projected_ownership"]) - float(ls_g1["projected_ownership_pre_lineupstarter"])) > 0.01
 
 
 def test_apply_ownership_calibration_lifts_cheap_focus_value_and_cuts_false_chalk() -> None:

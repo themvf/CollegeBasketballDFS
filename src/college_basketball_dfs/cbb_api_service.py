@@ -1082,6 +1082,15 @@ def _read_projection_snapshot_frame(
     return _read_csv_frame(csv_text)
 
 
+def _read_lineupstarter_frame(
+    store: CbbGcsStore,
+    selected_date: date,
+    slate_key: str | None = None,
+) -> pd.DataFrame:
+    csv_text = store.read_lineupstarter_csv(selected_date, slate_key=slate_key)
+    return _read_csv_frame(csv_text)
+
+
 def _ownership_to_float(value: Any) -> float | None:
     if value is None:
         return None
@@ -1092,6 +1101,322 @@ def _ownership_to_float(value: Any) -> float | None:
         return float(text)
     except ValueError:
         return None
+
+
+def _lineupstarter_numeric(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip().replace("%", "").replace("$", "").replace(",", "")
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def _lineupstarter_position_tokens(value: Any) -> set[str]:
+    raw = str(value or "").strip().upper()
+    tokens: set[str] = set()
+    if "G" in raw:
+        tokens.add("G")
+    if "F" in raw:
+        tokens.add("F")
+    if "C" in raw:
+        tokens.add("C")
+    return tokens
+
+
+def _prepare_lineupstarter_slate_reference(slate_df: pd.DataFrame | None) -> pd.DataFrame:
+    if slate_df is None or slate_df.empty:
+        return pd.DataFrame(
+            columns=[
+                "ID",
+                "Name",
+                "Name + ID",
+                "TeamAbbrev",
+                "Position",
+                "Roster Position",
+                "Salary",
+                "Game Info",
+                "name_key",
+                "name_key_loose",
+                "position_base",
+            ]
+        )
+
+    ref = slate_df.copy()
+    empty_series = pd.Series([""] * len(ref), index=ref.index, dtype="object")
+    ref["ID"] = ref.get("ID", empty_series).map(_normalize_player_id)
+    ref["Name"] = ref.get("Name", empty_series).astype(str).str.strip()
+    ref["Name + ID"] = ref.get("Name + ID", empty_series).astype(str).str.strip()
+    ref["Name + ID"] = ref["Name + ID"].where(
+        ref["Name + ID"] != "",
+        ref["Name"] + " (" + ref["ID"] + ")",
+    )
+    ref["TeamAbbrev"] = ref.get("TeamAbbrev", empty_series).astype(str).str.strip().str.upper()
+    ref["Position"] = ref.get("Position", empty_series).astype(str).str.strip().str.upper()
+    ref["Roster Position"] = ref.get("Roster Position", empty_series).astype(str).str.strip().str.upper()
+    ref["Salary"] = pd.to_numeric(ref.get("Salary"), errors="coerce")
+    ref["Game Info"] = ref.get("Game Info", empty_series).astype(str).str.strip()
+    ref["name_key"] = ref["Name"].map(_norm_name_key)
+    ref["name_key_loose"] = ref["Name"].map(_norm_name_key_loose)
+    ref["position_base"] = ref["Position"].astype(str).str.strip().str.upper().str[:1]
+    ref = ref.loc[(ref["ID"] != "") & (ref["Name"] != "")]
+    return ref[
+        [
+            "ID",
+            "Name",
+            "Name + ID",
+            "TeamAbbrev",
+            "Position",
+            "Roster Position",
+            "Salary",
+            "Game Info",
+            "name_key",
+            "name_key_loose",
+            "position_base",
+        ]
+    ].reset_index(drop=True)
+
+
+def _filter_lineupstarter_candidates(
+    candidates: pd.DataFrame,
+    source_team_abbr: str,
+    source_position_tokens: set[str],
+) -> pd.DataFrame:
+    out = candidates.copy()
+    if out.empty:
+        return out
+
+    if source_team_abbr:
+        team_match = out["TeamAbbrev"].astype(str).str.upper() == source_team_abbr
+        if bool(team_match.any()):
+            out = out.loc[team_match].copy()
+
+    if source_position_tokens:
+        pos_match = out["position_base"].astype(str).str.upper().isin(source_position_tokens)
+        if bool(pos_match.any()):
+            out = out.loc[pos_match].copy()
+
+    return out
+
+
+def normalize_lineupstarter_upload_frame(
+    df: pd.DataFrame | None,
+    slate_df: pd.DataFrame | None = None,
+) -> tuple[pd.DataFrame, dict[str, Any]]:
+    empty_out = pd.DataFrame(
+        columns=[
+            "ID",
+            "Name",
+            "Name + ID",
+            "TeamAbbrev",
+            "Position",
+            "Roster Position",
+            "Salary",
+            "Game Info",
+            "lineupstarter_projected_points",
+            "lineupstarter_projected_ownership",
+            "lineupstarter_source_player_name",
+            "lineupstarter_source_team_abbr",
+            "lineupstarter_source_position",
+            "lineupstarter_match_method",
+            "lineupstarter_match_status",
+        ]
+    )
+    empty_meta = {
+        "rows_total": 0,
+        "matched_rows": 0,
+        "unresolved_rows": 0,
+        "coverage_pct": 0.0,
+        "fully_resolved": False,
+    }
+    if df is None or df.empty:
+        return empty_out, empty_meta
+
+    out = df.copy()
+    normalized_columns = {re.sub(r"[^a-z0-9]", "", str(c).strip().lower()): c for c in out.columns}
+    rename_aliases = {
+        "player": "lineupstarter_source_player_name",
+        "playername": "lineupstarter_source_player_name",
+        "name": "lineupstarter_source_player_name",
+        "athlete": "lineupstarter_source_player_name",
+        "team": "lineupstarter_source_team_abbr",
+        "teamabbr": "lineupstarter_source_team_abbr",
+        "teamabbrev": "lineupstarter_source_team_abbr",
+        "position": "lineupstarter_source_position",
+        "pos": "lineupstarter_source_position",
+        "salary": "Salary",
+        "proj": "lineupstarter_projected_points",
+        "projection": "lineupstarter_projected_points",
+        "projectedpoints": "lineupstarter_projected_points",
+        "projectedfantasypoints": "lineupstarter_projected_points",
+        "fantasyprojection": "lineupstarter_projected_points",
+        "projown": "lineupstarter_projected_ownership",
+        "projownpct": "lineupstarter_projected_ownership",
+        "projownership": "lineupstarter_projected_ownership",
+        "projectedownership": "lineupstarter_projected_ownership",
+        "projectedown": "lineupstarter_projected_ownership",
+        "projectedownpct": "lineupstarter_projected_ownership",
+        "dkid": "uploaded_dk_id",
+        "dk_id": "uploaded_dk_id",
+        "draftkingsid": "uploaded_dk_id",
+        "id": "uploaded_dk_id",
+        "dkplayername": "uploaded_dk_player_name",
+        "dk_player_name": "uploaded_dk_player_name",
+        "dknameplusid": "uploaded_dk_name_plus_id",
+        "dk_name_plus_id": "uploaded_dk_name_plus_id",
+        "dkteamabbr": "uploaded_dk_team_abbr",
+        "dk_team_abbr": "uploaded_dk_team_abbr",
+        "dksalary": "uploaded_dk_salary",
+        "dk_salary": "uploaded_dk_salary",
+        "dkgamekey": "uploaded_dk_game_key",
+        "dk_game_key": "uploaded_dk_game_key",
+    }
+    resolved_rename: dict[str, str] = {}
+    for alias, dest in rename_aliases.items():
+        source = normalized_columns.get(alias)
+        if source:
+            resolved_rename[source] = dest
+    if resolved_rename:
+        out = out.rename(columns=resolved_rename)
+
+    for col in [
+        "lineupstarter_source_player_name",
+        "lineupstarter_source_team_abbr",
+        "lineupstarter_source_position",
+        "Salary",
+        "lineupstarter_projected_points",
+        "lineupstarter_projected_ownership",
+        "uploaded_dk_id",
+        "uploaded_dk_player_name",
+        "uploaded_dk_name_plus_id",
+        "uploaded_dk_team_abbr",
+        "uploaded_dk_salary",
+        "uploaded_dk_game_key",
+    ]:
+        if col not in out.columns:
+            out[col] = ""
+
+    out["lineupstarter_source_player_name"] = out["lineupstarter_source_player_name"].astype(str).str.strip()
+    out["lineupstarter_source_team_abbr"] = out["lineupstarter_source_team_abbr"].astype(str).str.strip().str.upper()
+    out["lineupstarter_source_position"] = out["lineupstarter_source_position"].astype(str).str.strip().str.upper()
+    out["Salary"] = out["Salary"].map(_lineupstarter_numeric)
+    out["lineupstarter_projected_points"] = out["lineupstarter_projected_points"].map(_lineupstarter_numeric)
+    out["lineupstarter_projected_ownership"] = out["lineupstarter_projected_ownership"].map(_lineupstarter_numeric)
+    out["uploaded_dk_id"] = out["uploaded_dk_id"].map(_normalize_player_id)
+    out["uploaded_dk_player_name"] = out["uploaded_dk_player_name"].astype(str).str.strip()
+    out["uploaded_dk_name_plus_id"] = out["uploaded_dk_name_plus_id"].astype(str).str.strip()
+    out["uploaded_dk_team_abbr"] = out["uploaded_dk_team_abbr"].astype(str).str.strip().str.upper()
+    out["uploaded_dk_salary"] = out["uploaded_dk_salary"].map(_lineupstarter_numeric)
+    out["uploaded_dk_game_key"] = out["uploaded_dk_game_key"].astype(str).str.strip().str.upper()
+    out["name_key"] = out["lineupstarter_source_player_name"].map(_norm_name_key)
+    out["name_key_loose"] = out["lineupstarter_source_player_name"].map(_norm_name_key_loose)
+    out = out.loc[out["lineupstarter_source_player_name"] != ""].copy()
+    if out.empty:
+        return empty_out, empty_meta
+
+    ref = _prepare_lineupstarter_slate_reference(slate_df)
+    records: list[dict[str, Any]] = []
+    matched_rows = 0
+
+    for row in out.to_dict(orient="records"):
+        source_team_abbr = str(row.get("lineupstarter_source_team_abbr") or "").strip().upper()
+        source_position = str(row.get("lineupstarter_source_position") or "").strip().upper()
+        source_position_tokens = _lineupstarter_position_tokens(source_position)
+        salary = _lineupstarter_numeric(row.get("Salary"))
+        uploaded_dk_id = _normalize_player_id(row.get("uploaded_dk_id"))
+        match_method = ""
+        match_status = "unresolved"
+        candidate = pd.DataFrame()
+
+        if uploaded_dk_id and not ref.empty:
+            candidate = ref.loc[ref["ID"] == uploaded_dk_id].copy()
+            if salary is not None:
+                candidate = candidate.loc[pd.to_numeric(candidate["Salary"], errors="coerce") == float(salary)].copy()
+            candidate = _filter_lineupstarter_candidates(candidate, source_team_abbr, source_position_tokens)
+            if len(candidate) == 1:
+                match_method = "uploaded_dk_id_salary"
+                match_status = "matched"
+
+        if match_status != "matched" and salary is not None and not ref.empty:
+            exact_candidate = ref.loc[
+                (ref["name_key"] == str(row.get("name_key") or ""))
+                & (pd.to_numeric(ref["Salary"], errors="coerce") == float(salary))
+            ].copy()
+            exact_candidate = _filter_lineupstarter_candidates(exact_candidate, source_team_abbr, source_position_tokens)
+            if len(exact_candidate) == 1:
+                candidate = exact_candidate
+                match_method = "exact_name_salary"
+                match_status = "matched"
+
+        if match_status != "matched" and salary is not None and not ref.empty:
+            loose_candidate = ref.loc[
+                (ref["name_key_loose"] == str(row.get("name_key_loose") or ""))
+                & (pd.to_numeric(ref["Salary"], errors="coerce") == float(salary))
+            ].copy()
+            loose_candidate = _filter_lineupstarter_candidates(loose_candidate, source_team_abbr, source_position_tokens)
+            if len(loose_candidate) == 1:
+                candidate = loose_candidate
+                match_method = "loose_name_salary"
+                match_status = "matched"
+
+        if match_status == "matched" and not candidate.empty:
+            matched_rows += 1
+            best = candidate.iloc[0]
+            records.append(
+                {
+                    "ID": _normalize_player_id(best.get("ID")),
+                    "Name": str(best.get("Name") or "").strip(),
+                    "Name + ID": str(best.get("Name + ID") or "").strip(),
+                    "TeamAbbrev": str(best.get("TeamAbbrev") or "").strip().upper(),
+                    "Position": str(best.get("Position") or "").strip().upper(),
+                    "Roster Position": str(best.get("Roster Position") or "").strip().upper(),
+                    "Salary": _lineupstarter_numeric(best.get("Salary")),
+                    "Game Info": str(best.get("Game Info") or "").strip(),
+                    "lineupstarter_projected_points": _lineupstarter_numeric(row.get("lineupstarter_projected_points")),
+                    "lineupstarter_projected_ownership": _lineupstarter_numeric(row.get("lineupstarter_projected_ownership")),
+                    "lineupstarter_source_player_name": str(row.get("lineupstarter_source_player_name") or "").strip(),
+                    "lineupstarter_source_team_abbr": source_team_abbr,
+                    "lineupstarter_source_position": source_position,
+                    "lineupstarter_match_method": match_method,
+                    "lineupstarter_match_status": match_status,
+                }
+            )
+        else:
+            records.append(
+                {
+                    "ID": "",
+                    "Name": "",
+                    "Name + ID": "",
+                    "TeamAbbrev": "",
+                    "Position": "",
+                    "Roster Position": "",
+                    "Salary": salary,
+                    "Game Info": "",
+                    "lineupstarter_projected_points": _lineupstarter_numeric(row.get("lineupstarter_projected_points")),
+                    "lineupstarter_projected_ownership": _lineupstarter_numeric(row.get("lineupstarter_projected_ownership")),
+                    "lineupstarter_source_player_name": str(row.get("lineupstarter_source_player_name") or "").strip(),
+                    "lineupstarter_source_team_abbr": source_team_abbr,
+                    "lineupstarter_source_position": source_position,
+                    "lineupstarter_match_method": "",
+                    "lineupstarter_match_status": "unresolved",
+                }
+            )
+
+    normalized = pd.DataFrame(records)
+    rows_total = int(len(normalized))
+    unresolved_rows = int(rows_total - matched_rows)
+    coverage_pct = (100.0 * float(matched_rows) / float(rows_total)) if rows_total else 0.0
+    coverage = {
+        "rows_total": rows_total,
+        "matched_rows": int(matched_rows),
+        "unresolved_rows": int(unresolved_rows),
+        "coverage_pct": round(coverage_pct, 2),
+        "fully_resolved": bool(rows_total > 0 and matched_rows == rows_total),
+    }
+    return normalized, coverage
 
 
 def normalize_ownership_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
@@ -1156,6 +1481,67 @@ def _read_ownership_frame(
     if not csv_text or not str(csv_text).strip():
         return pd.DataFrame(columns=["ID", "Name", "TeamAbbrev", "actual_ownership", "name_key", "name_key_loose"])
     return normalize_ownership_upload_frame(_read_csv_frame(csv_text))
+
+
+def import_lineupstarter_projection_csv(
+    *,
+    csv_bytes: bytes,
+    resolved_slate_df: pd.DataFrame,
+    selected_date: date | str,
+    slate_key: str | None = "main",
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    _, frame = _decode_csv_payload(csv_bytes)
+    normalized, coverage = normalize_lineupstarter_upload_frame(frame, slate_df=resolved_slate_df)
+    if normalized.empty:
+        raise ValueError("Could not find LineupStarter rows. Include player, salary, projection, and projected ownership columns.")
+    if not bool(coverage.get("fully_resolved")):
+        unresolved = normalized.loc[normalized["lineupstarter_match_status"] != "matched"].copy()
+        sample_names = unresolved["lineupstarter_source_player_name"].astype(str).head(10).tolist()
+        raise ValueError(
+            "LineupStarter mapping incomplete: "
+            f"{int(coverage.get('unresolved_rows') or 0)} unresolved rows. "
+            f"Examples: {sample_names}"
+        )
+
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    blob_name = store.write_lineupstarter_csv(game_date, normalized.to_csv(index=False), slate_key=slate_key)
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "rows_saved": int(len(normalized)),
+        "players": int(normalized["Name"].nunique()),
+        "blob_name": blob_name,
+        "coverage": coverage,
+    }
+
+
+def load_lineupstarter_projection_frame(
+    *,
+    selected_date: date | str,
+    slate_key: str | None = "main",
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    game_date = _to_iso_date(selected_date)
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    return _read_lineupstarter_frame(store, game_date, slate_key=slate_key)
 
 
 def _read_contest_standings_frame(

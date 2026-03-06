@@ -549,6 +549,133 @@ def _attach_rotowire_priors(
     return out
 
 
+def _attach_lineupstarter_priors(
+    pool_df: pd.DataFrame,
+    lineupstarter_df: pd.DataFrame | None,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    numeric_defaults = [
+        "lineupstarter_projected_points",
+        "lineupstarter_projected_ownership",
+    ]
+    text_defaults = [
+        "lineupstarter_source_player_name",
+        "lineupstarter_source_team_abbr",
+        "lineupstarter_source_position",
+        "lineupstarter_match_method",
+        "lineupstarter_match_status",
+    ]
+    for col in numeric_defaults:
+        if col not in out.columns:
+            out[col] = pd.NA
+    for col in text_defaults:
+        if col not in out.columns:
+            out[col] = ""
+    if "lineupstarter_projection_available" not in out.columns:
+        out["lineupstarter_projection_available"] = False
+    if "lineupstarter_ownership_available" not in out.columns:
+        out["lineupstarter_ownership_available"] = False
+
+    if lineupstarter_df is None or lineupstarter_df.empty:
+        return out
+
+    ls = lineupstarter_df.copy()
+    normalized_cols = {_normalize_col_name(col): col for col in ls.columns}
+    rename_map: dict[str, str] = {}
+    for alias, dest in {
+        "id": "ID",
+        "dkid": "ID",
+        "draftkingsid": "ID",
+        "name": "Name",
+        "player": "Name",
+        "playername": "Name",
+        "team": "TeamAbbrev",
+        "teamabbr": "TeamAbbrev",
+        "teamabbrev": "TeamAbbrev",
+        "position": "Position",
+        "pos": "Position",
+        "lineupstarterprojectedpoints": "lineupstarter_projected_points",
+        "projectedpoints": "lineupstarter_projected_points",
+        "projection": "lineupstarter_projected_points",
+        "proj": "lineupstarter_projected_points",
+        "lineupstarterprojectedownership": "lineupstarter_projected_ownership",
+        "projectedownership": "lineupstarter_projected_ownership",
+        "projownership": "lineupstarter_projected_ownership",
+        "projectedownpct": "lineupstarter_projected_ownership",
+        "projownpct": "lineupstarter_projected_ownership",
+        "projown": "lineupstarter_projected_ownership",
+        "lineupstartersourceplayername": "lineupstarter_source_player_name",
+        "lineupstartersourceteamabbr": "lineupstarter_source_team_abbr",
+        "lineupstartersourceposition": "lineupstarter_source_position",
+        "lineupstartermatchmethod": "lineupstarter_match_method",
+        "lineupstartermatchstatus": "lineupstarter_match_status",
+    }.items():
+        source_col = normalized_cols.get(alias)
+        if source_col and source_col not in rename_map:
+            rename_map[source_col] = dest
+    if rename_map:
+        ls = ls.rename(columns=rename_map)
+
+    for col in ["ID", "Name", "TeamAbbrev", "Position", *numeric_defaults, *text_defaults]:
+        if col not in ls.columns:
+            ls[col] = pd.NA if col in numeric_defaults else ""
+    ls["ID"] = ls["ID"].astype(str).str.strip()
+    ls["Name"] = ls["Name"].astype(str).str.strip()
+    ls["TeamAbbrev"] = ls["TeamAbbrev"].astype(str).str.strip().str.upper()
+    ls["Position"] = ls["Position"].astype(str).str.strip().str.upper()
+    ls["lineupstarter_source_player_name"] = ls["lineupstarter_source_player_name"].astype(str).str.strip()
+    ls["lineupstarter_source_team_abbr"] = ls["lineupstarter_source_team_abbr"].astype(str).str.strip().str.upper()
+    ls["lineupstarter_source_position"] = ls["lineupstarter_source_position"].astype(str).str.strip().str.upper()
+    ls["lineupstarter_match_method"] = ls["lineupstarter_match_method"].astype(str).str.strip()
+    ls["lineupstarter_match_status"] = ls["lineupstarter_match_status"].astype(str).str.strip()
+    ls["lineupstarter_projected_points"] = pd.to_numeric(ls.get("lineupstarter_projected_points"), errors="coerce")
+    ls["lineupstarter_projected_ownership"] = pd.to_numeric(ls.get("lineupstarter_projected_ownership"), errors="coerce")
+    ls = ls.loc[ls["ID"] != ""].copy()
+    if ls.empty:
+        return out
+
+    sort_cols = [
+        "ID",
+        "lineupstarter_projected_ownership",
+        "lineupstarter_projected_points",
+    ]
+    ls = ls.sort_values(sort_cols, ascending=[True, False, False], kind="stable")
+    ls = ls.drop_duplicates(subset=["ID"], keep="first")
+    merge_cols = [
+        "ID",
+        "lineupstarter_projected_points",
+        "lineupstarter_projected_ownership",
+        "lineupstarter_source_player_name",
+        "lineupstarter_source_team_abbr",
+        "lineupstarter_source_position",
+        "lineupstarter_match_method",
+        "lineupstarter_match_status",
+    ]
+    temp_rename = {col: f"{col}_ls" for col in merge_cols if col != "ID"}
+    out = out.merge(ls[merge_cols].rename(columns=temp_rename), on="ID", how="left")
+    for col in numeric_defaults:
+        temp_col = f"{col}_ls"
+        out[col] = pd.to_numeric(out.get(temp_col), errors="coerce")
+    for col in text_defaults:
+        temp_col = f"{col}_ls"
+        out[col] = (
+            out.get(temp_col, pd.Series([""] * len(out), index=out.index))
+            .astype(str)
+            .str.strip()
+        )
+    helper_cols = [f"{col}_ls" for col in temp_rename]
+    out = out.drop(columns=helper_cols, errors="ignore")
+    out["lineupstarter_projection_available"] = pd.to_numeric(
+        out.get("lineupstarter_projected_points"),
+        errors="coerce",
+    ).notna()
+    out["lineupstarter_ownership_available"] = pd.to_numeric(
+        out.get("lineupstarter_projected_ownership"),
+        errors="coerce",
+    ).notna()
+    return out
+
+
 def normalize_injuries_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     cols = ["player_name", "team", "status", "notes", "active", "updated_at"]
     if df is None or df.empty:
@@ -751,6 +878,18 @@ def _rank_pct_series(series: pd.Series) -> pd.Series:
     return pd.to_numeric(series, errors="coerce").rank(method="average", pct=True).fillna(0.0)
 
 
+def _ownership_external_prior_series(pool_df: pd.DataFrame) -> pd.Series:
+    lineupstarter_prior = pd.to_numeric(
+        pool_df.get("lineupstarter_projected_ownership", pd.Series([pd.NA] * len(pool_df), index=pool_df.index)),
+        errors="coerce",
+    )
+    field_prior = pd.to_numeric(
+        pool_df.get("field_ownership_pct", pd.Series([pd.NA] * len(pool_df), index=pool_df.index)),
+        errors="coerce",
+    )
+    return lineupstarter_prior.where(lineupstarter_prior.notna(), field_prior)
+
+
 def _ownership_temperature_for_games(num_games: int) -> float:
     # Fewer games -> lower temperature (more concentrated ownership); more games -> flatter.
     n = max(1, int(num_games))
@@ -898,7 +1037,7 @@ def apply_ownership_calibration(
     team_stack_norm = (team_stack / 100.0).clip(0.0, 1.0)
     historical = pd.to_numeric(out.get("historical_ownership_baseline"), errors="coerce").fillna(0.0).clip(0.0, 100.0)
     historical_pct = _rank_pct_series(historical).fillna(0.0)
-    field_prior = pd.to_numeric(out.get("field_ownership_pct"), errors="coerce").fillna(0.0).clip(0.0, 100.0)
+    field_prior = pd.to_numeric(_ownership_external_prior_series(out), errors="coerce").fillna(0.0).clip(0.0, 100.0)
     field_prior_pct = _rank_pct_series(field_prior).fillna(0.0)
     consensus_value = pd.to_numeric(out.get("consensus_value_signal"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
     rotowire_signal = pd.to_numeric(out.get("rotowire_signal_score"), errors="coerce").fillna(0.0).clip(0.0, 1.0)
@@ -1158,6 +1297,7 @@ def build_player_pool(
     odds_games_df: pd.DataFrame | None = None,
     recent_form_games: int = 7,
     recent_points_weight: float = 0.0,
+    lineupstarter_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if slate_df.empty:
         return pd.DataFrame()
@@ -1178,6 +1318,7 @@ def build_player_pool(
     out["_team_norm"] = out["TeamAbbrev"].map(_normalize_text)
     out = _attach_historical_ownership_priors(out, ownership_history_df)
     out = _attach_rotowire_priors(out, rotowire_df)
+    out = _attach_lineupstarter_priors(out, lineupstarter_df)
 
     # Attach game-level Vegas tail metrics (p+8 / p+12 / volatility) by matching slate game keys to odds events.
     if odds_games_df is not None and not odds_games_df.empty and "game_key" in out.columns:
@@ -1609,6 +1750,34 @@ def build_player_pool(
 
     out["projection_pre_rotowire"] = projection_pre_rotowire.round(4)
     out["rotowire_blend_weight"] = rotowire_blend_weight.round(4)
+    projection_pre_lineupstarter = pd.to_numeric(consensus_projection, errors="coerce")
+    lineupstarter_proj = pd.to_numeric(out.get("lineupstarter_projected_points"), errors="coerce")
+    lineupstarter_delta = (lineupstarter_proj - projection_pre_lineupstarter).fillna(0.0)
+    lineupstarter_proj_rank = _rank_pct_series(lineupstarter_proj).fillna(0.0)
+    lineupstarter_blend_weight = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    lineupstarter_blend_weight.loc[lineupstarter_proj.notna() & projection_pre_lineupstarter.notna()] = 0.18
+    lineupstarter_blend_weight = lineupstarter_blend_weight + ((salary_num < 6500.0).astype(float) * 0.04)
+    lineupstarter_blend_weight = lineupstarter_blend_weight + (
+        (~out.get("rotowire_projection_available", pd.Series([False] * len(out), index=out.index)).astype(bool)).astype(float)
+        * 0.06
+    )
+    lineupstarter_blend_weight = lineupstarter_blend_weight + (
+        lineupstarter_delta.clip(lower=0.0, upper=10.0) / 10.0
+    ) * 0.10
+    lineupstarter_blend_weight = lineupstarter_blend_weight + (lineupstarter_proj_rank * 0.04)
+    lineupstarter_blend_weight = lineupstarter_blend_weight.where(lineupstarter_proj.notna(), 0.0).clip(lower=0.0, upper=0.42)
+    lineupstarter_blend_weight.loc[projection_pre_lineupstarter.isna() & lineupstarter_proj.notna()] = 1.0
+    consensus_projection = (
+        ((1.0 - lineupstarter_blend_weight) * projection_pre_lineupstarter.fillna(lineupstarter_proj))
+        + (lineupstarter_blend_weight * lineupstarter_proj.fillna(projection_pre_lineupstarter))
+    )
+    consensus_projection = consensus_projection.where(consensus_projection.notna(), projection_pre_lineupstarter)
+    out["projection_pre_lineupstarter"] = projection_pre_lineupstarter.round(4)
+    out["lineupstarter_blend_weight"] = lineupstarter_blend_weight.round(4)
+    out["lineupstarter_projection_delta"] = (lineupstarter_proj - projection_pre_lineupstarter).round(4)
+    out["lineupstarter_projection_delta_pct"] = (
+        ((lineupstarter_proj - projection_pre_lineupstarter) / projection_pre_lineupstarter.replace(0.0, pd.NA)) * 100.0
+    ).round(4)
     out["consensus_dk_projection"] = pd.to_numeric(consensus_projection, errors="coerce").round(4)
     out["projected_dk_points"] = pd.to_numeric(out["consensus_dk_projection"], errors="coerce")
     out["rotowire_minutes_blend_weight"] = rotowire_minutes_blend_weight.round(4)
@@ -1745,6 +1914,17 @@ def build_player_pool(
     )
 
     # Ownership surge features from attention + field priors + game tail context.
+    field_own_signal = _ownership_external_prior_series(out)
+    ownership_external_source = pd.Series([""] * len(out), index=out.index, dtype="object")
+    ownership_external_source.loc[
+        pd.to_numeric(out.get("lineupstarter_projected_ownership"), errors="coerce").notna()
+    ] = "lineupstarter"
+    ownership_external_source.loc[
+        (ownership_external_source == "")
+        & pd.to_numeric(out.get("field_ownership_pct"), errors="coerce").notna()
+    ] = "field_prior"
+    out["ownership_external_prior"] = pd.to_numeric(field_own_signal, errors="coerce").round(4)
+    out["ownership_external_prior_source"] = ownership_external_source
     attention_signal = pd.to_numeric(
         out.get("attention_index", pd.Series([pd.NA] * len(out), index=out.index)),
         errors="coerce",
@@ -1753,10 +1933,6 @@ def build_player_pool(
         attention_pct = _rank_pct_series(attention_signal.fillna(0.0).clip(lower=0.0).map(lambda x: math.log1p(float(x))))
     else:
         attention_pct = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
-    field_own_signal = pd.to_numeric(
-        out.get("field_ownership_pct", pd.Series([pd.NA] * len(out), index=out.index)),
-        errors="coerce",
-    )
     field_own_pct = _rank_pct_series(field_own_signal)
     surge_score = ((0.55 * attention_pct) + (0.25 * field_own_pct) + (0.20 * game_p12_pct)).clip(lower=0.0, upper=1.0)
     if "game_key" in out.columns:
@@ -1927,10 +2103,41 @@ def build_player_pool(
         leverage_shrink = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
         rotowire_chalk_floor = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
         rotowire_chalk_floor_flag = pd.Series([False] * len(out), index=out.index, dtype="bool")
+    ownership_pre_lineupstarter = ownership_alloc.copy()
+    lineupstarter_own = pd.to_numeric(out.get("lineupstarter_projected_ownership"), errors="coerce")
+    lineupstarter_ownership_blend_weight = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    if lineupstarter_own.notna().any():
+        lineupstarter_ownership_blend_weight.loc[lineupstarter_own.notna()] = 0.70
+        lineupstarter_ownership_blend_weight = lineupstarter_ownership_blend_weight + (
+            (salary_num < 6500.0).astype(float) * 0.05
+        )
+        lineupstarter_ownership_blend_weight = lineupstarter_ownership_blend_weight + (
+            pd.to_numeric(out.get("lineupstarter_projected_points"), errors="coerce").notna().astype(float) * 0.03
+        )
+        lineupstarter_ownership_blend_weight = (
+            lineupstarter_ownership_blend_weight - (0.08 * surge_uncertainty)
+        ).clip(lower=0.0, upper=0.82)
+        ownership_alloc = (
+            ((1.0 - lineupstarter_ownership_blend_weight) * ownership_pre_lineupstarter.fillna(lineupstarter_own))
+            + (lineupstarter_ownership_blend_weight * lineupstarter_own.fillna(ownership_pre_lineupstarter))
+        ).clip(lower=0.0, upper=100.0)
+        total_after_lineupstarter = float(ownership_alloc.sum())
+        if total_after_lineupstarter > 0.0:
+            ownership_alloc = ownership_alloc * (ownership_target_total / total_after_lineupstarter)
+            ownership_alloc = ownership_alloc.clip(lower=0.0, upper=100.0)
+            ownership_probs = ownership_alloc / max(1e-9, float(ownership_alloc.sum()))
+            ownership_alloc = _allocate_ownership_with_cap(
+                ownership_probs,
+                target_total=ownership_target_total,
+                cap_per_player=100.0,
+            )
     out["ownership_model"] = "v3_tiered_softmax"
     out["ownership_temperature"] = ownership_temperature
     out["ownership_target_total"] = ownership_target_total
     out["ownership_total_projected"] = float(ownership_alloc.sum())
+    out["projected_ownership_pre_lineupstarter"] = ownership_pre_lineupstarter.round(3)
+    out["lineupstarter_ownership_blend_weight"] = lineupstarter_ownership_blend_weight.round(4)
+    out["lineupstarter_ownership_delta"] = (ownership_alloc - ownership_pre_lineupstarter).round(4)
     out["projected_ownership"] = ownership_alloc.round(2)
     out["ownership_chalk_surge_score"] = (100.0 * surge_score).round(3)
     out["ownership_chalk_surge_flag"] = surge_flag.astype(bool)
@@ -2511,10 +2718,7 @@ def apply_false_chalk_discount(
     salary = pd.to_numeric(out.get("Salary"), errors="coerce")
     value = pd.to_numeric(out.get("value_per_1k"), errors="coerce")
     surge = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
-    field_own = pd.to_numeric(
-        out.get("field_ownership_pct", pd.Series([pd.NA] * len(out), index=out.index)),
-        errors="coerce",
-    )
+    field_own = pd.to_numeric(_ownership_external_prior_series(out), errors="coerce")
     confidence = pd.to_numeric(
         out.get("ownership_confidence", pd.Series([0.50] * len(out), index=out.index)),
         errors="coerce",
@@ -2760,10 +2964,7 @@ def apply_chalk_ceiling_guardrail(
     salary = pd.to_numeric(out.get("Salary"), errors="coerce")
     surge = pd.to_numeric(out.get("ownership_chalk_surge_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
     value = pd.to_numeric(out.get("value_per_1k"), errors="coerce")
-    field_own = pd.to_numeric(
-        out.get("field_ownership_pct", pd.Series([pd.NA] * len(out), index=out.index)),
-        errors="coerce",
-    )
+    field_own = pd.to_numeric(_ownership_external_prior_series(out), errors="coerce")
     minutes_boost = pd.to_numeric(out.get("minutes_shock_boost_pct"), errors="coerce").fillna(0.0).clip(lower=0.0)
     historical_baseline = pd.to_numeric(out.get("historical_ownership_baseline"), errors="coerce").fillna(0.0)
     focus_score = pd.to_numeric(out.get("game_stack_focus_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)

@@ -58,6 +58,7 @@ class CbbGcsStore:
     dk_registry_prefix: str = "cbb/dk_registry"
     injuries_prefix: str = "cbb/injuries"
     projections_prefix: str = "cbb/projections"
+    lineupstarter_prefix: str = "cbb/lineupstarter"
     ownership_prefix: str = "cbb/ownership"
     contest_standings_prefix: str = "cbb/contest_standings"
     lineup_runs_prefix: str = "cbb/lineup_runs"
@@ -115,6 +116,10 @@ class CbbGcsStore:
     def projections_blob_name(self, game_date: date, slate_key: str | None = None) -> str:
         # Canonical date-level storage; slate_key intentionally ignored.
         return f"{self.projections_prefix}/{game_date.isoformat()}_projections.csv"
+
+    def lineupstarter_blob_name(self, game_date: date, slate_key: str | None = None) -> str:
+        # Canonical date-level storage; slate_key intentionally ignored.
+        return f"{self.lineupstarter_prefix}/{game_date.isoformat()}_lineupstarter.csv"
 
     def ownership_blob_name(self, game_date: date, slate_key: str | None = None) -> str:
         # Canonical date-level storage; slate_key intentionally ignored.
@@ -428,6 +433,18 @@ class CbbGcsStore:
 
     def write_projections_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
         blob_name = self.projections_blob_name(game_date)
+        blob = self.bucket.blob(blob_name)
+        blob.upload_from_string(csv_text, content_type="text/csv")
+        return blob_name
+
+    def read_lineupstarter_csv(self, game_date: date, slate_key: str | None = None) -> str | None:
+        blob = self.bucket.blob(self.lineupstarter_blob_name(game_date))
+        if not blob.exists():
+            return None
+        return blob.download_as_text(encoding="utf-8")
+
+    def write_lineupstarter_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
+        blob_name = self.lineupstarter_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(csv_text, content_type="text/csv")
         return blob_name

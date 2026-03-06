@@ -78,6 +78,8 @@ from college_basketball_dfs.cbb_ai_review import (
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 from college_basketball_dfs.cbb_api_service import (
     import_dk_slate_overrides,
+    import_lineupstarter_projection_csv,
+    normalize_lineupstarter_upload_frame,
     resolve_rotowire_slate,
     save_manual_resolution_overrides,
 )
@@ -1395,6 +1397,42 @@ def _read_projections_csv(store: CbbGcsStore, slate_date: date, slate_key: str |
     if blob.exists():
         return blob.download_as_text(encoding="utf-8")
     return None
+
+
+def _lineupstarter_blob_name(slate_date: date, slate_key: str | None = None) -> str:
+    # Canonical date-level storage; slate_key intentionally ignored.
+    return f"cbb/lineupstarter/{slate_date.isoformat()}_lineupstarter.csv"
+
+
+def _read_lineupstarter_csv(store: CbbGcsStore, slate_date: date, slate_key: str | None = None) -> str | None:
+    reader = getattr(store, "read_lineupstarter_csv", None)
+    if callable(reader):
+        try:
+            return reader(slate_date, slate_key)
+        except TypeError:
+            return reader(slate_date)
+    blob = store.bucket.blob(_lineupstarter_blob_name(slate_date))
+    if blob.exists():
+        return blob.download_as_text(encoding="utf-8")
+    return None
+
+
+def _write_lineupstarter_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    csv_text: str,
+    slate_key: str | None = None,
+) -> str:
+    writer = getattr(store, "write_lineupstarter_csv", None)
+    if callable(writer):
+        try:
+            return writer(slate_date, csv_text, slate_key)
+        except TypeError:
+            return writer(slate_date, csv_text)
+    blob_name = _lineupstarter_blob_name(slate_date, slate_key=slate_key)
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
 
 
 def _ownership_blob_name(slate_date: date, slate_key: str | None = None) -> str:
@@ -2758,6 +2796,34 @@ def load_projection_snapshot_frame(
 
 
 @st.cache_data(ttl=600, show_spinner=False)
+def load_lineupstarter_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    selected_slate_key: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = _read_lineupstarter_csv(store, selected_date, slate_key=selected_slate_key)
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+    df = pd.read_csv(io.StringIO(csv_text))
+    if "ID" in df.columns:
+        df["ID"] = df["ID"].astype(str).str.strip()
+    if "Name" in df.columns:
+        df["Name"] = df["Name"].astype(str).str.strip()
+    if "TeamAbbrev" in df.columns:
+        df["TeamAbbrev"] = df["TeamAbbrev"].astype(str).str.strip().str.upper()
+    return df
+
+
+@st.cache_data(ttl=600, show_spinner=False)
 def load_ownership_frame_for_date(
     bucket_name: str,
     selected_date: date,
@@ -2925,6 +2991,7 @@ def build_optimizer_pool_for_date(
     slate_df = rotowire_bundle.get("resolved_slate_df").copy() if isinstance(rotowire_bundle.get("resolved_slate_df"), pd.DataFrame) else pd.DataFrame()
     rotowire_df = rotowire_bundle.get("rotowire_df").copy() if isinstance(rotowire_bundle.get("rotowire_df"), pd.DataFrame) else pd.DataFrame()
     coverage = dict(rotowire_bundle.get("coverage") or {})
+    rotowire_bundle = dict(rotowire_bundle)
     injuries_df = load_injuries_frame(
         bucket_name=bucket_name,
         selected_date=slate_date,
@@ -2932,10 +2999,42 @@ def build_optimizer_pool_for_date(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
+    lineupstarter_df = pd.DataFrame()
     if slate_df.empty:
+        rotowire_bundle["lineupstarter_df"] = pd.DataFrame()
+        rotowire_bundle["lineupstarter_loaded"] = False
         return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame(), rotowire_bundle
     if not bool(coverage.get("fully_resolved")):
+        rotowire_bundle["lineupstarter_df"] = pd.DataFrame()
+        rotowire_bundle["lineupstarter_loaded"] = False
         return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame(), rotowire_bundle
+
+    lineupstarter_df = load_lineupstarter_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=slate_date,
+        selected_slate_key=slate_key,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    rotowire_bundle["lineupstarter_df"] = lineupstarter_df.copy() if not lineupstarter_df.empty else pd.DataFrame()
+    rotowire_bundle["lineupstarter_loaded"] = bool(not lineupstarter_df.empty)
+    rotowire_bundle["lineupstarter_rows"] = int(len(lineupstarter_df))
+    rotowire_bundle["lineupstarter_players"] = (
+        int(lineupstarter_df["ID"].nunique())
+        if not lineupstarter_df.empty and "ID" in lineupstarter_df.columns
+        else 0
+    )
+    rotowire_bundle["lineupstarter_projection_rows"] = (
+        int(pd.to_numeric(lineupstarter_df.get("lineupstarter_projected_points"), errors="coerce").notna().sum())
+        if not lineupstarter_df.empty
+        else 0
+    )
+    rotowire_bundle["lineupstarter_ownership_rows"] = (
+        int(pd.to_numeric(lineupstarter_df.get("lineupstarter_projected_ownership"), errors="coerce").notna().sum())
+        if not lineupstarter_df.empty
+        else 0
+    )
 
     filtered_slate, removed_injured = remove_injured_players(slate_df, injuries_df)
     season_history_df = load_season_player_history_frame(
@@ -2978,6 +3077,7 @@ def build_optimizer_pool_for_date(
         odds_games_df=odds_scored_df,
         recent_form_games=int(max(1, recent_form_games)),
         recent_points_weight=float(max(0.0, min(1.0, recent_points_weight))),
+        lineupstarter_df=lineupstarter_df,
     )
     return pool_df, removed_injured, slate_df, injuries_df, season_history_df, rotowire_bundle
 
@@ -3601,6 +3701,7 @@ with tab_backfill:
 with tab_dk:
     if refresh_resolved_slate_clicked:
         load_resolved_rotowire_slate_context.clear()
+        load_lineupstarter_frame_for_date.clear()
     if load_dk_slate_clicked:
         load_dk_slate_frame_for_date.clear()
 
@@ -3761,6 +3862,152 @@ with tab_dk:
 
         if not resolved_slate_df.empty:
             st.dataframe(resolved_slate_df, hide_index=True, use_container_width=True)
+
+        st.subheader("LineupStarter Priors")
+        st.caption(
+            "Upload the LineupStarter slate CSV to add projected points and projected ownership. "
+            "The saved file is reused by Slate + Vegas and the lineup generator."
+        )
+        lineupstarter_upload_summary = st.session_state.get("cbb_lineupstarter_upload_summary") or {}
+        if lineupstarter_upload_summary:
+            st.json(
+                {
+                    "selected_date": lineupstarter_upload_summary.get("selected_date"),
+                    "rows_saved": lineupstarter_upload_summary.get("rows_saved"),
+                    "players": lineupstarter_upload_summary.get("players"),
+                    "blob_name": lineupstarter_upload_summary.get("blob_name"),
+                    "coverage": lineupstarter_upload_summary.get("coverage"),
+                }
+            )
+
+        lineupstarter_upload = st.file_uploader(
+            "Upload LineupStarter CSV",
+            type=["csv"],
+            key="lineupstarter_projection_upload",
+            help="Include player, salary, projected points, and projected ownership columns.",
+        )
+        preview_lineupstarter_df = pd.DataFrame()
+        preview_lineupstarter_coverage: dict[str, Any] = {}
+        if lineupstarter_upload is not None and not resolved_slate_df.empty:
+            preview_payload = _read_uploaded_csv_frame(lineupstarter_upload)
+            if preview_payload.get("decode_warning"):
+                st.caption(str(preview_payload.get("decode_warning")))
+            preview_frame = preview_payload.get("frame")
+            if not isinstance(preview_frame, pd.DataFrame) or preview_frame.empty:
+                parse_error = str(preview_payload.get("parse_error") or "").strip()
+                if parse_error:
+                    st.warning(f"Could not parse LineupStarter upload: {parse_error}")
+            else:
+                preview_lineupstarter_df, preview_lineupstarter_coverage = normalize_lineupstarter_upload_frame(
+                    preview_frame,
+                    slate_df=resolved_slate_df,
+                )
+                lp1, lp2, lp3, lp4 = st.columns(4)
+                lp1.metric("Preview Rows", int(preview_lineupstarter_coverage.get("rows_total") or 0))
+                lp2.metric("Matched", int(preview_lineupstarter_coverage.get("matched_rows") or 0))
+                lp3.metric("Unresolved", int(preview_lineupstarter_coverage.get("unresolved_rows") or 0))
+                lp4.metric("Coverage %", f"{float(preview_lineupstarter_coverage.get('coverage_pct') or 0.0):.1f}")
+                if bool(preview_lineupstarter_coverage.get("fully_resolved")):
+                    st.success("LineupStarter upload maps cleanly to the resolved DK slate.")
+                else:
+                    st.warning("LineupStarter upload still has unresolved rows. Save is blocked until coverage is 100%.")
+                    unresolved_preview = preview_lineupstarter_df.loc[
+                        preview_lineupstarter_df["lineupstarter_match_status"] != "matched"
+                    ].copy()
+                    if not unresolved_preview.empty:
+                        preview_cols = [
+                            c
+                            for c in [
+                                "lineupstarter_source_player_name",
+                                "lineupstarter_source_team_abbr",
+                                "lineupstarter_source_position",
+                                "Salary",
+                                "lineupstarter_match_method",
+                                "lineupstarter_match_status",
+                            ]
+                            if c in unresolved_preview.columns
+                        ]
+                        st.dataframe(unresolved_preview[preview_cols], hide_index=True, use_container_width=True)
+
+        save_lineupstarter_clicked = st.button(
+            "Save LineupStarter Priors to GCS",
+            key="save_lineupstarter_priors",
+            disabled=(not coverage_ok),
+        )
+        if save_lineupstarter_clicked:
+            if not bucket_name:
+                st.error("Set a GCS bucket before saving LineupStarter priors.")
+            elif resolved_slate_df.empty or not coverage_ok:
+                st.error("Resolve the RotoWire slate to 100% DK coverage before saving LineupStarter priors.")
+            elif lineupstarter_upload is None:
+                st.error("Choose a LineupStarter CSV file before saving.")
+            elif preview_lineupstarter_coverage and not bool(preview_lineupstarter_coverage.get("fully_resolved")):
+                st.error("LineupStarter upload is not fully mapped to the current DK slate yet.")
+            else:
+                try:
+                    lineupstarter_summary = import_lineupstarter_projection_csv(
+                        csv_bytes=lineupstarter_upload.getvalue(),
+                        resolved_slate_df=resolved_slate_df,
+                        selected_date=dk_slate_date,
+                        slate_key=dk_slate_key,
+                        bucket_name=bucket_name,
+                        gcp_project=gcp_project or None,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
+                    )
+                    st.session_state["cbb_lineupstarter_upload_summary"] = lineupstarter_summary
+                    load_lineupstarter_frame_for_date.clear()
+                    st.success(
+                        f"Saved LineupStarter priors for {int(lineupstarter_summary.get('players') or 0)} players "
+                        f"to `{lineupstarter_summary.get('blob_name')}`."
+                    )
+                    st.rerun()
+                except Exception as exc:
+                    st.exception(exc)
+
+        if not bucket_name:
+            st.info("Set a GCS bucket in sidebar to load saved LineupStarter priors.")
+        else:
+            saved_lineupstarter_df = load_lineupstarter_frame_for_date(
+                bucket_name=bucket_name,
+                selected_date=dk_slate_date,
+                selected_slate_key=dk_slate_key,
+                gcp_project=gcp_project or None,
+                service_account_json=cred_json,
+                service_account_json_b64=cred_json_b64,
+            )
+            if saved_lineupstarter_df.empty:
+                st.info("No saved LineupStarter priors found for the selected date.")
+            else:
+                ls1, ls2, ls3, ls4 = st.columns(4)
+                ls1.metric("Saved Rows", int(len(saved_lineupstarter_df)))
+                ls2.metric(
+                    "Players",
+                    int(saved_lineupstarter_df["ID"].nunique()) if "ID" in saved_lineupstarter_df.columns else int(len(saved_lineupstarter_df)),
+                )
+                ls3.metric(
+                    "Projection Rows",
+                    int(pd.to_numeric(saved_lineupstarter_df.get("lineupstarter_projected_points"), errors="coerce").notna().sum()),
+                )
+                ls4.metric(
+                    "Ownership Rows",
+                    int(pd.to_numeric(saved_lineupstarter_df.get("lineupstarter_projected_ownership"), errors="coerce").notna().sum()),
+                )
+                saved_cols = [
+                    c
+                    for c in [
+                        "Name + ID",
+                        "Name",
+                        "TeamAbbrev",
+                        "Salary",
+                        "lineupstarter_projected_points",
+                        "lineupstarter_projected_ownership",
+                        "lineupstarter_source_player_name",
+                        "lineupstarter_match_method",
+                    ]
+                    if c in saved_lineupstarter_df.columns
+                ]
+                st.dataframe(saved_lineupstarter_df[saved_cols], hide_index=True, use_container_width=True)
     except Exception as exc:
         st.exception(exc)
 
@@ -4068,6 +4315,7 @@ with tab_slate_vegas:
     if refresh_pool_clicked:
         load_dk_slate_frame_for_date.clear()
         load_resolved_rotowire_slate_context.clear()
+        load_lineupstarter_frame_for_date.clear()
         load_props_frame_for_date.clear()
         load_odds_frame_for_date.clear()
         load_injuries_frame.clear()
@@ -4119,6 +4367,15 @@ with tab_slate_vegas:
                     f"Average projected minutes: `{avg_mins:.1f}` | "
                     f"Average recent minutes ({slate_recent_form_games}g): `{avg_mins_recent:.1f}`"
                 )
+                if bool(slate_context.get("lineupstarter_loaded")):
+                    st.caption(
+                        "LineupStarter priors loaded: "
+                        f"`{int(slate_context.get('lineupstarter_players') or 0)}` players | "
+                        f"projection rows=`{int(slate_context.get('lineupstarter_projection_rows') or 0)}` | "
+                        f"ownership rows=`{int(slate_context.get('lineupstarter_ownership_rows') or 0)}`"
+                    )
+                else:
+                    st.caption("No saved LineupStarter priors found for this date. Pool uses our model plus RotoWire only.")
 
                 if not removed_injured_df.empty:
                     st.subheader("Removed Injured Players")
@@ -4147,7 +4404,17 @@ with tab_slate_vegas:
                         "our_assists_proj",
                         "our_threes_proj",
                         "our_dk_projection",
+                        "projection_pre_lineupstarter",
+                        "lineupstarter_projected_points",
+                        "lineupstarter_blend_weight",
+                        "lineupstarter_projection_delta",
                         "projected_dk_points",
+                        "ownership_external_prior",
+                        "ownership_external_prior_source",
+                        "projected_ownership_pre_lineupstarter",
+                        "lineupstarter_projected_ownership",
+                        "lineupstarter_ownership_blend_weight",
+                        "lineupstarter_ownership_delta",
                         "projected_ownership",
                         "leverage_score",
                         "game_tail_match_score",
@@ -4194,7 +4461,16 @@ with tab_slate_vegas:
                         "our_assists_proj",
                         "our_threes_proj",
                         "our_dk_projection",
+                        "projection_pre_lineupstarter",
+                        "lineupstarter_projected_points",
+                        "lineupstarter_blend_weight",
+                        "lineupstarter_projection_delta",
                         "projected_dk_points",
+                        "ownership_external_prior",
+                        "projected_ownership_pre_lineupstarter",
+                        "lineupstarter_projected_ownership",
+                        "lineupstarter_ownership_blend_weight",
+                        "lineupstarter_ownership_delta",
                         "projected_ownership",
                         "leverage_score",
                         "game_tail_match_score",
@@ -4797,6 +5073,15 @@ with tab_lineups:
                     f"{int(slate_coverage.get('players_total') or 0)} players, "
                     f"conflicts={int(slate_coverage.get('conflict_players') or 0)})."
                 )
+                if bool(slate_context.get("lineupstarter_loaded")):
+                    st.caption(
+                        "LineupStarter priors active: "
+                        f"players=`{int(slate_context.get('lineupstarter_players') or 0)}` | "
+                        f"projection rows=`{int(slate_context.get('lineupstarter_projection_rows') or 0)}` | "
+                        f"ownership rows=`{int(slate_context.get('lineupstarter_ownership_rows') or 0)}`"
+                    )
+                else:
+                    st.caption("No saved LineupStarter priors for this lineup slate. Ownership falls back to the internal model.")
                 generate_lineups_clicked = st.button(
                     "Generate DK Lineups",
                     key="generate_dk_lineups",
