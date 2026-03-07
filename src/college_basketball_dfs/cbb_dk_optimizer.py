@@ -342,6 +342,12 @@ def _attach_rotowire_priors(
     rotowire_df: pd.DataFrame | None,
 ) -> pd.DataFrame:
     out = pool_df.copy()
+    def _numeric_merge_col(name: str) -> pd.Series:
+        return pd.to_numeric(
+            out.get(name, pd.Series([pd.NA] * len(out), index=out.index)),
+            errors="coerce",
+        )
+
     for col in [
         "rotowire_proj_fantasy_points",
         "rotowire_proj_minutes",
@@ -514,18 +520,18 @@ def _attach_rotowire_priors(
 
     match_source = pd.Series([""] * len(out), index=out.index, dtype="object")
     exact_available = (
-        pd.to_numeric(out.get("rotowire_proj_fantasy_points_exact"), errors="coerce").notna()
-        | pd.to_numeric(out.get("rotowire_proj_minutes_exact"), errors="coerce").notna()
+        _numeric_merge_col("rotowire_proj_fantasy_points_exact").notna()
+        | _numeric_merge_col("rotowire_proj_minutes_exact").notna()
     )
     fallback_available = (
-        pd.to_numeric(out.get("rotowire_proj_fantasy_points_name"), errors="coerce").notna()
-        | pd.to_numeric(out.get("rotowire_proj_minutes_name"), errors="coerce").notna()
+        _numeric_merge_col("rotowire_proj_fantasy_points_name").notna()
+        | _numeric_merge_col("rotowire_proj_minutes_name").notna()
     )
     match_source.loc[exact_available] = "team_exact"
     match_source.loc[(match_source == "") & fallback_available] = "name_only"
     out["rotowire_match_source"] = match_source
-    out["rotowire_projection_available"] = pd.to_numeric(out.get("rotowire_proj_fantasy_points"), errors="coerce").notna()
-    out["rotowire_minutes_available"] = pd.to_numeric(out.get("rotowire_proj_minutes"), errors="coerce").notna()
+    out["rotowire_projection_available"] = _numeric_merge_col("rotowire_proj_fantasy_points").notna()
+    out["rotowire_minutes_available"] = _numeric_merge_col("rotowire_proj_minutes").notna()
 
     helper_cols = [
         "rotowire_proj_fantasy_points_exact",

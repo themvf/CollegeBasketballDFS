@@ -355,6 +355,29 @@ def test_build_player_pool_blends_rotowire_projection_and_minutes_signal() -> No
     assert round(float(rw_g1["minutes_consensus"]), 3) == round(float(rw_g1["consensus_minutes_proj"]), 3)
 
 
+def test_build_player_pool_handles_rotowire_frame_with_no_matching_players() -> None:
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        rotowire_df=pd.DataFrame(
+            [
+                {
+                    "player_name": "Unmatched Player",
+                    "team_abbr": "ZZZ",
+                    "proj_fantasy_points": 31.5,
+                    "proj_minutes": 34.0,
+                }
+            ]
+        ),
+        bookmaker_filter="fanduel",
+    )
+
+    assert not pool.empty
+    assert (pool["rotowire_match_source"].astype(str) == "").all()
+    assert (pool["rotowire_projection_available"].astype(bool) == False).all()
+    assert (pool["rotowire_minutes_available"].astype(bool) == False).all()
+
+
 def test_build_player_pool_rotowire_value_signal_lifts_cheap_player_ownership() -> None:
     base_pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     rw_pool = build_player_pool(
