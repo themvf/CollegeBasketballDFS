@@ -3229,10 +3229,18 @@ def build_optimizer_pool_for_date(
         if supplement_type not in {"rotowire", "lineupstarter"}:
             continue
         supplement_df = supplement_df.copy()
-        supplement_df["supplement_priority"] = pd.to_numeric(
-            supplement_df.get("supplement_priority"),
-            errors="coerce",
-        ).fillna(float(slot_index))
+        supplement_priority = supplement_df.get("supplement_priority")
+        if isinstance(supplement_priority, pd.Series):
+            supplement_df["supplement_priority"] = pd.to_numeric(
+                supplement_priority.reindex(supplement_df.index),
+                errors="coerce",
+            ).fillna(float(slot_index))
+        else:
+            supplement_df["supplement_priority"] = pd.Series(
+                [float(slot_index)] * len(supplement_df),
+                index=supplement_df.index,
+                dtype="float64",
+            )
         summary = {
             "slot_index": int(slot_index),
             "supplement_type": supplement_type,
@@ -3377,6 +3385,10 @@ def render_slate_supplement_tab(
     save_key = f"save_slate_supplement_{slot_index}"
     delete_key = f"delete_slate_supplement_{slot_index}"
     confirm_delete_key = f"confirm_delete_slate_supplement_{slot_index}"
+    context_key = f"slate_supplement_{slot_index}_context"
+    current_context = f"{selected_date.isoformat()}::{_slate_key_from_label(selected_slate_key)}"
+    previous_context = str(st.session_state.get(context_key) or "")
+    context_changed = previous_context != current_context
 
     saved_df = pd.DataFrame()
     saved_type = ""
@@ -3391,8 +3403,15 @@ def render_slate_supplement_tab(
             service_account_json_b64=service_account_json_b64,
         )
         saved_type = _infer_slate_supplement_type(saved_df)
-        if type_key not in st.session_state and saved_type:
-            st.session_state[type_key] = _supplement_type_label(saved_type)
+
+    if context_changed:
+        st.session_state[context_key] = current_context
+        st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "Rotowire"
+        st.session_state[confirm_delete_key] = False
+        st.session_state.pop(upload_key, None)
+        st.session_state.pop(summary_key, None)
+    elif type_key not in st.session_state:
+        st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "Rotowire"
 
     supplement_type_label = st.selectbox(
         "Supplement Type",
@@ -3610,7 +3629,11 @@ def render_slate_supplement_tab(
             st.rerun()
 
     upload_summary = st.session_state.get(summary_key) or {}
-    if upload_summary:
+    summary_matches_context = (
+        str(upload_summary.get("selected_date") or "").strip() == selected_date.isoformat()
+        and _slate_key_from_label(upload_summary.get("slate_key")) == _slate_key_from_label(selected_slate_key)
+    )
+    if upload_summary and summary_matches_context:
         st.json(upload_summary)
 
     if not bucket_name:
