@@ -77,6 +77,7 @@ from college_basketball_dfs.cbb_ai_review import (
 )
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 from college_basketball_dfs.cbb_api_service import (
+    filter_unresolved_resolution_rows,
     import_dk_slate_overrides,
     import_lineupstarter_projection_csv,
     normalize_lineupstarter_upload_frame,
@@ -3900,7 +3901,7 @@ with tab_dk:
             if isinstance(active_context.get("resolution_df"), pd.DataFrame)
             else pd.DataFrame()
         )
-        unresolved_df = resolution_df.loc[resolution_df["dk_resolution_status"] != "resolved"].copy()
+        unresolved_df = filter_unresolved_resolution_rows(resolution_df)
 
         st.subheader("Resolved RotoWire Slate")
         m1, m2, m3, m4 = st.columns(4)
@@ -4508,7 +4509,7 @@ with tab_slate_vegas:
                     else pd.DataFrame()
                 )
                 if not resolution_df.empty:
-                    unresolved_df = resolution_df.loc[resolution_df["dk_resolution_status"] != "resolved"].copy()
+                    unresolved_df = filter_unresolved_resolution_rows(resolution_df)
                     if not unresolved_df.empty:
                         st.dataframe(unresolved_df, hide_index=True, use_container_width=True)
             else:
@@ -4539,9 +4540,7 @@ with tab_slate_vegas:
                         f"name only=`{int(slate_context.get('rotowire_name_only_matches') or 0)}`"
                     )
                     if isinstance(slate_context.get("resolution_df"), pd.DataFrame) and not slate_context.get("resolution_df").empty:
-                        unresolved_df = slate_context["resolution_df"].loc[
-                            slate_context["resolution_df"]["dk_resolution_status"] != "resolved"
-                        ].copy()
+                        unresolved_df = filter_unresolved_resolution_rows(slate_context["resolution_df"])
                         if not unresolved_df.empty:
                             st.subheader("Unresolved RotoWire Mismatches")
                             st.dataframe(unresolved_df, hide_index=True, use_container_width=True)
@@ -5238,7 +5237,7 @@ with tab_lineups:
                     else pd.DataFrame()
                 )
                 if not resolution_df.empty:
-                    unresolved_df = resolution_df.loc[resolution_df["dk_resolution_status"] != "resolved"].copy()
+                    unresolved_df = filter_unresolved_resolution_rows(resolution_df)
                     if not unresolved_df.empty:
                         st.dataframe(unresolved_df, hide_index=True, use_container_width=True)
             elif pool_df.empty:

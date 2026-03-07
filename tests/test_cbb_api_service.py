@@ -6,6 +6,7 @@ from pathlib import Path
 import pandas as pd
 
 from college_basketball_dfs.cbb_api_service import (
+    filter_unresolved_resolution_rows,
     import_dk_slate_overrides,
     import_lineupstarter_projection_csv,
     load_cached_dk_slate_frame,
@@ -17,6 +18,22 @@ from college_basketball_dfs.cbb_api_service import (
     save_manual_resolution_overrides,
     write_manual_overrides,
 )
+
+
+def test_filter_unresolved_resolution_rows_handles_legacy_frames_without_status() -> None:
+    unresolved = filter_unresolved_resolution_rows(
+        pd.DataFrame(
+            [
+                {
+                    "Position": "G",
+                    "Name": "Jane Smith",
+                    "ID": "2002",
+                }
+            ]
+        )
+    )
+
+    assert unresolved.empty
 
 
 def test_merge_manual_overrides_dedupes_by_player_team_slate_key() -> None:

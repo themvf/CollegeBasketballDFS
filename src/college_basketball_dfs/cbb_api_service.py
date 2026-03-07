@@ -63,6 +63,16 @@ MANUAL_OVERRIDE_COLUMNS = [
 ]
 
 
+def filter_unresolved_resolution_rows(resolution_df: pd.DataFrame | None) -> pd.DataFrame:
+    if not isinstance(resolution_df, pd.DataFrame) or resolution_df.empty:
+        return pd.DataFrame()
+    status = resolution_df.get("dk_resolution_status")
+    if not isinstance(status, pd.Series):
+        return pd.DataFrame()
+    status = status.fillna("").astype(str).str.strip().str.lower()
+    return resolution_df.loc[status != "resolved"].copy()
+
+
 def _resolve_api_bucket_name(bucket_name: str | None = None) -> str:
     resolved = (bucket_name or os.getenv("CBB_GCS_BUCKET", "")).strip()
     if not resolved:
@@ -395,11 +405,14 @@ def format_registry_coverage_error(
     sample_limit: int = 25,
 ) -> str:
     unresolved_rows: list[dict[str, Any]] = []
-    if isinstance(resolution_df, pd.DataFrame) and not resolution_df.empty:
-        unresolved = resolution_df.loc[
-            resolution_df["dk_resolution_status"] != "resolved",
-            ["player_name", "team_abbr", "dk_resolution_status", "dk_match_reason"],
-        ].head(max(1, int(sample_limit)))
+    unresolved = filter_unresolved_resolution_rows(resolution_df)
+    if not unresolved.empty:
+        sample_cols = [
+            col
+            for col in ["player_name", "team_abbr", "dk_resolution_status", "dk_match_reason"]
+            if col in unresolved.columns
+        ]
+        unresolved = unresolved[sample_cols].head(max(1, int(sample_limit)))
         unresolved_rows = unresolved.to_dict(orient="records")
     coverage_dict = dict(coverage or {})
     return (
@@ -451,7 +464,7 @@ def resolve_rotowire_slate(
         slate_date=pd.to_datetime(selected_date, errors="coerce").date().isoformat(),
         slate_key=slate_key,
     )
-    unresolved_df = resolution_df.loc[resolution_df["dk_resolution_status"] != "resolved"].copy()
+    unresolved_df = filter_unresolved_resolution_rows(resolution_df)
     coverage_error = (
         ""
         if bool((coverage or {}).get("fully_resolved"))
@@ -788,17 +801,22 @@ def import_dk_slate_overrides(
     )
     resolution_after = resolved_after.get("resolution_df")
     coverage_after = dict(resolved_after.get("coverage") or {})
+    unresolved_before = filter_unresolved_resolution_rows(resolution_before)
+    unresolved_after = filter_unresolved_resolution_rows(resolution_after)
 
     return {
         "slate": slate_meta,
         "coverage_before": dict(coverage_before or {}),
         "coverage_after": dict(coverage_after or {}),
         "derived_override_count": int(len(derived_overrides)),
-        "remaining_unresolved_before_count": int((resolution_before["dk_resolution_status"] != "resolved").sum()),
-        "remaining_unresolved_after_count": int((resolution_after["dk_resolution_status"] != "resolved").sum()),
-        "remaining_unresolved_after": resolution_after.loc[
-            resolution_after["dk_resolution_status"] != "resolved",
-            ["player_name", "team_abbr", "salary", "dk_resolution_status", "dk_match_reason"],
+        "remaining_unresolved_before_count": int(len(unresolved_before)),
+        "remaining_unresolved_after_count": int(len(unresolved_after)),
+        "remaining_unresolved_after": unresolved_after[
+            [
+                col
+                for col in ["player_name", "team_abbr", "salary", "dk_resolution_status", "dk_match_reason"]
+                if col in unresolved_after.columns
+            ]
         ].to_dict(orient="records"),
         "derived_overrides": derived_overrides.to_dict(orient="records"),
         "derivation_meta": dict(derive_meta or {}),
