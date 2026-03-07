@@ -3734,8 +3734,8 @@ with tab_dk:
                         cookie_header=(rotowire_cookie.strip() or None),
                         bucket_name=bucket_name,
                         gcp_project=gcp_project,
-                        service_account_json=service_account_json,
-                        service_account_json_b64=service_account_json_b64,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
                         persist=True,
                     )
                     st.session_state["cbb_rotowire_dk_repair_summary"] = repair_summary
@@ -3783,8 +3783,8 @@ with tab_dk:
             cookie_header=(rotowire_cookie.strip() or None),
             bucket_name=bucket_name,
             gcp_project=gcp_project,
-            service_account_json=service_account_json,
-            service_account_json_b64=service_account_json_b64,
+            service_account_json=cred_json,
+            service_account_json_b64=cred_json_b64,
         )
         slate_meta = dict(resolved_context.get("slate") or {})
         coverage = dict(resolved_context.get("coverage") or {})
@@ -3871,8 +3871,8 @@ with tab_dk:
                         slate_key=dk_slate_key,
                         bucket_name=bucket_name,
                         gcp_project=gcp_project,
-                        service_account_json=service_account_json,
-                        service_account_json_b64=service_account_json_b64,
+                        service_account_json=cred_json,
+                        service_account_json_b64=cred_json_b64,
                     )
                     st.session_state["cbb_manual_resolution_summary"] = manual_summary
                     load_resolved_rotowire_slate_context.clear()
