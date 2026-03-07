@@ -342,11 +342,22 @@ def _attach_rotowire_priors(
     rotowire_df: pd.DataFrame | None,
 ) -> pd.DataFrame:
     out = pool_df.copy()
+    def _nan_series() -> pd.Series:
+        return pd.Series([float("nan")] * len(out), index=out.index, dtype="float64")
+
     def _numeric_merge_col(name: str) -> pd.Series:
-        return pd.to_numeric(
-            out.get(name, pd.Series([pd.NA] * len(out), index=out.index)),
-            errors="coerce",
-        )
+        value = out.get(name)
+        if value is None:
+            return _nan_series()
+        if isinstance(value, pd.DataFrame):
+            if value.empty:
+                return _nan_series()
+            numeric_df = value.apply(pd.to_numeric, errors="coerce")
+            return numeric_df.bfill(axis=1).iloc[:, 0].reindex(out.index)
+        if isinstance(value, pd.Series):
+            return pd.to_numeric(value.reindex(out.index), errors="coerce")
+        scalar_value = pd.to_numeric(value, errors="coerce")
+        return pd.Series([scalar_value] * len(out), index=out.index, dtype="float64")
 
     for col in [
         "rotowire_proj_fantasy_points",
@@ -512,11 +523,9 @@ def _attach_rotowire_priors(
     ]:
         exact_col = f"{base_col}_exact"
         name_col = f"{base_col}_name"
-        out[base_col] = pd.to_numeric(out.get(exact_col), errors="coerce")
-        out[base_col] = out[base_col].where(
-            out[base_col].notna(),
-            pd.to_numeric(out.get(name_col), errors="coerce"),
-        )
+        exact_values = _numeric_merge_col(exact_col)
+        name_values = _numeric_merge_col(name_col)
+        out[base_col] = exact_values.where(exact_values.notna(), name_values)
 
     match_source = pd.Series([""] * len(out), index=out.index, dtype="object")
     exact_available = (

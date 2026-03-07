@@ -378,6 +378,32 @@ def test_build_player_pool_handles_rotowire_frame_with_no_matching_players() -> 
     assert (pool["rotowire_minutes_available"].astype(bool) == False).all()
 
 
+def test_build_player_pool_handles_rotowire_name_only_match_without_exact_columns() -> None:
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        rotowire_df=pd.DataFrame(
+            [
+                {
+                    "player_name": "Guard 1",
+                    "team_abbr": "",
+                    "proj_fantasy_points": 33.5,
+                    "proj_minutes": 34.0,
+                }
+            ]
+        ),
+        bookmaker_filter="fanduel",
+    )
+
+    guard_1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
+
+    assert guard_1["rotowire_match_source"] == "name_only"
+    assert bool(guard_1["rotowire_projection_available"]) is True
+    assert bool(guard_1["rotowire_minutes_available"]) is True
+    assert float(guard_1["rotowire_proj_fantasy_points"]) == 33.5
+    assert float(guard_1["rotowire_proj_minutes"]) == 34.0
+
+
 def test_build_player_pool_rotowire_value_signal_lifts_cheap_player_ownership() -> None:
     base_pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     rw_pool = build_player_pool(
