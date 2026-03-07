@@ -2961,7 +2961,7 @@ def _infer_slate_supplement_type(df: pd.DataFrame | None) -> str:
 def _supplement_type_label(supplement_type: str) -> str:
     if str(supplement_type or "").strip().lower() == "lineupstarter":
         return "LineupStarter"
-    return "Rotowire"
+    return "RotoWire"
 
 
 def _prepare_slate_supplement_frame(
@@ -3374,14 +3374,14 @@ def render_slate_supplement_tab(
 ) -> None:
     st.subheader(f"Slate Supplement #{slot_index}")
     st.caption(
-        "Upload an extra Rotowire or LineupStarter file for this slate. "
+        "Upload an extra RotoWire or LineupStarter file for this slate. "
         "Saved supplements are applied automatically in Slate + Vegas and the lineup generator."
     )
     st.caption(f"Active slate context: `{selected_slate_label}` (key: `{selected_slate_key}`)")
 
     summary_key = f"cbb_slate_supplement_{slot_index}_summary"
     type_key = f"slate_supplement_{slot_index}_type"
-    upload_key = f"slate_supplement_{slot_index}_upload"
+    upload_key_prefix = f"slate_supplement_{slot_index}_upload"
     save_key = f"save_slate_supplement_{slot_index}"
     delete_key = f"delete_slate_supplement_{slot_index}"
     confirm_delete_key = f"confirm_delete_slate_supplement_{slot_index}"
@@ -3406,25 +3406,53 @@ def render_slate_supplement_tab(
 
     if context_changed:
         st.session_state[context_key] = current_context
-        st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "Rotowire"
+        st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "RotoWire"
         st.session_state[confirm_delete_key] = False
-        st.session_state.pop(upload_key, None)
         st.session_state.pop(summary_key, None)
     elif type_key not in st.session_state:
-        st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "Rotowire"
+        st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "RotoWire"
+    elif str(st.session_state.get(type_key) or "").strip() == "Rotowire":
+        st.session_state[type_key] = "RotoWire"
 
     supplement_type_label = st.selectbox(
         "Supplement Type",
-        options=["Rotowire", "LineupStarter"],
+        options=["RotoWire", "LineupStarter"],
         key=type_key,
     )
     supplement_type = str(supplement_type_label or "").strip().lower()
+    selected_parser_label = _supplement_type_label(supplement_type)
+    upload_key = (
+        f"{upload_key_prefix}_{selected_date.isoformat()}_{_slate_key_from_label(selected_slate_key)}_{supplement_type}"
+    )
+
+    status_cols = st.columns(4)
+    status_cols[0].metric("Slot", f"#{slot_index}")
+    status_cols[1].metric("Slate Date", selected_date.isoformat())
+    status_cols[2].metric("Parser", selected_parser_label)
+    status_cols[3].metric("Saved Rows", int(len(saved_df)))
+    st.caption(
+        "Saving replaces the current supplement for this slot and slate. "
+        "When the same player appears more than once, Supplement #2 overrides Supplement #1."
+    )
+    if saved_df.empty:
+        st.info("No supplement is currently saved for this slot.")
+    else:
+        saved_label = _supplement_type_label(saved_type)
+        if saved_type == supplement_type:
+            st.success(f"This slot currently uses a saved {saved_label} supplement.")
+        else:
+            st.warning(
+                f"This slot currently stores a saved {saved_label} supplement. "
+                f"Saving with `{selected_parser_label}` will replace it."
+            )
+
     supplement_upload = st.file_uploader(
         "Upload Supplement CSV",
         type=["csv"],
         key=upload_key,
-        help="Rotowire expects player/team/projection columns. LineupStarter expects player/salary/projected points/projected ownership columns.",
+        help="RotoWire expects player/team/projection columns. LineupStarter expects player/salary/projected points/projected ownership columns.",
     )
+    st.caption(f"Current parser: `{selected_parser_label}`")
 
     active_slate_df = pd.DataFrame()
     active_ready = False
@@ -3453,6 +3481,8 @@ def render_slate_supplement_tab(
 
     preview_df = pd.DataFrame()
     preview_meta: dict[str, Any] = {}
+    st.markdown("---")
+    st.subheader("Upload Preview")
     if supplement_upload is not None:
         preview_payload = _read_uploaded_csv_frame(supplement_upload)
         decode_warning = str(preview_payload.get("decode_warning") or "").strip()
@@ -3477,7 +3507,7 @@ def render_slate_supplement_tab(
             m2.metric("Projection Rows", projection_rows)
             m3.metric("Minutes Rows", minutes_rows)
             if preview_df.empty:
-                st.warning("No usable Rotowire supplement rows were found. Include player/team plus projected fantasy points or projected minutes.")
+                st.warning("No usable RotoWire supplement rows were found. Include player/team plus projected fantasy points or projected minutes.")
             else:
                 display_cols = [
                     col
@@ -3520,6 +3550,8 @@ def render_slate_supplement_tab(
                         if col in unresolved_preview.columns
                     ]
                     st.dataframe(unresolved_preview[preview_cols], hide_index=True, use_container_width=True)
+    else:
+        st.caption(f"Choose a CSV to preview how this slot will be parsed as `{selected_parser_label}`.")
 
     save_col, delete_col = st.columns(2)
     save_clicked = save_col.button("Save Supplement", key=save_key)
@@ -3545,7 +3577,7 @@ def render_slate_supplement_tab(
                 if supplement_type == "rotowire":
                     normalized = normalize_rotowire_upload_frame(frame)
                     if normalized.empty:
-                        st.error("No usable Rotowire supplement rows were found in the uploaded CSV.")
+                        st.error("No usable RotoWire supplement rows were found in the uploaded CSV.")
                         normalized = pd.DataFrame()
                     coverage_summary = {
                         "rows_total": int(len(normalized)),
@@ -3634,8 +3666,11 @@ def render_slate_supplement_tab(
         and _slate_key_from_label(upload_summary.get("slate_key")) == _slate_key_from_label(selected_slate_key)
     )
     if upload_summary and summary_matches_context:
+        st.subheader("Last Save")
         st.json(upload_summary)
 
+    st.markdown("---")
+    st.subheader("Saved Supplement")
     if not bucket_name:
         st.info("Set a GCS bucket in the sidebar to load saved slate supplements.")
         return
@@ -3656,6 +3691,25 @@ def render_slate_supplement_tab(
     saved_type = _infer_slate_supplement_type(saved_df)
     saved_blob_name = _slate_supplement_blob_name(selected_date, slot_index, slate_key=selected_slate_key)
     st.caption(f"Saved supplement type: `{_supplement_type_label(saved_type)}` | Blob: `{saved_blob_name}`")
+    saved_source_file = ""
+    if "supplement_source_file" in saved_df.columns:
+        source_values = saved_df["supplement_source_file"].dropna().astype(str).str.strip()
+        nonempty_source_values = source_values.loc[source_values != ""]
+        if not nonempty_source_values.empty:
+            saved_source_file = nonempty_source_values.iloc[0]
+    saved_timestamp = ""
+    if "supplement_saved_at" in saved_df.columns:
+        saved_at_values = saved_df["supplement_saved_at"].dropna().astype(str).str.strip()
+        nonempty_saved_at = saved_at_values.loc[saved_at_values != ""]
+        if not nonempty_saved_at.empty:
+            saved_timestamp = nonempty_saved_at.iloc[0]
+    saved_meta_parts = []
+    if saved_source_file:
+        saved_meta_parts.append(f"Source file: `{saved_source_file}`")
+    if saved_timestamp:
+        saved_meta_parts.append(f"Saved at: `{saved_timestamp}`")
+    if saved_meta_parts:
+        st.caption(" | ".join(saved_meta_parts))
     if saved_type == "lineupstarter":
         s1, s2, s3, s4 = st.columns(4)
         s1.metric("Saved Rows", int(len(saved_df)))
