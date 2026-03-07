@@ -468,6 +468,170 @@ def resolve_rotowire_slate(
     }
 
 
+def load_cached_dk_slate_frame(
+    *,
+    selected_date: date | str,
+    slate_key: str = "main",
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    target_date = pd.to_datetime(selected_date, errors="coerce")
+    if pd.isna(target_date):
+        raise ValueError("selected_date must be a valid date")
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return pd.DataFrame()
+    try:
+        csv_text = store.read_dk_slate_csv(
+            target_date.date(),
+            str(slate_key or "").strip().lower() or "main",
+        )
+    except TypeError:
+        csv_text = store.read_dk_slate_csv(target_date.date())
+    if not csv_text or not str(csv_text).strip():
+        return pd.DataFrame()
+    try:
+        return pd.read_csv(io.StringIO(csv_text))
+    except Exception:
+        return pd.DataFrame()
+
+
+def resolve_active_slate_context(
+    *,
+    selected_date: date | str,
+    slate_key: str = "main",
+    contest_type: str = "Classic",
+    slate_name: str = "All",
+    slate_id: int | None = None,
+    site_id: int = 1,
+    cookie_header: str | None = None,
+    draftkings_dir: str | Path | None = None,
+    manual_overrides_path: str | Path | None = None,
+    manual_overrides_frame: pd.DataFrame | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    target_date = pd.to_datetime(selected_date, errors="coerce")
+    if pd.isna(target_date):
+        raise ValueError("selected_date must be a valid date")
+
+    resolved_bundle: dict[str, Any] = {
+        "slate": {},
+        "coverage": {},
+        "coverage_error": "",
+        "rotowire_df": pd.DataFrame(),
+        "resolved_slate_df": pd.DataFrame(),
+        "resolution_df": pd.DataFrame(),
+        "unresolved_players": [],
+    }
+    rotowire_error = ""
+    try:
+        resolved_bundle = resolve_rotowire_slate(
+            selected_date=target_date.date(),
+            slate_key=slate_key,
+            contest_type=contest_type,
+            slate_name=slate_name,
+            slate_id=slate_id,
+            site_id=site_id,
+            cookie_header=cookie_header,
+            draftkings_dir=draftkings_dir,
+            manual_overrides_path=manual_overrides_path,
+            manual_overrides_frame=manual_overrides_frame,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+    except Exception as exc:
+        rotowire_error = str(exc).strip()
+
+    rotowire_df = (
+        resolved_bundle.get("rotowire_df").copy()
+        if isinstance(resolved_bundle.get("rotowire_df"), pd.DataFrame)
+        else pd.DataFrame()
+    )
+    resolved_slate_df = (
+        resolved_bundle.get("resolved_slate_df").copy()
+        if isinstance(resolved_bundle.get("resolved_slate_df"), pd.DataFrame)
+        else pd.DataFrame()
+    )
+    resolution_df = (
+        resolved_bundle.get("resolution_df").copy()
+        if isinstance(resolved_bundle.get("resolution_df"), pd.DataFrame)
+        else pd.DataFrame()
+    )
+    coverage = dict(resolved_bundle.get("coverage") or {})
+    coverage_error = str(resolved_bundle.get("coverage_error") or "").strip()
+    if rotowire_error and not coverage_error:
+        coverage_error = f"RotoWire slate load failed. {rotowire_error}"
+
+    legacy_dk_slate_df = load_cached_dk_slate_frame(
+        selected_date=target_date.date(),
+        slate_key=slate_key,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    legacy_available = not legacy_dk_slate_df.empty
+    rotowire_ready = bool(coverage.get("fully_resolved")) and not resolved_slate_df.empty
+
+    active_slate_df = pd.DataFrame()
+    active_source = "unavailable"
+    active_source_label = "No active slate"
+    active_source_detail = ""
+    if rotowire_ready:
+        active_slate_df = resolved_slate_df.copy()
+        active_source = "rotowire_resolved"
+        active_source_label = "Resolved RotoWire slate"
+        active_source_detail = "Using resolved RotoWire slate as the active optimizer source."
+    elif legacy_available:
+        active_slate_df = legacy_dk_slate_df.copy()
+        active_source = "legacy_dk_fallback"
+        active_source_label = "Legacy DraftKings fallback"
+        if coverage_error:
+            active_source_detail = (
+                "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+            )
+        elif rotowire_error:
+            active_source_detail = (
+                "Using cached legacy DraftKings slate because RotoWire slate loading failed."
+            )
+        else:
+            active_source_detail = "Using cached legacy DraftKings slate as the active optimizer source."
+    else:
+        active_source_detail = coverage_error or rotowire_error or "No active slate source is available."
+
+    return {
+        "slate": dict(resolved_bundle.get("slate") or {}),
+        "coverage": coverage,
+        "coverage_error": coverage_error,
+        "rotowire_error": rotowire_error,
+        "rotowire_df": rotowire_df,
+        "resolved_slate_df": resolved_slate_df,
+        "resolution_df": resolution_df,
+        "unresolved_players": list(resolved_bundle.get("unresolved_players") or []),
+        "legacy_dk_slate_df": legacy_dk_slate_df,
+        "legacy_dk_available": bool(legacy_available),
+        "legacy_dk_rows": int(len(legacy_dk_slate_df)),
+        "active_slate_df": active_slate_df,
+        "active_source": active_source,
+        "active_source_label": active_source_label,
+        "active_source_detail": active_source_detail,
+        "active_ready": bool(not active_slate_df.empty),
+        "rotowire_fully_resolved": bool(coverage.get("fully_resolved")),
+    }
+
+
 def ensure_full_registry_coverage(
     coverage: dict[str, Any] | None,
     resolution_df: pd.DataFrame | None,

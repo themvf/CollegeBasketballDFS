@@ -14,14 +14,13 @@ from typing import Any, Callable
 import pandas as pd
 
 from .cbb_api_service import (
-    ensure_full_registry_coverage,
     load_injuries_frame,
     load_lineupstarter_projection_frame,
     load_odds_frame_for_date,
     load_props_frame_for_date,
     load_season_player_history_frame,
     load_season_vegas_history_frame,
-    resolve_rotowire_slate,
+    resolve_active_slate_context,
 )
 from .cbb_dk_optimizer import (
     build_dk_upload_csv,
@@ -404,8 +403,8 @@ def run_lineup_job_request(
     service_account_json = (str(request.get("service_account_json") or "").strip() or None)
     service_account_json_b64 = (str(request.get("service_account_json_b64") or "").strip() or None)
 
-    progress(5, "Loading RotoWire slate")
-    resolved_bundle = resolve_rotowire_slate(
+    progress(5, "Loading active slate context")
+    active_context = resolve_active_slate_context(
         selected_date=selected_date,
         slate_key=slate_key,
         contest_type=rotowire_contest_type,
@@ -418,16 +417,20 @@ def run_lineup_job_request(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
-    rotowire_df = resolved_bundle.get("rotowire_df")
-    slate_meta = dict(resolved_bundle.get("slate") or {})
-    if rotowire_df.empty:
-        raise RuntimeError("No RotoWire players returned for selected slate.")
+    rotowire_df = active_context.get("rotowire_df")
+    slate_meta = dict(active_context.get("slate") or {})
+    active_slate = (
+        active_context.get("active_slate_df").copy()
+        if isinstance(active_context.get("active_slate_df"), pd.DataFrame)
+        else pd.DataFrame()
+    )
+    coverage = dict(active_context.get("coverage") or {})
+    active_source = str(active_context.get("active_source") or "").strip()
+    active_source_detail = str(active_context.get("active_source_detail") or "").strip()
+    if active_slate.empty:
+        raise RuntimeError(active_source_detail or "No active slate could be loaded for lineup generation.")
 
-    progress(14, "Resolving DK IDs from registry")
-    resolved_slate = resolved_bundle.get("resolved_slate_df")
-    resolution_df = resolved_bundle.get("resolution_df")
-    coverage = dict(resolved_bundle.get("coverage") or {})
-    ensure_full_registry_coverage(coverage, resolution_df)
+    progress(14, "Preparing DK slate source")
 
     progress(18, "Loading saved LineupStarter priors")
     try:
@@ -450,7 +453,7 @@ def run_lineup_job_request(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
-    filtered_slate, removed_injured_df = remove_injured_players(resolved_slate, injuries_df)
+    filtered_slate, removed_injured_df = remove_injured_players(active_slate, injuries_df)
     season_history_df = load_season_player_history_frame(
         selected_date=selected_date,
         bucket_name=bucket_name,
@@ -574,6 +577,8 @@ def run_lineup_job_request(
                 "request": request,
                 "slate": slate_meta,
                 "coverage": coverage,
+                "active_source": active_source,
+                "active_source_detail": active_source_detail,
                 "lineupstarter_loaded": bool(not lineupstarter_df.empty),
                 "lineupstarter_players": int(lineupstarter_df["ID"].nunique()) if not lineupstarter_df.empty else 0,
                 "bookmaker_filter": bookmaker_filter,
@@ -600,6 +605,8 @@ def run_lineup_job_request(
         "warnings": [str(w) for w in warnings],
         "slate": slate_meta,
         "coverage": coverage,
+        "active_source": active_source,
+        "active_source_detail": active_source_detail,
         "lineupstarter_loaded": bool(not lineupstarter_df.empty),
         "bookmaker_filter": bookmaker_filter,
         "injury_rows": int(len(injuries_df)),

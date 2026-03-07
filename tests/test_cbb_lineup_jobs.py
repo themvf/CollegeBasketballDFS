@@ -55,10 +55,10 @@ def test_annotate_lineups_with_model_metadata() -> None:
     assert annotated[0]["model_profile"] == "tail_spike_pairs"
 
 
-def test_run_lineup_job_request_blocks_on_incomplete_registry_coverage(monkeypatch) -> None:
+def test_run_lineup_job_request_blocks_when_no_active_slate_source_exists(monkeypatch) -> None:
     seen: dict[str, object] = {}
 
-    def _fake_resolve_rotowire_slate(**_: object) -> dict[str, object]:
+    def _fake_resolve_active_slate_context(**_: object) -> dict[str, object]:
         seen.update(_)
         return {
             "slate": {
@@ -75,8 +75,13 @@ def test_run_lineup_job_request_blocks_on_incomplete_registry_coverage(monkeypat
                 "coverage_pct": 0.0,
                 "fully_resolved": False,
             },
+            "coverage_error": "DK registry resolution incomplete.",
             "rotowire_df": pd.DataFrame([{"player_name": "Jane Smith"}]),
             "resolved_slate_df": pd.DataFrame(),
+            "active_slate_df": pd.DataFrame(),
+            "active_source": "unavailable",
+            "active_source_detail": "No active slate source is available.",
+            "active_ready": False,
             "resolution_df": pd.DataFrame(
                 [
                     {
@@ -89,9 +94,9 @@ def test_run_lineup_job_request_blocks_on_incomplete_registry_coverage(monkeypat
             ),
         }
 
-    monkeypatch.setattr(cbb_lineup_jobs, "resolve_rotowire_slate", _fake_resolve_rotowire_slate)
+    monkeypatch.setattr(cbb_lineup_jobs, "resolve_active_slate_context", _fake_resolve_active_slate_context)
 
-    with pytest.raises(RuntimeError, match="DK registry resolution incomplete"):
+    with pytest.raises(RuntimeError, match="No active slate source is available"):
         run_lineup_job_request(
             request={
                 "selected_date": "2026-03-05",
@@ -110,7 +115,7 @@ def test_run_lineup_job_request_blocks_on_incomplete_registry_coverage(monkeypat
 
 
 def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) -> None:
-    def _fake_resolve_rotowire_slate(**_: object) -> dict[str, object]:
+    def _fake_resolve_active_slate_context(**_: object) -> dict[str, object]:
         return {
             "slate": {
                 "slate_id": 3401,
@@ -120,14 +125,15 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
             },
             "coverage": {
                 "players_total": 1,
-                "resolved_players": 1,
-                "unresolved_players": 0,
+                "resolved_players": 0,
+                "unresolved_players": 1,
                 "conflict_players": 0,
-                "coverage_pct": 100.0,
-                "fully_resolved": True,
+                "coverage_pct": 0.0,
+                "fully_resolved": False,
             },
             "rotowire_df": pd.DataFrame([{"player_name": "Jane Smith", "team_abbr": "AWAY"}]),
-            "resolved_slate_df": pd.DataFrame(
+            "resolved_slate_df": pd.DataFrame(),
+            "active_slate_df": pd.DataFrame(
                 [
                     {
                         "Position": "G",
@@ -152,6 +158,9 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
                     }
                 ]
             ),
+            "active_source": "legacy_dk_fallback",
+            "active_source_detail": "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete.",
+            "active_ready": True,
         }
 
     seen: dict[str, object] = {}
@@ -160,12 +169,18 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
         lineupstarter_df = kwargs.get("lineupstarter_df")
         assert isinstance(lineupstarter_df, pd.DataFrame)
         seen["lineupstarter_rows"] = int(len(lineupstarter_df))
+        slate_df = kwargs.get("slate_df")
+        assert isinstance(slate_df, pd.DataFrame)
+        seen["active_slate_rows"] = int(len(slate_df))
         season_stats_df = kwargs.get("season_stats_df")
         props_df = kwargs.get("props_df")
         odds_games_df = kwargs.get("odds_games_df")
         assert isinstance(season_stats_df, pd.DataFrame)
         assert isinstance(props_df, pd.DataFrame)
         assert isinstance(odds_games_df, pd.DataFrame)
+        rotowire_df = kwargs.get("rotowire_df")
+        assert isinstance(rotowire_df, pd.DataFrame)
+        seen["rotowire_rows"] = int(len(rotowire_df))
         seen["season_history_rows"] = int(len(season_stats_df))
         seen["props_rows"] = int(len(props_df))
         seen["odds_tail_rows"] = int(len(odds_games_df))
@@ -200,7 +215,7 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
             [],
         )
 
-    monkeypatch.setattr(cbb_lineup_jobs, "resolve_rotowire_slate", _fake_resolve_rotowire_slate)
+    monkeypatch.setattr(cbb_lineup_jobs, "resolve_active_slate_context", _fake_resolve_active_slate_context)
     monkeypatch.setattr(
         cbb_lineup_jobs,
         "load_lineupstarter_projection_frame",
@@ -270,11 +285,14 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
     )
 
     assert seen["lineupstarter_rows"] == 1
+    assert seen["active_slate_rows"] == 1
+    assert seen["rotowire_rows"] == 1
     assert seen["season_history_rows"] == 1
     assert seen["props_rows"] == 1
     assert seen["odds_tail_rows"] == 1
     assert seen["bookmaker_filter"] == "fanduel"
     assert bool(result["lineupstarter_loaded"]) is True
+    assert result["active_source"] == "legacy_dk_fallback"
     assert int(result["season_history_rows"]) == 1
     assert int(result["props_rows"]) == 1
     assert int(result["odds_tail_rows"]) == 1

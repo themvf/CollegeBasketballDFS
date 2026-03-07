@@ -80,6 +80,7 @@ from college_basketball_dfs.cbb_api_service import (
     import_dk_slate_overrides,
     import_lineupstarter_projection_csv,
     normalize_lineupstarter_upload_frame,
+    resolve_active_slate_context,
     resolve_rotowire_slate,
     save_manual_resolution_overrides,
 )
@@ -2532,6 +2533,65 @@ def load_resolved_rotowire_slate_context(
 
 
 @st.cache_data(ttl=300, show_spinner=False)
+def load_active_slate_context(
+    selected_date: date,
+    slate_key: str,
+    contest_type: str,
+    slate_name: str,
+    slate_id: int | None,
+    site_id: int,
+    cookie_header: str | None,
+    bucket_name: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> dict[str, Any]:
+    bundle = resolve_active_slate_context(
+        selected_date=selected_date,
+        slate_key=slate_key,
+        contest_type=contest_type,
+        slate_name=slate_name,
+        slate_id=slate_id,
+        site_id=site_id,
+        cookie_header=cookie_header,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    return {
+        "slate": dict(bundle.get("slate") or {}),
+        "coverage": dict(bundle.get("coverage") or {}),
+        "coverage_error": str(bundle.get("coverage_error") or ""),
+        "rotowire_error": str(bundle.get("rotowire_error") or ""),
+        "rotowire_df": bundle.get("rotowire_df").copy() if isinstance(bundle.get("rotowire_df"), pd.DataFrame) else pd.DataFrame(),
+        "resolved_slate_df": (
+            bundle.get("resolved_slate_df").copy()
+            if isinstance(bundle.get("resolved_slate_df"), pd.DataFrame)
+            else pd.DataFrame()
+        ),
+        "resolution_df": bundle.get("resolution_df").copy() if isinstance(bundle.get("resolution_df"), pd.DataFrame) else pd.DataFrame(),
+        "legacy_dk_slate_df": (
+            bundle.get("legacy_dk_slate_df").copy()
+            if isinstance(bundle.get("legacy_dk_slate_df"), pd.DataFrame)
+            else pd.DataFrame()
+        ),
+        "active_slate_df": (
+            bundle.get("active_slate_df").copy()
+            if isinstance(bundle.get("active_slate_df"), pd.DataFrame)
+            else pd.DataFrame()
+        ),
+        "active_source": str(bundle.get("active_source") or ""),
+        "active_source_label": str(bundle.get("active_source_label") or ""),
+        "active_source_detail": str(bundle.get("active_source_detail") or ""),
+        "active_ready": bool(bundle.get("active_ready")),
+        "legacy_dk_available": bool(bundle.get("legacy_dk_available")),
+        "legacy_dk_rows": int(bundle.get("legacy_dk_rows") or 0),
+        "rotowire_fully_resolved": bool(bundle.get("rotowire_fully_resolved")),
+    }
+
+
+@st.cache_data(ttl=300, show_spinner=False)
 def load_injuries_feed_frame(
     bucket_name: str,
     selected_date: date | None,
@@ -2984,7 +3044,7 @@ def build_optimizer_pool_for_date(
     recent_form_games: int = 7,
     recent_points_weight: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
-    rotowire_bundle = load_resolved_rotowire_slate_context(
+    slate_bundle = load_active_slate_context(
         selected_date=slate_date,
         slate_key=_slate_key_from_label(slate_key),
         contest_type=str(st.session_state.get("load_slate_rotowire_contest_type") or "Classic"),
@@ -3000,10 +3060,10 @@ def build_optimizer_pool_for_date(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
-    slate_df = rotowire_bundle.get("resolved_slate_df").copy() if isinstance(rotowire_bundle.get("resolved_slate_df"), pd.DataFrame) else pd.DataFrame()
-    rotowire_df = rotowire_bundle.get("rotowire_df").copy() if isinstance(rotowire_bundle.get("rotowire_df"), pd.DataFrame) else pd.DataFrame()
-    coverage = dict(rotowire_bundle.get("coverage") or {})
-    rotowire_bundle = dict(rotowire_bundle)
+    slate_df = slate_bundle.get("active_slate_df").copy() if isinstance(slate_bundle.get("active_slate_df"), pd.DataFrame) else pd.DataFrame()
+    rotowire_df = slate_bundle.get("rotowire_df").copy() if isinstance(slate_bundle.get("rotowire_df"), pd.DataFrame) else pd.DataFrame()
+    active_ready = bool(slate_bundle.get("active_ready"))
+    slate_bundle = dict(slate_bundle)
     injuries_df = load_injuries_frame(
         bucket_name=bucket_name,
         selected_date=slate_date,
@@ -3013,13 +3073,13 @@ def build_optimizer_pool_for_date(
     )
     lineupstarter_df = pd.DataFrame()
     if slate_df.empty:
-        rotowire_bundle["lineupstarter_df"] = pd.DataFrame()
-        rotowire_bundle["lineupstarter_loaded"] = False
-        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame(), rotowire_bundle
-    if not bool(coverage.get("fully_resolved")):
-        rotowire_bundle["lineupstarter_df"] = pd.DataFrame()
-        rotowire_bundle["lineupstarter_loaded"] = False
-        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame(), rotowire_bundle
+        slate_bundle["lineupstarter_df"] = pd.DataFrame()
+        slate_bundle["lineupstarter_loaded"] = False
+        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame(), slate_bundle
+    if not active_ready:
+        slate_bundle["lineupstarter_df"] = pd.DataFrame()
+        slate_bundle["lineupstarter_loaded"] = False
+        return pd.DataFrame(), pd.DataFrame(), slate_df, injuries_df, pd.DataFrame(), slate_bundle
 
     lineupstarter_df = load_lineupstarter_frame_for_date(
         bucket_name=bucket_name,
@@ -3029,20 +3089,20 @@ def build_optimizer_pool_for_date(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
-    rotowire_bundle["lineupstarter_df"] = lineupstarter_df.copy() if not lineupstarter_df.empty else pd.DataFrame()
-    rotowire_bundle["lineupstarter_loaded"] = bool(not lineupstarter_df.empty)
-    rotowire_bundle["lineupstarter_rows"] = int(len(lineupstarter_df))
-    rotowire_bundle["lineupstarter_players"] = (
+    slate_bundle["lineupstarter_df"] = lineupstarter_df.copy() if not lineupstarter_df.empty else pd.DataFrame()
+    slate_bundle["lineupstarter_loaded"] = bool(not lineupstarter_df.empty)
+    slate_bundle["lineupstarter_rows"] = int(len(lineupstarter_df))
+    slate_bundle["lineupstarter_players"] = (
         int(lineupstarter_df["ID"].nunique())
         if not lineupstarter_df.empty and "ID" in lineupstarter_df.columns
         else 0
     )
-    rotowire_bundle["lineupstarter_projection_rows"] = (
+    slate_bundle["lineupstarter_projection_rows"] = (
         int(pd.to_numeric(lineupstarter_df.get("lineupstarter_projected_points"), errors="coerce").notna().sum())
         if not lineupstarter_df.empty
         else 0
     )
-    rotowire_bundle["lineupstarter_ownership_rows"] = (
+    slate_bundle["lineupstarter_ownership_rows"] = (
         int(pd.to_numeric(lineupstarter_df.get("lineupstarter_projected_ownership"), errors="coerce").notna().sum())
         if not lineupstarter_df.empty
         else 0
@@ -3091,7 +3151,27 @@ def build_optimizer_pool_for_date(
         recent_points_weight=float(max(0.0, min(1.0, recent_points_weight))),
         lineupstarter_df=lineupstarter_df,
     )
-    return pool_df, removed_injured, slate_df, injuries_df, season_history_df, rotowire_bundle
+    slate_bundle["rotowire_projection_matched_players"] = (
+        int(pd.to_numeric(pool_df.get("rotowire_proj_fantasy_points"), errors="coerce").notna().sum())
+        if not pool_df.empty
+        else 0
+    )
+    slate_bundle["rotowire_minutes_matched_players"] = (
+        int(pd.to_numeric(pool_df.get("rotowire_proj_minutes"), errors="coerce").notna().sum())
+        if not pool_df.empty
+        else 0
+    )
+    slate_bundle["rotowire_team_exact_matches"] = (
+        int((pool_df.get("rotowire_match_source", pd.Series(dtype=str)).astype(str) == "team_exact").sum())
+        if not pool_df.empty
+        else 0
+    )
+    slate_bundle["rotowire_name_only_matches"] = (
+        int((pool_df.get("rotowire_match_source", pd.Series(dtype=str)).astype(str) == "name_only").sum())
+        if not pool_df.empty
+        else 0
+    )
+    return pool_df, removed_injured, slate_df, injuries_df, season_history_df, slate_bundle
 
 
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
@@ -3543,6 +3623,8 @@ with tab_dk:
                     store = CbbGcsStore(bucket_name=bucket_name, client=client)
                     deleted, blob_name = _delete_dk_slate_csv(store, dk_slate_date, slate_key=dk_slate_key)
                     load_dk_slate_frame_for_date.clear()
+                    load_active_slate_context.clear()
+                    load_resolved_rotowire_slate_context.clear()
                     if deleted:
                         st.session_state.pop("cbb_dk_upload_summary", None)
                         st.success(f"Deleted `{blob_name}`")
@@ -3582,6 +3664,8 @@ with tab_dk:
                             slate_key=dk_slate_key,
                         )
                         load_dk_slate_frame_for_date.clear()
+                        load_active_slate_context.clear()
+                        load_resolved_rotowire_slate_context.clear()
                         st.session_state["cbb_dk_upload_summary"] = {
                             "slate_date": dk_slate_date.isoformat(),
                             "slate_label": dk_slate_label,
@@ -3713,9 +3797,11 @@ with tab_backfill:
 with tab_dk:
     if refresh_resolved_slate_clicked:
         load_resolved_rotowire_slate_context.clear()
+        load_active_slate_context.clear()
         load_lineupstarter_frame_for_date.clear()
     if load_dk_slate_clicked:
         load_dk_slate_frame_for_date.clear()
+        load_active_slate_context.clear()
 
     if repair_dk_slate_clicked:
         if repair_dk_slate_upload is None:
@@ -3740,6 +3826,7 @@ with tab_dk:
                     )
                     st.session_state["cbb_rotowire_dk_repair_summary"] = repair_summary
                     load_resolved_rotowire_slate_context.clear()
+                    load_active_slate_context.clear()
                     st.success(
                         "DraftKings fallback repair completed: "
                         f"{int(repair_summary.get('derived_override_count') or 0)} override(s) derived."
@@ -3773,7 +3860,7 @@ with tab_dk:
         st.json(dk_upload_summary)
 
     try:
-        resolved_context = load_resolved_rotowire_slate_context(
+        active_context = load_active_slate_context(
             selected_date=dk_slate_date,
             slate_key=dk_slate_key,
             contest_type=rotowire_contest_type,
@@ -3786,17 +3873,31 @@ with tab_dk:
             service_account_json=cred_json,
             service_account_json_b64=cred_json_b64,
         )
-        slate_meta = dict(resolved_context.get("slate") or {})
-        coverage = dict(resolved_context.get("coverage") or {})
+        slate_meta = dict(active_context.get("slate") or {})
+        coverage = dict(active_context.get("coverage") or {})
         coverage_ok = bool(coverage.get("fully_resolved"))
+        active_ready = bool(active_context.get("active_ready"))
+        active_source = str(active_context.get("active_source") or "").strip()
+        active_source_label = str(active_context.get("active_source_label") or "").strip()
+        active_source_detail = str(active_context.get("active_source_detail") or "").strip()
         resolved_slate_df = (
-            resolved_context.get("resolved_slate_df").copy()
-            if isinstance(resolved_context.get("resolved_slate_df"), pd.DataFrame)
+            active_context.get("resolved_slate_df").copy()
+            if isinstance(active_context.get("resolved_slate_df"), pd.DataFrame)
+            else pd.DataFrame()
+        )
+        active_slate_df = (
+            active_context.get("active_slate_df").copy()
+            if isinstance(active_context.get("active_slate_df"), pd.DataFrame)
+            else pd.DataFrame()
+        )
+        legacy_dk_slate_df = (
+            active_context.get("legacy_dk_slate_df").copy()
+            if isinstance(active_context.get("legacy_dk_slate_df"), pd.DataFrame)
             else pd.DataFrame()
         )
         resolution_df = (
-            resolved_context.get("resolution_df").copy()
-            if isinstance(resolved_context.get("resolution_df"), pd.DataFrame)
+            active_context.get("resolution_df").copy()
+            if isinstance(active_context.get("resolution_df"), pd.DataFrame)
             else pd.DataFrame()
         )
         unresolved_df = resolution_df.loc[resolution_df["dk_resolution_status"] != "resolved"].copy()
@@ -3816,11 +3917,14 @@ with tab_dk:
         )
 
         if resolved_slate_df.empty:
-            st.warning("No RotoWire slate rows were returned for the selected configuration.")
+            if active_source == "legacy_dk_fallback" and not legacy_dk_slate_df.empty:
+                st.warning("No resolved RotoWire slate is available. The cached legacy DK slate will control the optimizer.")
+            else:
+                st.warning("No RotoWire slate rows were returned for the selected configuration.")
         elif coverage_ok:
             st.success("Full coverage resolved. Lineup generation and DK export are enabled.")
         else:
-            st.warning(str(resolved_context.get("coverage_error") or "DK registry coverage is incomplete."))
+            st.warning(str(active_context.get("coverage_error") or "DK registry coverage is incomplete."))
 
         if not unresolved_df.empty:
             st.subheader("Coverage Gaps")
@@ -3876,6 +3980,7 @@ with tab_dk:
                     )
                     st.session_state["cbb_manual_resolution_summary"] = manual_summary
                     load_resolved_rotowire_slate_context.clear()
+                    load_active_slate_context.clear()
                     st.success(
                         f"Saved {int(manual_summary.get('saved_override_count') or 0)} manual override(s) "
                         "and reloaded coverage."
@@ -3886,6 +3991,30 @@ with tab_dk:
 
         if not resolved_slate_df.empty:
             st.dataframe(resolved_slate_df, hide_index=True, use_container_width=True)
+
+        st.subheader("Active Slate Source")
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Source", active_source_label or "Unavailable")
+        a2.metric("Active Rows", int(len(active_slate_df)))
+        a3.metric("Legacy DK Rows", int(len(legacy_dk_slate_df)))
+        a4.metric("RotoWire Coverage %", f"{float(coverage.get('coverage_pct') or 0.0):.1f}")
+        if active_ready:
+            if active_source == "legacy_dk_fallback":
+                st.warning(
+                    active_source_detail
+                    or "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+                )
+            else:
+                st.success(active_source_detail or "Using resolved RotoWire slate as the active optimizer source.")
+        else:
+            st.error(active_source_detail or "No active slate source is ready.")
+
+        if active_source == "legacy_dk_fallback" and not active_slate_df.empty:
+            st.caption(
+                "RotoWire mismatch coverage is still shown above for repair. The optimizer will use the cached DK slate, "
+                "and RotoWire priors will attach only where player/team matching still succeeds."
+            )
+            st.dataframe(active_slate_df, hide_index=True, use_container_width=True)
 
         st.subheader("LineupStarter Priors")
         st.caption(
@@ -3912,7 +4041,9 @@ with tab_dk:
         )
         preview_lineupstarter_df = pd.DataFrame()
         preview_lineupstarter_coverage: dict[str, Any] = {}
-        if lineupstarter_upload is not None and not resolved_slate_df.empty:
+        if active_source == "legacy_dk_fallback":
+            st.caption("LineupStarter mapping is using the active legacy DK fallback slate for this date.")
+        if lineupstarter_upload is not None and not active_slate_df.empty:
             preview_payload = _read_uploaded_csv_frame(lineupstarter_upload)
             if preview_payload.get("decode_warning"):
                 st.caption(str(preview_payload.get("decode_warning")))
@@ -3924,7 +4055,7 @@ with tab_dk:
             else:
                 preview_lineupstarter_df, preview_lineupstarter_coverage = normalize_lineupstarter_upload_frame(
                     preview_frame,
-                    slate_df=resolved_slate_df,
+                    slate_df=active_slate_df,
                 )
                 lp1, lp2, lp3, lp4 = st.columns(4)
                 lp1.metric("Preview Rows", int(preview_lineupstarter_coverage.get("rows_total") or 0))
@@ -3932,7 +4063,7 @@ with tab_dk:
                 lp3.metric("Unresolved", int(preview_lineupstarter_coverage.get("unresolved_rows") or 0))
                 lp4.metric("Coverage %", f"{float(preview_lineupstarter_coverage.get('coverage_pct') or 0.0):.1f}")
                 if bool(preview_lineupstarter_coverage.get("fully_resolved")):
-                    st.success("LineupStarter upload maps cleanly to the resolved DK slate.")
+                    st.success("LineupStarter upload maps cleanly to the current active DK slate.")
                 else:
                     st.warning("LineupStarter upload still has unresolved rows. Save is blocked until coverage is 100%.")
                     unresolved_preview = preview_lineupstarter_df.loc[
@@ -3956,13 +4087,13 @@ with tab_dk:
         save_lineupstarter_clicked = st.button(
             "Save LineupStarter Priors to GCS",
             key="save_lineupstarter_priors",
-            disabled=(not coverage_ok),
+            disabled=(not active_ready),
         )
         if save_lineupstarter_clicked:
             if not bucket_name:
                 st.error("Set a GCS bucket before saving LineupStarter priors.")
-            elif resolved_slate_df.empty or not coverage_ok:
-                st.error("Resolve the RotoWire slate to 100% DK coverage before saving LineupStarter priors.")
+            elif active_slate_df.empty or not active_ready:
+                st.error("Load an active DK slate source before saving LineupStarter priors.")
             elif lineupstarter_upload is None:
                 st.error("Choose a LineupStarter CSV file before saving.")
             elif preview_lineupstarter_coverage and not bool(preview_lineupstarter_coverage.get("fully_resolved")):
@@ -3971,7 +4102,7 @@ with tab_dk:
                 try:
                     lineupstarter_summary = import_lineupstarter_projection_csv(
                         csv_bytes=lineupstarter_upload.getvalue(),
-                        resolved_slate_df=resolved_slate_df,
+                        resolved_slate_df=active_slate_df,
                         selected_date=dk_slate_date,
                         slate_key=dk_slate_key,
                         bucket_name=bucket_name,
@@ -4339,6 +4470,7 @@ with tab_slate_vegas:
     if refresh_pool_clicked:
         load_dk_slate_frame_for_date.clear()
         load_resolved_rotowire_slate_context.clear()
+        load_active_slate_context.clear()
         load_lineupstarter_frame_for_date.clear()
         load_props_frame_for_date.clear()
         load_odds_frame_for_date.clear()
@@ -4362,11 +4494,14 @@ with tab_slate_vegas:
                 recent_points_weight=slate_recent_points_weight,
             )
             slate_coverage = dict(slate_context.get("coverage") or {})
-            coverage_ok = bool(slate_coverage.get("fully_resolved"))
+            active_ready = bool(slate_context.get("active_ready"))
+            active_source = str(slate_context.get("active_source") or "").strip()
+            active_source_label = str(slate_context.get("active_source_label") or "").strip()
+            active_source_detail = str(slate_context.get("active_source_detail") or "").strip()
             if raw_slate_df.empty:
-                st.warning("No RotoWire slate could be resolved for the selected date+slate. Check `DK Slate`.")
-            elif not coverage_ok:
-                st.warning(str(slate_context.get("coverage_error") or "DK registry coverage is incomplete."))
+                st.warning("No active slate source could be loaded for the selected date+slate. Check `DK Slate`.")
+            elif not active_ready:
+                st.warning(str(active_source_detail or slate_context.get("coverage_error") or "DK registry coverage is incomplete."))
                 resolution_df = (
                     slate_context.get("resolution_df").copy()
                     if isinstance(slate_context.get("resolution_df"), pd.DataFrame)
@@ -4378,8 +4513,8 @@ with tab_slate_vegas:
                         st.dataframe(unresolved_df, hide_index=True, use_container_width=True)
             else:
                 m1, m2, m3, m4 = st.columns(4)
-                m1.metric("Resolved Slate Players", int(len(raw_slate_df)))
-                m2.metric("Coverage %", f"{float(slate_coverage.get('coverage_pct') or 0.0):.1f}")
+                m1.metric("Active Slate Players", int(len(raw_slate_df)))
+                m2.metric("Active Source", active_source_label or "Unknown")
                 m3.metric("Removed (Out/Doubtful)", int(len(removed_injured_df)))
                 m4.metric("Active Pool Players", int(len(pool_df)))
                 mins_pct = pd.to_numeric(pool_df.get("our_minutes_avg", pd.Series(dtype=float)), errors="coerce")
@@ -4391,6 +4526,33 @@ with tab_slate_vegas:
                     f"Average projected minutes: `{avg_mins:.1f}` | "
                     f"Average recent minutes ({slate_recent_form_games}g): `{avg_mins_recent:.1f}`"
                 )
+                if active_source == "legacy_dk_fallback":
+                    st.warning(
+                        active_source_detail
+                        or "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+                    )
+                    st.caption(
+                        "RotoWire repair is still recommended. Current prior attachment on the active DK slate: "
+                        f"projection matches=`{int(slate_context.get('rotowire_projection_matched_players') or 0)}` | "
+                        f"minutes matches=`{int(slate_context.get('rotowire_minutes_matched_players') or 0)}` | "
+                        f"team exact=`{int(slate_context.get('rotowire_team_exact_matches') or 0)}` | "
+                        f"name only=`{int(slate_context.get('rotowire_name_only_matches') or 0)}`"
+                    )
+                    if isinstance(slate_context.get("resolution_df"), pd.DataFrame) and not slate_context.get("resolution_df").empty:
+                        unresolved_df = slate_context["resolution_df"].loc[
+                            slate_context["resolution_df"]["dk_resolution_status"] != "resolved"
+                        ].copy()
+                        if not unresolved_df.empty:
+                            st.subheader("Unresolved RotoWire Mismatches")
+                            st.dataframe(unresolved_df, hide_index=True, use_container_width=True)
+                else:
+                    st.caption(
+                        "Resolved slate coverage: "
+                        f"`{float(slate_coverage.get('coverage_pct') or 0.0):.1f}%` "
+                        f"({int(slate_coverage.get('resolved_players') or 0)}/"
+                        f"{int(slate_coverage.get('players_total') or 0)} players, "
+                        f"conflicts={int(slate_coverage.get('conflict_players') or 0)})."
+                    )
                 if bool(slate_context.get("lineupstarter_loaded")):
                     st.caption(
                         "LineupStarter priors loaded: "
@@ -5062,11 +5224,14 @@ with tab_lineups:
             )
 
             slate_coverage = dict(slate_context.get("coverage") or {})
-            coverage_ok = bool(slate_coverage.get("fully_resolved"))
+            active_ready = bool(slate_context.get("active_ready"))
+            active_source = str(slate_context.get("active_source") or "").strip()
+            active_source_label = str(slate_context.get("active_source_label") or "").strip()
+            active_source_detail = str(slate_context.get("active_source_detail") or "").strip()
             if raw_slate_df.empty:
-                st.warning("No RotoWire slate could be resolved for the selected lineup date+slate. Check `DK Slate`.")
-            elif not coverage_ok:
-                st.warning(str(slate_context.get("coverage_error") or "DK registry coverage is incomplete."))
+                st.warning("No active slate source could be loaded for the selected lineup date+slate. Check `DK Slate`.")
+            elif not active_ready:
+                st.warning(str(active_source_detail or slate_context.get("coverage_error") or "DK registry coverage is incomplete."))
                 resolution_df = (
                     slate_context.get("resolution_df").copy()
                     if isinstance(slate_context.get("resolution_df"), pd.DataFrame)
@@ -5116,13 +5281,28 @@ with tab_lineups:
                             )
                             exposure_caps[label_to_id[label]] = float(pct)
 
-                st.caption(
-                    "Resolved slate coverage: "
-                    f"`{float(slate_coverage.get('coverage_pct') or 0.0):.1f}%` "
-                    f"({int(slate_coverage.get('resolved_players') or 0)}/"
-                    f"{int(slate_coverage.get('players_total') or 0)} players, "
-                    f"conflicts={int(slate_coverage.get('conflict_players') or 0)})."
-                )
+                if active_source == "legacy_dk_fallback":
+                    st.warning(
+                        active_source_detail
+                        or "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+                    )
+                    st.caption(
+                        "Active source: "
+                        f"`{active_source_label or 'Legacy DraftKings fallback'}` | "
+                        "RotoWire prior attachment on this active DK slate: "
+                        f"projection matches=`{int(slate_context.get('rotowire_projection_matched_players') or 0)}` | "
+                        f"minutes matches=`{int(slate_context.get('rotowire_minutes_matched_players') or 0)}` | "
+                        f"team exact=`{int(slate_context.get('rotowire_team_exact_matches') or 0)}` | "
+                        f"name only=`{int(slate_context.get('rotowire_name_only_matches') or 0)}`"
+                    )
+                else:
+                    st.caption(
+                        "Resolved slate coverage: "
+                        f"`{float(slate_coverage.get('coverage_pct') or 0.0):.1f}%` "
+                        f"({int(slate_coverage.get('resolved_players') or 0)}/"
+                        f"{int(slate_coverage.get('players_total') or 0)} players, "
+                        f"conflicts={int(slate_coverage.get('conflict_players') or 0)})."
+                    )
                 if bool(slate_context.get("lineupstarter_loaded")):
                     st.caption(
                         "LineupStarter priors active: "
@@ -5135,7 +5315,7 @@ with tab_lineups:
                 generate_lineups_clicked = st.button(
                     "Generate DK Lineups",
                     key="generate_dk_lineups",
-                    disabled=(not coverage_ok),
+                    disabled=(not active_ready or pool_df.empty),
                 )
                 if generate_lineups_clicked:
                     # Prevent stale prior-date run data from being shown/exported if generation fails mid-run.
@@ -5700,7 +5880,7 @@ with tab_lineups:
                             file_name=f"dk_lineups_{export_date}_{export_slate}_{active_version_key}.csv",
                             mime="text/csv",
                             key="download_dk_upload_csv",
-                            disabled=(not coverage_ok),
+                            disabled=(not active_ready),
                         )
                 elif generate_lineups_clicked:
                     st.error("No lineups were generated. Adjust locks/exclusions/exposure settings and retry.")

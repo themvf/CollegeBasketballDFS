@@ -8,10 +8,12 @@ import pandas as pd
 from college_basketball_dfs.cbb_api_service import (
     import_dk_slate_overrides,
     import_lineupstarter_projection_csv,
+    load_cached_dk_slate_frame,
     load_manual_overrides,
     load_registry,
     merge_manual_overrides,
     normalize_lineupstarter_upload_frame,
+    resolve_active_slate_context,
     save_manual_resolution_overrides,
     write_manual_overrides,
 )
@@ -136,6 +138,101 @@ def test_load_registry_merges_gcs_slate_history_and_manual_overrides(monkeypatch
     )
     assert not registry.empty
     assert set(registry["dk_id"].astype(str).tolist()) == {"1001", "2002"}
+
+
+def test_load_cached_dk_slate_frame_reads_gcs_slate(monkeypatch) -> None:
+    class _FakeStore:
+        def read_dk_slate_csv(self, game_date, slate_key=None) -> str:
+            assert str(game_date) == "2026-03-07"
+            assert slate_key == "main"
+            return "\n".join(
+                [
+                    "Position,Name + ID,Name,ID,Roster Position,Salary,Game Info,TeamAbbrev,AvgPointsPerGame",
+                    "G,Jane Smith (2002),Jane Smith,2002,G/UTIL,6800,AWAY@HOME 03/07/2026 08:00PM ET,AWAY,24.2",
+                ]
+            )
+
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._build_api_store",
+        lambda **_: _FakeStore(),
+    )
+
+    frame = load_cached_dk_slate_frame(
+        selected_date="2026-03-07",
+        slate_key="main",
+        bucket_name="test-bucket",
+    )
+    assert len(frame) == 1
+    assert str(frame.loc[0, "ID"]) == "2002"
+    assert str(frame.loc[0, "TeamAbbrev"]) == "AWAY"
+
+
+def test_resolve_active_slate_context_falls_back_to_cached_dk_when_rotowire_unresolved(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service.resolve_rotowire_slate",
+        lambda **_: {
+            "slate": {
+                "slate_id": 3402,
+                "slate_date": "2026-03-07",
+                "contest_type": "Classic",
+                "slate_name": "All",
+            },
+            "coverage": {
+                "players_total": 1,
+                "resolved_players": 0,
+                "unresolved_players": 1,
+                "conflict_players": 0,
+                "coverage_pct": 0.0,
+                "fully_resolved": False,
+            },
+            "coverage_error": "DK registry resolution incomplete.",
+            "rotowire_df": pd.DataFrame([{"player_name": "Jane Smith", "team_abbr": "AWAY"}]),
+            "resolved_slate_df": pd.DataFrame(),
+            "resolution_df": pd.DataFrame(
+                [
+                    {
+                        "player_name": "Jane Smith",
+                        "team_abbr": "AWAY",
+                        "dk_resolution_status": "unresolved",
+                        "dk_match_reason": "low_confidence",
+                    }
+                ]
+            ),
+            "unresolved_players": [{"player_name": "Jane Smith", "team_abbr": "AWAY"}],
+        },
+    )
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service.load_cached_dk_slate_frame",
+        lambda **_: pd.DataFrame(
+            [
+                {
+                    "Position": "G",
+                    "Name + ID": "Jane Smith (2002)",
+                    "Name": "Jane Smith",
+                    "ID": "2002",
+                    "Roster Position": "G/UTIL",
+                    "Salary": 6800,
+                    "Game Info": "AWAY@HOME 03/07/2026 08:00PM ET",
+                    "TeamAbbrev": "AWAY",
+                    "AvgPointsPerGame": 24.2,
+                }
+            ]
+        ),
+    )
+
+    result = resolve_active_slate_context(
+        selected_date="2026-03-07",
+        slate_key="main",
+        contest_type="Classic",
+        slate_name="All",
+        bucket_name="test-bucket",
+    )
+
+    assert result["active_source"] == "legacy_dk_fallback"
+    assert bool(result["active_ready"]) is True
+    assert bool(result["rotowire_fully_resolved"]) is False
+    assert len(result["active_slate_df"]) == 1
+    assert str(result["active_slate_df"].iloc[0]["ID"]) == "2002"
 
 
 def test_write_and_load_manual_overrides_round_trip(tmp_path: Path) -> None:
