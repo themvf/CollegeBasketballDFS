@@ -359,6 +359,12 @@ def _attach_rotowire_priors(
         scalar_value = pd.to_numeric(value, errors="coerce")
         return pd.Series([scalar_value] * len(out), index=out.index, dtype="float64")
 
+    def _frame_numeric_col(frame: pd.DataFrame, name: str, default: float = 0.0) -> pd.Series:
+        value = frame.get(name)
+        if isinstance(value, pd.Series):
+            return pd.to_numeric(value.reindex(frame.index), errors="coerce").fillna(default)
+        return pd.Series([float(default)] * len(frame), index=frame.index, dtype="float64")
+
     for col in [
         "rotowire_proj_fantasy_points",
         "rotowire_proj_minutes",
@@ -430,6 +436,7 @@ def _attach_rotowire_priors(
     rw["avg_fpts_season"] = pd.to_numeric(rw.get("avg_fpts_season"), errors="coerce")
     rw["usage_rate"] = pd.to_numeric(rw.get("usage_rate"), errors="coerce")
     rw["salary"] = pd.to_numeric(rw.get("salary"), errors="coerce")
+    rw["supplement_priority"] = _frame_numeric_col(rw, "supplement_priority", default=0.0)
     rw["proj_value_per_1k"] = rw["proj_value_per_1k"].where(
         rw["proj_value_per_1k"].notna(),
         (rw["proj_fantasy_points"] / rw["salary"].replace(0.0, pd.NA)) * 1000.0,
@@ -444,10 +451,15 @@ def _attach_rotowire_priors(
     sort_projection = rw["proj_fantasy_points"].fillna(-9999.0)
     sort_minutes = rw["proj_minutes"].fillna(-9999.0)
     rw = rw.assign(_sort_projection=sort_projection, _sort_minutes=sort_minutes)
-    rw = rw.sort_values(["_name_norm", "_team_norm", "_sort_projection", "_sort_minutes"], ascending=[True, True, False, False], kind="stable")
+    rw = rw.sort_values(
+        ["_name_norm", "_team_norm", "supplement_priority", "_sort_projection", "_sort_minutes"],
+        ascending=[True, True, False, False, False],
+        kind="stable",
+    )
+    rw_unique = rw.drop_duplicates(subset=["_name_norm", "_team_norm"], keep="first")
 
     exact = (
-        rw.loc[rw["_team_norm"] != ""]
+        rw_unique.loc[rw_unique["_team_norm"] != ""]
         .drop_duplicates(subset=["_name_norm", "_team_norm"], keep="first")
         [
             [
@@ -479,11 +491,11 @@ def _attach_rotowire_priors(
 
     current_name_counts = out["_name_norm"].value_counts(dropna=False)
     unique_current_names = set(current_name_counts.loc[current_name_counts == 1].index.tolist())
-    rw_name_counts = rw["_name_norm"].value_counts(dropna=False)
+    rw_name_counts = rw_unique["_name_norm"].value_counts(dropna=False)
     unique_rw_names = set(rw_name_counts.loc[rw_name_counts == 1].index.tolist())
     fallback_keys = unique_current_names & unique_rw_names
     fallback = (
-        rw.loc[rw["_name_norm"].isin(fallback_keys)]
+        rw_unique.loc[rw_unique["_name_norm"].isin(fallback_keys)]
         .drop_duplicates(subset=["_name_norm"], keep="first")
         [
             [
@@ -645,16 +657,22 @@ def _attach_lineupstarter_priors(
     ls["lineupstarter_match_status"] = ls["lineupstarter_match_status"].astype(str).str.strip()
     ls["lineupstarter_projected_points"] = pd.to_numeric(ls.get("lineupstarter_projected_points"), errors="coerce")
     ls["lineupstarter_projected_ownership"] = pd.to_numeric(ls.get("lineupstarter_projected_ownership"), errors="coerce")
+    ls_priority = ls.get("supplement_priority")
+    if isinstance(ls_priority, pd.Series):
+        ls["supplement_priority"] = pd.to_numeric(ls_priority.reindex(ls.index), errors="coerce").fillna(0.0)
+    else:
+        ls["supplement_priority"] = pd.Series([0.0] * len(ls), index=ls.index, dtype="float64")
     ls = ls.loc[ls["ID"] != ""].copy()
     if ls.empty:
         return out
 
     sort_cols = [
         "ID",
+        "supplement_priority",
         "lineupstarter_projected_ownership",
         "lineupstarter_projected_points",
     ]
-    ls = ls.sort_values(sort_cols, ascending=[True, False, False], kind="stable")
+    ls = ls.sort_values(sort_cols, ascending=[True, False, False, False], kind="stable")
     ls = ls.drop_duplicates(subset=["ID"], keep="first")
     merge_cols = [
         "ID",

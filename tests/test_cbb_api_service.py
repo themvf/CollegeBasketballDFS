@@ -11,6 +11,7 @@ from college_basketball_dfs.cbb_api_service import (
     import_lineupstarter_projection_csv,
     load_cached_dk_slate_frame,
     load_manual_overrides,
+    normalize_rotowire_upload_frame,
     load_registry,
     merge_manual_overrides,
     normalize_lineupstarter_upload_frame,
@@ -34,6 +35,31 @@ def test_filter_unresolved_resolution_rows_handles_legacy_frames_without_status(
     )
 
     assert unresolved.empty
+
+
+def test_normalize_rotowire_upload_frame_maps_aliases_and_computes_value() -> None:
+    normalized = normalize_rotowire_upload_frame(
+        pd.DataFrame(
+            [
+                {
+                    "Player": "Jane Smith",
+                    "Team": "away",
+                    "Projection": "34.5",
+                    "Minutes": "33",
+                    "Salary": "6900",
+                }
+            ]
+        )
+    )
+
+    assert len(normalized) == 1
+    row = normalized.iloc[0]
+    assert row["player_name"] == "Jane Smith"
+    assert row["team_abbr"] == "AWAY"
+    assert float(row["proj_fantasy_points"]) == 34.5
+    assert float(row["proj_minutes"]) == 33.0
+    assert float(row["salary"]) == 6900.0
+    assert round(float(row["proj_value_per_1k"]), 4) == round((34.5 / 6900.0) * 1000.0, 4)
 
 
 def test_merge_manual_overrides_dedupes_by_player_team_slate_key() -> None:

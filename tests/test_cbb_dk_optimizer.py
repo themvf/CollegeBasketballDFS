@@ -404,6 +404,38 @@ def test_build_player_pool_handles_rotowire_name_only_match_without_exact_column
     assert float(guard_1["rotowire_proj_minutes"]) == 34.0
 
 
+def test_build_player_pool_rotowire_supplement_priority_overrides_base_projection() -> None:
+    rw_rows = pd.concat(
+        [
+            _sample_rotowire_players(),
+            pd.DataFrame(
+                [
+                    {
+                        "player_name": "Guard 1",
+                        "team_abbr": "CCC",
+                        "proj_fantasy_points": 35.1,
+                        "proj_minutes": 32.0,
+                        "supplement_priority": 2,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        rotowire_df=rw_rows,
+        bookmaker_filter="fanduel",
+    )
+
+    guard_1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
+
+    assert float(guard_1["rotowire_proj_fantasy_points"]) == 35.1
+    assert float(guard_1["rotowire_proj_minutes"]) == 32.0
+
+
 def test_build_player_pool_rotowire_value_signal_lifts_cheap_player_ownership() -> None:
     base_pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     rw_pool = build_player_pool(
@@ -458,6 +490,41 @@ def test_build_player_pool_blends_lineupstarter_projection_and_ownership_prior()
     assert round(float(ls_g1["ownership_model_raw"]), 3) == round(float(ls_g1["projected_ownership_pre_lineupstarter"]), 3)
     assert abs(float(ls_g1["projected_dk_points"]) - float(rw_g1["projected_dk_points"])) > 0.01
     assert abs(float(ls_g1["projected_ownership"]) - float(ls_g1["projected_ownership_pre_lineupstarter"])) > 0.01
+
+
+def test_build_player_pool_lineupstarter_supplement_priority_overrides_base_projection() -> None:
+    lineupstarter_rows = pd.concat(
+        [
+            _sample_lineupstarter_players(),
+            pd.DataFrame(
+                [
+                    {
+                        "ID": "1001",
+                        "Name": "Guard 1",
+                        "TeamAbbrev": "CCC",
+                        "lineupstarter_projected_points": 31.2,
+                        "lineupstarter_projected_ownership": 11.4,
+                        "lineupstarter_match_status": "matched",
+                        "lineupstarter_match_method": "supplement_override",
+                        "supplement_priority": 2,
+                    }
+                ]
+            ),
+        ],
+        ignore_index=True,
+        sort=False,
+    )
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        lineupstarter_df=lineupstarter_rows,
+        bookmaker_filter="fanduel",
+    )
+
+    guard_1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
+
+    assert float(guard_1["lineupstarter_projected_points"]) == 31.2
+    assert float(guard_1["lineupstarter_projected_ownership"]) == 11.4
 
 
 def test_apply_ownership_calibration_lifts_cheap_focus_value_and_cuts_false_chalk() -> None:

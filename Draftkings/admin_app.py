@@ -80,6 +80,7 @@ from college_basketball_dfs.cbb_api_service import (
     filter_unresolved_resolution_rows,
     import_dk_slate_overrides,
     import_lineupstarter_projection_csv,
+    normalize_rotowire_upload_frame,
     normalize_lineupstarter_upload_frame,
     resolve_active_slate_context,
     resolve_rotowire_slate,
@@ -1435,6 +1436,55 @@ def _write_lineupstarter_csv(
     blob = store.bucket.blob(blob_name)
     blob.upload_from_string(csv_text, content_type="text/csv")
     return blob_name
+
+
+def _slate_supplement_blob_name(
+    slate_date: date,
+    slot_index: int,
+    slate_key: str | None = None,
+) -> str:
+    safe_slate = _slate_key_from_label(slate_key)
+    safe_slot = max(1, int(slot_index))
+    return f"cbb/slate_supplements/{slate_date.isoformat()}/{safe_slate}_supplement_{safe_slot}.csv"
+
+
+def _read_slate_supplement_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    slot_index: int,
+    slate_key: str | None = None,
+) -> str | None:
+    blob = store.bucket.blob(_slate_supplement_blob_name(slate_date, slot_index, slate_key=slate_key))
+    if blob.exists():
+        return blob.download_as_text(encoding="utf-8")
+    return None
+
+
+def _write_slate_supplement_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    slot_index: int,
+    csv_text: str,
+    slate_key: str | None = None,
+) -> str:
+    blob_name = _slate_supplement_blob_name(slate_date, slot_index, slate_key=slate_key)
+    blob = store.bucket.blob(blob_name)
+    blob.upload_from_string(csv_text, content_type="text/csv")
+    return blob_name
+
+
+def _delete_slate_supplement_csv(
+    store: CbbGcsStore,
+    slate_date: date,
+    slot_index: int,
+    slate_key: str | None = None,
+) -> tuple[bool, str]:
+    blob_name = _slate_supplement_blob_name(slate_date, slot_index, slate_key=slate_key)
+    blob = store.bucket.blob(blob_name)
+    if not blob.exists():
+        return False, blob_name
+    blob.delete()
+    return True, blob_name
 
 
 def _ownership_blob_name(slate_date: date, slate_key: str | None = None) -> str:
@@ -2892,6 +2942,73 @@ def load_lineupstarter_frame_for_date(
     return df
 
 
+def _infer_slate_supplement_type(df: pd.DataFrame | None) -> str:
+    if not isinstance(df, pd.DataFrame) or df.empty:
+        return ""
+    type_col = df.get("supplement_type")
+    if isinstance(type_col, pd.Series):
+        for value in type_col.astype(str).str.strip().str.lower().tolist():
+            if value in {"rotowire", "lineupstarter"}:
+                return value
+    column_names = {str(col).strip().lower() for col in df.columns}
+    if "lineupstarter_projected_points" in column_names or "lineupstarter_projected_ownership" in column_names:
+        return "lineupstarter"
+    if "proj_fantasy_points" in column_names or "proj_minutes" in column_names:
+        return "rotowire"
+    return ""
+
+
+def _supplement_type_label(supplement_type: str) -> str:
+    if str(supplement_type or "").strip().lower() == "lineupstarter":
+        return "LineupStarter"
+    return "Rotowire"
+
+
+def _prepare_slate_supplement_frame(
+    frame: pd.DataFrame,
+    *,
+    slot_index: int,
+    supplement_type: str,
+    source_file_name: str,
+) -> pd.DataFrame:
+    out = frame.copy()
+    out["supplement_type"] = str(supplement_type or "").strip().lower()
+    out["supplement_slot"] = int(slot_index)
+    out["supplement_priority"] = float(slot_index)
+    out["supplement_saved_at"] = datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+    out["supplement_source_file"] = str(source_file_name or "").strip()
+    return out
+
+
+@st.cache_data(ttl=600, show_spinner=False)
+def load_slate_supplement_frame_for_date(
+    bucket_name: str,
+    selected_date: date,
+    slot_index: int,
+    selected_slate_key: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> pd.DataFrame:
+    client = build_storage_client(
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+        project=gcp_project,
+    )
+    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+    csv_text = _read_slate_supplement_csv(store, selected_date, slot_index, slate_key=selected_slate_key)
+    if not csv_text or not csv_text.strip():
+        return pd.DataFrame()
+    df = pd.read_csv(io.StringIO(csv_text))
+    if "supplement_type" in df.columns:
+        df["supplement_type"] = df["supplement_type"].astype(str).str.strip().str.lower()
+    if "supplement_priority" in df.columns:
+        df["supplement_priority"] = pd.to_numeric(df["supplement_priority"], errors="coerce")
+    if "supplement_slot" in df.columns:
+        df["supplement_slot"] = pd.to_numeric(df["supplement_slot"], errors="coerce")
+    return df
+
+
 @st.cache_data(ttl=600, show_spinner=False)
 def load_ownership_frame_for_date(
     bucket_name: str,
@@ -3065,6 +3182,9 @@ def build_optimizer_pool_for_date(
     rotowire_df = slate_bundle.get("rotowire_df").copy() if isinstance(slate_bundle.get("rotowire_df"), pd.DataFrame) else pd.DataFrame()
     active_ready = bool(slate_bundle.get("active_ready"))
     slate_bundle = dict(slate_bundle)
+    slate_bundle["slate_supplements"] = []
+    slate_bundle["rotowire_supplement_rows"] = 0
+    slate_bundle["lineupstarter_supplement_rows"] = 0
     injuries_df = load_injuries_frame(
         bucket_name=bucket_name,
         selected_date=slate_date,
@@ -3090,6 +3210,59 @@ def build_optimizer_pool_for_date(
         service_account_json=service_account_json,
         service_account_json_b64=service_account_json_b64,
     )
+    supplement_summaries: list[dict[str, Any]] = []
+    rotowire_supplement_frames: list[pd.DataFrame] = []
+    lineupstarter_supplement_frames: list[pd.DataFrame] = []
+    for slot_index in (1, 2):
+        supplement_df = load_slate_supplement_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=slate_date,
+            slot_index=slot_index,
+            selected_slate_key=slate_key,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if supplement_df.empty:
+            continue
+        supplement_type = _infer_slate_supplement_type(supplement_df)
+        if supplement_type not in {"rotowire", "lineupstarter"}:
+            continue
+        supplement_df = supplement_df.copy()
+        supplement_df["supplement_priority"] = pd.to_numeric(
+            supplement_df.get("supplement_priority"),
+            errors="coerce",
+        ).fillna(float(slot_index))
+        summary = {
+            "slot_index": int(slot_index),
+            "supplement_type": supplement_type,
+            "rows": int(len(supplement_df)),
+            "projection_rows": 0,
+            "minutes_rows": 0,
+            "ownership_rows": 0,
+        }
+        if supplement_type == "rotowire":
+            summary["projection_rows"] = int(pd.to_numeric(supplement_df.get("proj_fantasy_points"), errors="coerce").notna().sum())
+            summary["minutes_rows"] = int(pd.to_numeric(supplement_df.get("proj_minutes"), errors="coerce").notna().sum())
+            rotowire_supplement_frames.append(supplement_df)
+        else:
+            summary["projection_rows"] = int(
+                pd.to_numeric(supplement_df.get("lineupstarter_projected_points"), errors="coerce").notna().sum()
+            )
+            summary["ownership_rows"] = int(
+                pd.to_numeric(supplement_df.get("lineupstarter_projected_ownership"), errors="coerce").notna().sum()
+            )
+            lineupstarter_supplement_frames.append(supplement_df)
+        supplement_summaries.append(summary)
+
+    if rotowire_supplement_frames:
+        rotowire_df = pd.concat([rotowire_df, *rotowire_supplement_frames], ignore_index=True, sort=False)
+    if lineupstarter_supplement_frames:
+        lineupstarter_df = pd.concat([lineupstarter_df, *lineupstarter_supplement_frames], ignore_index=True, sort=False)
+
+    slate_bundle["slate_supplements"] = supplement_summaries
+    slate_bundle["rotowire_supplement_rows"] = int(sum(len(frame) for frame in rotowire_supplement_frames))
+    slate_bundle["lineupstarter_supplement_rows"] = int(sum(len(frame) for frame in lineupstarter_supplement_frames))
     slate_bundle["lineupstarter_df"] = lineupstarter_df.copy() if not lineupstarter_df.empty else pd.DataFrame()
     slate_bundle["lineupstarter_loaded"] = bool(not lineupstarter_df.empty)
     slate_bundle["lineupstarter_rows"] = int(len(lineupstarter_df))
@@ -3175,6 +3348,343 @@ def build_optimizer_pool_for_date(
     return pool_df, removed_injured, slate_df, injuries_df, season_history_df, slate_bundle
 
 
+def render_slate_supplement_tab(
+    *,
+    slot_index: int,
+    selected_date: date,
+    selected_slate_key: str,
+    selected_slate_label: str,
+    contest_type: str,
+    slate_name: str,
+    slate_id_text: str,
+    site_id: int,
+    cookie_header: str,
+    bucket_name: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> None:
+    st.subheader(f"Slate Supplement #{slot_index}")
+    st.caption(
+        "Upload an extra Rotowire or LineupStarter file for this slate. "
+        "Saved supplements are applied automatically in Slate + Vegas and the lineup generator."
+    )
+    st.caption(f"Active slate context: `{selected_slate_label}` (key: `{selected_slate_key}`)")
+
+    summary_key = f"cbb_slate_supplement_{slot_index}_summary"
+    type_key = f"slate_supplement_{slot_index}_type"
+    upload_key = f"slate_supplement_{slot_index}_upload"
+    save_key = f"save_slate_supplement_{slot_index}"
+    delete_key = f"delete_slate_supplement_{slot_index}"
+    confirm_delete_key = f"confirm_delete_slate_supplement_{slot_index}"
+
+    saved_df = pd.DataFrame()
+    saved_type = ""
+    if bucket_name:
+        saved_df = load_slate_supplement_frame_for_date(
+            bucket_name=bucket_name,
+            selected_date=selected_date,
+            slot_index=slot_index,
+            selected_slate_key=selected_slate_key,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        saved_type = _infer_slate_supplement_type(saved_df)
+        if type_key not in st.session_state and saved_type:
+            st.session_state[type_key] = _supplement_type_label(saved_type)
+
+    supplement_type_label = st.selectbox(
+        "Supplement Type",
+        options=["Rotowire", "LineupStarter"],
+        key=type_key,
+    )
+    supplement_type = str(supplement_type_label or "").strip().lower()
+    supplement_upload = st.file_uploader(
+        "Upload Supplement CSV",
+        type=["csv"],
+        key=upload_key,
+        help="Rotowire expects player/team/projection columns. LineupStarter expects player/salary/projected points/projected ownership columns.",
+    )
+
+    active_slate_df = pd.DataFrame()
+    active_ready = False
+    if bucket_name and supplement_type == "lineupstarter":
+        active_context = load_active_slate_context(
+            selected_date=selected_date,
+            slate_key=selected_slate_key,
+            contest_type=contest_type,
+            slate_name=(slate_name.strip() or "All"),
+            slate_id=(_safe_int_value(slate_id_text, default=0) or None),
+            site_id=int(site_id),
+            cookie_header=(cookie_header.strip() or None),
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        active_slate_df = (
+            active_context.get("active_slate_df").copy()
+            if isinstance(active_context.get("active_slate_df"), pd.DataFrame)
+            else pd.DataFrame()
+        )
+        active_ready = bool(active_context.get("active_ready"))
+        if active_slate_df.empty or not active_ready:
+            st.warning("Load an active DK slate source before saving a LineupStarter supplement.")
+
+    preview_df = pd.DataFrame()
+    preview_meta: dict[str, Any] = {}
+    if supplement_upload is not None:
+        preview_payload = _read_uploaded_csv_frame(supplement_upload)
+        decode_warning = str(preview_payload.get("decode_warning") or "").strip()
+        if decode_warning:
+            st.caption(decode_warning)
+        preview_frame = preview_payload.get("frame")
+        if not isinstance(preview_frame, pd.DataFrame) or preview_frame.empty:
+            parse_error = str(preview_payload.get("parse_error") or "").strip()
+            if parse_error:
+                st.warning(f"Could not parse supplement upload: {parse_error}")
+        elif supplement_type == "rotowire":
+            preview_df = normalize_rotowire_upload_frame(preview_frame)
+            projection_rows = int(pd.to_numeric(preview_df.get("proj_fantasy_points"), errors="coerce").notna().sum()) if not preview_df.empty else 0
+            minutes_rows = int(pd.to_numeric(preview_df.get("proj_minutes"), errors="coerce").notna().sum()) if not preview_df.empty else 0
+            preview_meta = {
+                "rows_total": int(len(preview_df)),
+                "projection_rows": projection_rows,
+                "minutes_rows": minutes_rows,
+            }
+            m1, m2, m3 = st.columns(3)
+            m1.metric("Preview Rows", int(preview_meta.get("rows_total") or 0))
+            m2.metric("Projection Rows", projection_rows)
+            m3.metric("Minutes Rows", minutes_rows)
+            if preview_df.empty:
+                st.warning("No usable Rotowire supplement rows were found. Include player/team plus projected fantasy points or projected minutes.")
+            else:
+                display_cols = [
+                    col
+                    for col in [
+                        "player_name",
+                        "team_abbr",
+                        "salary",
+                        "proj_fantasy_points",
+                        "proj_minutes",
+                        "proj_value_per_1k",
+                    ]
+                    if col in preview_df.columns
+                ]
+                st.dataframe(preview_df[display_cols], hide_index=True, use_container_width=True)
+        else:
+            preview_df, preview_meta = normalize_lineupstarter_upload_frame(preview_frame, slate_df=active_slate_df)
+            lp1, lp2, lp3, lp4 = st.columns(4)
+            lp1.metric("Preview Rows", int(preview_meta.get("rows_total") or 0))
+            lp2.metric("Matched", int(preview_meta.get("matched_rows") or 0))
+            lp3.metric("Unresolved", int(preview_meta.get("unresolved_rows") or 0))
+            lp4.metric("Coverage %", f"{float(preview_meta.get('coverage_pct') or 0.0):.1f}")
+            if bool(preview_meta.get("fully_resolved")):
+                st.success("LineupStarter supplement maps cleanly to the current active DK slate.")
+            else:
+                st.warning("LineupStarter supplement still has unresolved rows. Save is blocked until coverage is 100%.")
+                unresolved_preview = preview_df.loc[
+                    preview_df.get("lineupstarter_match_status", pd.Series(dtype=str)).astype(str) != "matched"
+                ].copy()
+                if not unresolved_preview.empty:
+                    preview_cols = [
+                        col
+                        for col in [
+                            "lineupstarter_source_player_name",
+                            "lineupstarter_source_team_abbr",
+                            "lineupstarter_source_position",
+                            "Salary",
+                            "lineupstarter_match_method",
+                            "lineupstarter_match_status",
+                        ]
+                        if col in unresolved_preview.columns
+                    ]
+                    st.dataframe(unresolved_preview[preview_cols], hide_index=True, use_container_width=True)
+
+    save_col, delete_col = st.columns(2)
+    save_clicked = save_col.button("Save Supplement", key=save_key)
+    delete_clicked = delete_col.button("Delete Saved Supplement", key=delete_key)
+    confirm_delete = st.checkbox(
+        "Confirm delete for this supplement slot",
+        value=False,
+        key=confirm_delete_key,
+    )
+
+    if save_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before saving slate supplements.")
+        elif supplement_upload is None:
+            st.error("Choose a supplement CSV file before saving.")
+        else:
+            payload = _read_uploaded_csv_frame(supplement_upload)
+            frame = payload.get("frame")
+            if not isinstance(frame, pd.DataFrame) or frame.empty:
+                parse_error = str(payload.get("parse_error") or "").strip() or "No rows were parsed from the uploaded CSV."
+                st.error(parse_error)
+            else:
+                if supplement_type == "rotowire":
+                    normalized = normalize_rotowire_upload_frame(frame)
+                    if normalized.empty:
+                        st.error("No usable Rotowire supplement rows were found in the uploaded CSV.")
+                        normalized = pd.DataFrame()
+                    coverage_summary = {
+                        "rows_total": int(len(normalized)),
+                        "projection_rows": int(pd.to_numeric(normalized.get("proj_fantasy_points"), errors="coerce").notna().sum())
+                        if not normalized.empty
+                        else 0,
+                        "minutes_rows": int(pd.to_numeric(normalized.get("proj_minutes"), errors="coerce").notna().sum())
+                        if not normalized.empty
+                        else 0,
+                    }
+                else:
+                    if active_slate_df.empty or not active_ready:
+                        st.error("Load an active DK slate source before saving a LineupStarter supplement.")
+                        normalized = pd.DataFrame()
+                        coverage_summary = {}
+                    else:
+                        normalized, coverage_summary = normalize_lineupstarter_upload_frame(frame, slate_df=active_slate_df)
+                        if normalized.empty:
+                            st.error("Could not find usable LineupStarter rows in the uploaded CSV.")
+                        elif not bool(coverage_summary.get("fully_resolved")):
+                            st.error("LineupStarter supplement is not fully mapped to the current DK slate yet.")
+                            normalized = pd.DataFrame()
+
+                if not normalized.empty:
+                    prepared = _prepare_slate_supplement_frame(
+                        normalized,
+                        slot_index=slot_index,
+                        supplement_type=supplement_type,
+                        source_file_name=supplement_upload.name,
+                    )
+                    client = build_storage_client(
+                        service_account_json=service_account_json,
+                        service_account_json_b64=service_account_json_b64,
+                        project=gcp_project,
+                    )
+                    store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                    blob_name = _write_slate_supplement_csv(
+                        store,
+                        selected_date,
+                        slot_index,
+                        prepared.to_csv(index=False),
+                        slate_key=selected_slate_key,
+                    )
+                    load_slate_supplement_frame_for_date.clear()
+                    st.session_state[summary_key] = {
+                        "selected_date": selected_date.isoformat(),
+                        "slate_key": selected_slate_key,
+                        "slot_index": int(slot_index),
+                        "supplement_type": supplement_type,
+                        "rows_saved": int(len(prepared)),
+                        "blob_name": blob_name,
+                        "coverage": coverage_summary,
+                    }
+                    st.success(f"Saved Slate Supplement #{slot_index} to `{blob_name}`.")
+                    st.rerun()
+
+    if delete_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before deleting slate supplements.")
+        elif not confirm_delete:
+            st.error("Check the confirm-delete box before deleting this supplement.")
+        else:
+            client = build_storage_client(
+                service_account_json=service_account_json,
+                service_account_json_b64=service_account_json_b64,
+                project=gcp_project,
+            )
+            store = CbbGcsStore(bucket_name=bucket_name, client=client)
+            deleted, blob_name = _delete_slate_supplement_csv(
+                store,
+                selected_date,
+                slot_index,
+                slate_key=selected_slate_key,
+            )
+            load_slate_supplement_frame_for_date.clear()
+            st.session_state.pop(summary_key, None)
+            if deleted:
+                st.success(f"Deleted Slate Supplement #{slot_index} from `{blob_name}`.")
+            else:
+                st.info(f"No saved Slate Supplement #{slot_index} was found at `{blob_name}`.")
+            st.rerun()
+
+    upload_summary = st.session_state.get(summary_key) or {}
+    if upload_summary:
+        st.json(upload_summary)
+
+    if not bucket_name:
+        st.info("Set a GCS bucket in the sidebar to load saved slate supplements.")
+        return
+
+    saved_df = load_slate_supplement_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=selected_date,
+        slot_index=slot_index,
+        selected_slate_key=selected_slate_key,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if saved_df.empty:
+        st.info(f"No saved Slate Supplement #{slot_index} found for `{selected_date.isoformat()}`.")
+        return
+
+    saved_type = _infer_slate_supplement_type(saved_df)
+    saved_blob_name = _slate_supplement_blob_name(selected_date, slot_index, slate_key=selected_slate_key)
+    st.caption(f"Saved supplement type: `{_supplement_type_label(saved_type)}` | Blob: `{saved_blob_name}`")
+    if saved_type == "lineupstarter":
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Saved Rows", int(len(saved_df)))
+        s2.metric("Players", int(saved_df["ID"].astype(str).nunique()) if "ID" in saved_df.columns else int(len(saved_df)))
+        s3.metric(
+            "Projection Rows",
+            int(pd.to_numeric(saved_df.get("lineupstarter_projected_points"), errors="coerce").notna().sum()),
+        )
+        s4.metric(
+            "Ownership Rows",
+            int(pd.to_numeric(saved_df.get("lineupstarter_projected_ownership"), errors="coerce").notna().sum()),
+        )
+        display_cols = [
+            col
+            for col in [
+                "ID",
+                "Name",
+                "TeamAbbrev",
+                "lineupstarter_projected_points",
+                "lineupstarter_projected_ownership",
+                "lineupstarter_match_method",
+                "lineupstarter_match_status",
+            ]
+            if col in saved_df.columns
+        ]
+    else:
+        s1, s2, s3, s4 = st.columns(4)
+        s1.metric("Saved Rows", int(len(saved_df)))
+        s2.metric("Players", int(saved_df["player_name"].astype(str).nunique()) if "player_name" in saved_df.columns else int(len(saved_df)))
+        s3.metric(
+            "Projection Rows",
+            int(pd.to_numeric(saved_df.get("proj_fantasy_points"), errors="coerce").notna().sum()),
+        )
+        s4.metric(
+            "Minutes Rows",
+            int(pd.to_numeric(saved_df.get("proj_minutes"), errors="coerce").notna().sum()),
+        )
+        display_cols = [
+            col
+            for col in [
+                "player_name",
+                "team_abbr",
+                "salary",
+                "proj_fantasy_points",
+                "proj_minutes",
+                "proj_value_per_1k",
+            ]
+            if col in saved_df.columns
+        ]
+    st.dataframe(saved_df[display_cols], hide_index=True, use_container_width=True)
+
+
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
 st.title("College Basketball Admin Cache")
 st.caption("Cache-first data pipeline backed by Google Cloud Storage.")
@@ -3240,12 +3750,14 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
+tab_game, tab_props, tab_backfill, tab_dk, tab_supplement_1, tab_supplement_2, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
     [
         "Game Data",
         "Prop Data",
         "Backfill",
         "DK Slate",
+        "Slate Supplement #1",
+        "Slate Supplement #2",
         "Injuries",
         "Slate + Vegas",
         "Lineup Generator",
@@ -4191,6 +4703,40 @@ with tab_dk:
         except Exception as exc:
             st.exception(exc)
 
+with tab_supplement_1:
+    render_slate_supplement_tab(
+        slot_index=1,
+        selected_date=dk_slate_date,
+        selected_slate_key=shared_slate_key,
+        selected_slate_label=shared_slate_label,
+        contest_type=rotowire_contest_type,
+        slate_name=rotowire_slate_name,
+        slate_id_text=rotowire_slate_id_text,
+        site_id=int(rotowire_site_id),
+        cookie_header=rotowire_cookie,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=cred_json,
+        service_account_json_b64=cred_json_b64,
+    )
+
+with tab_supplement_2:
+    render_slate_supplement_tab(
+        slot_index=2,
+        selected_date=dk_slate_date,
+        selected_slate_key=shared_slate_key,
+        selected_slate_label=shared_slate_label,
+        contest_type=rotowire_contest_type,
+        slate_name=rotowire_slate_name,
+        slate_id_text=rotowire_slate_id_text,
+        site_id=int(rotowire_site_id),
+        cookie_header=rotowire_cookie,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=cred_json,
+        service_account_json_b64=cred_json_b64,
+    )
+
 with tab_injuries:
     st.subheader("Injuries")
     st.caption(
@@ -4561,6 +5107,13 @@ with tab_slate_vegas:
                     )
                 else:
                     st.caption("No saved LineupStarter priors found for this date. Pool uses our model plus RotoWire only.")
+                supplement_summaries = slate_context.get("slate_supplements") or []
+                if supplement_summaries:
+                    supplement_labels = [
+                        f"#{int(item.get('slot_index') or 0)} {_supplement_type_label(str(item.get('supplement_type') or ''))} ({int(item.get('rows') or 0)} rows)"
+                        for item in supplement_summaries
+                    ]
+                    st.caption("Slate supplements active: " + " | ".join(supplement_labels))
 
                 if not removed_injured_df.empty:
                     st.subheader("Removed Injured Players")
@@ -5311,6 +5864,13 @@ with tab_lineups:
                     )
                 else:
                     st.caption("No saved LineupStarter priors for this lineup slate. Ownership falls back to the internal model.")
+                supplement_summaries = slate_context.get("slate_supplements") or []
+                if supplement_summaries:
+                    supplement_labels = [
+                        f"#{int(item.get('slot_index') or 0)} {_supplement_type_label(str(item.get('supplement_type') or ''))} ({int(item.get('rows') or 0)} rows)"
+                        for item in supplement_summaries
+                    ]
+                    st.caption("Slate supplements active: " + " | ".join(supplement_labels))
                 generate_lineups_clicked = st.button(
                     "Generate DK Lineups",
                     key="generate_dk_lineups",

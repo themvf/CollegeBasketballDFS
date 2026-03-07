@@ -1796,6 +1796,112 @@ def _lineupstarter_numeric(value: Any) -> float | None:
         return None
 
 
+def normalize_rotowire_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
+    columns = [
+        "player_name",
+        "team_abbr",
+        "opp_abbr",
+        "salary",
+        "proj_fantasy_points",
+        "proj_minutes",
+        "proj_value_per_1k",
+        "avg_fpts_last3",
+        "avg_fpts_last5",
+        "avg_fpts_last7",
+        "avg_fpts_season",
+        "usage_rate",
+        "supplement_priority",
+    ]
+    if df is None or df.empty:
+        return pd.DataFrame(columns=columns)
+
+    out = df.copy()
+    normalized_columns = {re.sub(r"[^a-z0-9]", "", str(c).strip().lower()): c for c in out.columns}
+    rename_aliases = {
+        "player": "player_name",
+        "playername": "player_name",
+        "name": "player_name",
+        "athlete": "player_name",
+        "team": "team_abbr",
+        "teamabbr": "team_abbr",
+        "teamabbrev": "team_abbr",
+        "opponent": "opp_abbr",
+        "opp": "opp_abbr",
+        "oppabbr": "opp_abbr",
+        "proj": "proj_fantasy_points",
+        "projection": "proj_fantasy_points",
+        "projectedpoints": "proj_fantasy_points",
+        "projectedfantasypoints": "proj_fantasy_points",
+        "projfantasypoints": "proj_fantasy_points",
+        "projfpts": "proj_fantasy_points",
+        "pts": "proj_fantasy_points",
+        "projminutes": "proj_minutes",
+        "projectedminutes": "proj_minutes",
+        "minutes": "proj_minutes",
+        "min": "proj_minutes",
+        "projvalueper1k": "proj_value_per_1k",
+        "valueper1k": "proj_value_per_1k",
+        "avgfptslast3": "avg_fpts_last3",
+        "avgfptslast5": "avg_fpts_last5",
+        "avgfptslast7": "avg_fpts_last7",
+        "avgfptsseason": "avg_fpts_season",
+        "usagerate": "usage_rate",
+        "salary": "salary",
+        "dksalary": "salary",
+        "supplementpriority": "supplement_priority",
+    }
+    resolved_rename: dict[str, str] = {}
+    for alias, dest in rename_aliases.items():
+        source = normalized_columns.get(alias)
+        if source:
+            resolved_rename[source] = dest
+    if resolved_rename:
+        out = out.rename(columns=resolved_rename)
+
+    for col in columns:
+        if col not in out.columns:
+            out[col] = ""
+
+    out["player_name"] = out["player_name"].astype(str).str.strip()
+    out["team_abbr"] = out["team_abbr"].astype(str).str.strip().str.upper()
+    out["opp_abbr"] = out["opp_abbr"].astype(str).str.strip().str.upper()
+    for col in [
+        "salary",
+        "proj_fantasy_points",
+        "proj_minutes",
+        "proj_value_per_1k",
+        "avg_fpts_last3",
+        "avg_fpts_last5",
+        "avg_fpts_last7",
+        "avg_fpts_season",
+        "usage_rate",
+        "supplement_priority",
+    ]:
+        out[col] = out[col].map(_lineupstarter_numeric)
+
+    out = out.loc[
+        (out["player_name"] != "")
+        & (
+            out["proj_fantasy_points"].notna()
+            | out["proj_minutes"].notna()
+        )
+    ].copy()
+    if out.empty:
+        return pd.DataFrame(columns=columns)
+
+    out["proj_value_per_1k"] = out["proj_value_per_1k"].where(
+        out["proj_value_per_1k"].notna(),
+        (out["proj_fantasy_points"] / out["salary"].replace(0.0, pd.NA)) * 1000.0,
+    )
+    out = out.sort_values(
+        ["player_name", "team_abbr", "supplement_priority", "proj_fantasy_points", "proj_minutes"],
+        ascending=[True, True, False, False, False],
+        kind="stable",
+    )
+    out = out.drop_duplicates(subset=["player_name", "team_abbr"], keep="first")
+    return out[columns].reset_index(drop=True)
+
+
 def _lineupstarter_position_tokens(value: Any) -> set[str]:
     raw = str(value or "").strip().upper()
     tokens: set[str] = set()
