@@ -154,12 +154,22 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
             ),
         }
 
-    seen: dict[str, int] = {}
+    seen: dict[str, object] = {}
 
     def _fake_build_player_pool(**kwargs: object) -> pd.DataFrame:
         lineupstarter_df = kwargs.get("lineupstarter_df")
         assert isinstance(lineupstarter_df, pd.DataFrame)
         seen["lineupstarter_rows"] = int(len(lineupstarter_df))
+        season_stats_df = kwargs.get("season_stats_df")
+        props_df = kwargs.get("props_df")
+        odds_games_df = kwargs.get("odds_games_df")
+        assert isinstance(season_stats_df, pd.DataFrame)
+        assert isinstance(props_df, pd.DataFrame)
+        assert isinstance(odds_games_df, pd.DataFrame)
+        seen["season_history_rows"] = int(len(season_stats_df))
+        seen["props_rows"] = int(len(props_df))
+        seen["odds_tail_rows"] = int(len(odds_games_df))
+        seen["bookmaker_filter"] = str(kwargs.get("bookmaker_filter") or "")
         return pd.DataFrame(
             [
                 {
@@ -204,6 +214,49 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
             ]
         ),
     )
+    monkeypatch.setattr(cbb_lineup_jobs, "load_injuries_frame", lambda **_: pd.DataFrame())
+    monkeypatch.setattr(
+        cbb_lineup_jobs,
+        "load_season_player_history_frame",
+        lambda **_: pd.DataFrame([{"player_name": "Jane Smith", "dk_fpts": 30.0}]),
+    )
+    monkeypatch.setattr(
+        cbb_lineup_jobs,
+        "load_props_frame_for_date",
+        lambda **_: pd.DataFrame([{"player_name": "Jane Smith", "market": "player_points", "line": 17.5}]),
+    )
+    monkeypatch.setattr(
+        cbb_lineup_jobs,
+        "load_odds_frame_for_date",
+        lambda **_: pd.DataFrame([{"event_id": "evt-1", "total_points": 145.0, "spread_home": -3.0}]),
+    )
+    monkeypatch.setattr(
+        cbb_lineup_jobs,
+        "load_season_vegas_history_frame",
+        lambda **_: pd.DataFrame(
+            [
+                {
+                    "total_error": 0.0,
+                    "total_points": 145.0,
+                    "vegas_home_margin": -3.0,
+                    "has_total_line": True,
+                }
+            ]
+        ),
+    )
+    monkeypatch.setattr(cbb_lineup_jobs, "fit_total_tail_model", lambda _: {"samples": 1})
+    monkeypatch.setattr(
+        cbb_lineup_jobs,
+        "score_odds_games_for_tail",
+        lambda odds_df, _: odds_df.assign(
+            game_key="AWAY@HOME",
+            tail_residual_mu=0.0,
+            tail_sigma=8.0,
+            p_plus_8=0.25,
+            p_plus_12=0.12,
+            volatility_score=8.0,
+        ),
+    )
     monkeypatch.setattr(cbb_lineup_jobs, "build_player_pool", _fake_build_player_pool)
     monkeypatch.setattr(cbb_lineup_jobs, "generate_lineups", _fake_generate_lineups)
     monkeypatch.setattr(cbb_lineup_jobs, "lineups_summary_frame", lambda _: pd.DataFrame([{"lineup_number": 1}]))
@@ -217,4 +270,11 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
     )
 
     assert seen["lineupstarter_rows"] == 1
+    assert seen["season_history_rows"] == 1
+    assert seen["props_rows"] == 1
+    assert seen["odds_tail_rows"] == 1
+    assert seen["bookmaker_filter"] == "fanduel"
     assert bool(result["lineupstarter_loaded"]) is True
+    assert int(result["season_history_rows"]) == 1
+    assert int(result["props_rows"]) == 1
+    assert int(result["odds_tail_rows"]) == 1

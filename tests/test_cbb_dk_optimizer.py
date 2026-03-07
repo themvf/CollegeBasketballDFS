@@ -349,6 +349,10 @@ def test_build_player_pool_blends_rotowire_projection_and_minutes_signal() -> No
     assert float(rw_g1["consensus_minutes_proj"]) > float(base_g1["our_minutes_avg"])
     assert float(rw_g1["rotowire_signal_score"]) > 0.0
     assert float(rw_g1["rotowire_blend_weight"]) > 0.0
+    assert round(float(rw_g1["projection_consensus"]), 4) == round(float(rw_g1["projected_dk_points"]), 4)
+    assert round(float(rw_g1["projection_weight_rotowire"]), 4) == round(float(rw_g1["rotowire_blend_weight"]), 4)
+    assert round(float(rw_g1["rotowire_projection_raw"]), 4) == round(float(rw_g1["rotowire_proj_fantasy_points"]), 4)
+    assert round(float(rw_g1["minutes_consensus"]), 3) == round(float(rw_g1["consensus_minutes_proj"]), 3)
 
 
 def test_build_player_pool_rotowire_value_signal_lifts_cheap_player_ownership() -> None:
@@ -395,6 +399,14 @@ def test_build_player_pool_blends_lineupstarter_projection_and_ownership_prior()
     assert round(float(ls_g1["ownership_external_prior"]), 2) == 24.5
     assert float(ls_g1["lineupstarter_blend_weight"]) > 0.0
     assert float(ls_g1["lineupstarter_ownership_blend_weight"]) > 0.0
+    assert round(float(ls_g1["projection_consensus"]), 4) == round(float(ls_g1["projected_dk_points"]), 4)
+    assert round(float(ls_g1["ownership_consensus"]), 2) == round(float(ls_g1["projected_ownership"]), 2)
+    assert round(float(ls_g1["projection_weight_lineupstarter"]), 4) == round(float(ls_g1["lineupstarter_blend_weight"]), 4)
+    assert round(float(ls_g1["ownership_weight_lineupstarter"]), 4) == round(float(ls_g1["lineupstarter_ownership_blend_weight"]), 4)
+    assert round(float(ls_g1["our_projection_raw"]), 4) == round(float(ls_g1["our_dk_projection"]), 4)
+    assert round(float(ls_g1["lineupstarter_projection_raw"]), 4) == 43.7
+    assert round(float(ls_g1["lineupstarter_ownership_raw"]), 2) == 24.5
+    assert round(float(ls_g1["ownership_model_raw"]), 3) == round(float(ls_g1["projected_ownership_pre_lineupstarter"]), 3)
     assert abs(float(ls_g1["projected_dk_points"]) - float(rw_g1["projected_dk_points"])) > 0.01
     assert abs(float(ls_g1["projected_ownership"]) - float(ls_g1["projected_ownership_pre_lineupstarter"])) > 0.01
 

@@ -17,10 +17,12 @@ from .cbb_dk_registry import (
     extract_registry_rows_from_dk_slate,
     manual_overrides_to_history_frame,
 )
-from .cbb_dk_optimizer import normalize_injuries_frame
+from .cbb_backfill import iter_dates, season_start_for_date
+from .cbb_dk_optimizer import build_player_pool, normalize_injuries_frame, remove_injured_players
 from .cbb_gcs import CbbGcsStore, build_storage_client
+from .cbb_odds import flatten_odds_payload, flatten_player_props_payload
 from .cbb_rotowire import RotoWireClient, flatten_slates, normalize_players, select_slate
-from .cbb_odds import flatten_player_props_payload
+from .cbb_tail_model import fit_total_tail_model, score_odds_games_for_tail
 from .cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
@@ -1185,6 +1187,294 @@ def _read_csv_frame(csv_text: str | None) -> pd.DataFrame:
         return pd.read_csv(io.StringIO(str(csv_text)))
     except Exception:
         return pd.DataFrame()
+
+
+def _read_injuries_feed_csv(store: CbbGcsStore, selected_date: date | None = None) -> str | None:
+    reader = getattr(store, "read_injuries_feed_csv", None)
+    if not callable(reader):
+        return None
+    try:
+        return reader(game_date=selected_date)
+    except TypeError:
+        try:
+            if selected_date is not None:
+                return reader(selected_date)
+        except TypeError:
+            return reader()
+    return reader()
+
+
+def _read_injuries_manual_csv(store: CbbGcsStore) -> str | None:
+    reader = getattr(store, "read_injuries_manual_csv", None)
+    if not callable(reader):
+        return None
+    return reader()
+
+
+def _read_injuries_csv(store: CbbGcsStore) -> str | None:
+    reader = getattr(store, "read_injuries_csv", None)
+    if not callable(reader):
+        return None
+    return reader()
+
+
+def _list_players_blob_names(store: CbbGcsStore) -> list[str]:
+    list_fn = getattr(store, "list_players_blob_names", None)
+    if not callable(list_fn):
+        return []
+    return list(list_fn() or [])
+
+
+def _read_players_csv_blob(store: CbbGcsStore, blob_name: str) -> str:
+    read_fn = getattr(store, "read_players_csv_blob", None)
+    if not callable(read_fn):
+        return ""
+    return str(read_fn(blob_name) or "")
+
+
+def load_odds_frame_for_date(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    game_date = _to_iso_date(selected_date)
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return pd.DataFrame()
+    payload = store.read_odds_json(game_date)
+    if payload is None:
+        return pd.DataFrame()
+    rows = flatten_odds_payload(payload)
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    frame["game_date"] = pd.to_datetime(frame["game_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return frame
+
+
+def load_props_frame_for_date(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    game_date = _to_iso_date(selected_date)
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return pd.DataFrame()
+    payload = store.read_props_json(game_date)
+    if payload is None:
+        return pd.DataFrame()
+    rows = flatten_player_props_payload(payload)
+    if not rows:
+        return pd.DataFrame()
+    frame = pd.DataFrame(rows)
+    frame["game_date"] = pd.to_datetime(frame["game_date"], errors="coerce").dt.strftime("%Y-%m-%d")
+    return frame
+
+
+def load_injuries_feed_frame(
+    *,
+    selected_date: date | str | None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    game_date = _to_iso_date(selected_date) if selected_date is not None else None
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return normalize_injuries_frame(None)
+    csv_text = _read_injuries_feed_csv(store, selected_date=game_date)
+    if not csv_text or not csv_text.strip():
+        return normalize_injuries_frame(None)
+    return normalize_injuries_frame(_read_csv_frame(csv_text))
+
+
+def load_injuries_manual_frame(
+    *,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return normalize_injuries_frame(None)
+    csv_text = _read_injuries_manual_csv(store)
+    if not csv_text or not csv_text.strip():
+        return normalize_injuries_frame(None)
+    return normalize_injuries_frame(_read_csv_frame(csv_text))
+
+
+def load_injuries_frame(
+    *,
+    selected_date: date | str | None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    feed_df = load_injuries_feed_frame(
+        selected_date=selected_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    manual_df = load_injuries_manual_frame(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if feed_df.empty and manual_df.empty:
+        store = _maybe_build_api_store(
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if store is None:
+            return normalize_injuries_frame(None)
+        legacy_csv = _read_injuries_csv(store)
+        if not legacy_csv or not legacy_csv.strip():
+            return normalize_injuries_frame(None)
+        return normalize_injuries_frame(_read_csv_frame(legacy_csv))
+
+    frames: list[pd.DataFrame] = []
+    if not feed_df.empty:
+        feed = feed_df.copy()
+        feed["_source"] = "feed"
+        frames.append(feed)
+    if not manual_df.empty:
+        manual = manual_df.copy()
+        manual["_source"] = "manual"
+        frames.append(manual)
+    combined = pd.concat(frames, ignore_index=True)
+    combined["_injury_key"] = combined.apply(
+        lambda r: f"{str(r.get('player_name') or '').strip().lower()}|{str(r.get('team') or '').strip().lower()}",
+        axis=1,
+    )
+    combined = combined.drop_duplicates(subset=["_injury_key"], keep="last")
+    combined = combined.drop(columns=["_injury_key", "_source"], errors="ignore")
+    return normalize_injuries_frame(combined)
+
+
+def load_season_player_history_frame(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    game_date = _to_iso_date(selected_date)
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return pd.DataFrame()
+    season_start = season_start_for_date(game_date)
+    selected_iso = game_date.isoformat()
+    frames: list[pd.DataFrame] = []
+    for blob_name in _list_players_blob_names(store):
+        match = re.search(r"(\d{4}-\d{2}-\d{2})_players\.csv$", str(blob_name or ""))
+        if not match:
+            continue
+        blob_date = match.group(1)
+        if blob_date < season_start.isoformat() or blob_date > selected_iso:
+            continue
+        csv_text = _read_players_csv_blob(store, blob_name)
+        if not csv_text.strip():
+            continue
+        df = _read_csv_frame(csv_text)
+        needed = [
+            "game_date",
+            "player_name",
+            "team_name",
+            "minutes_played",
+            "points",
+            "rebounds",
+            "assists",
+            "steals",
+            "blocks",
+            "turnovers",
+            "tpm",
+            "fga",
+            "fta",
+            "dk_fpts",
+        ]
+        cols = [c for c in needed if c in df.columns]
+        if cols:
+            frames.append(df[cols].copy())
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_season_vegas_history_frame(
+    *,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> pd.DataFrame:
+    game_date = _to_iso_date(selected_date)
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return pd.DataFrame()
+    season_start = season_start_for_date(game_date)
+    end_date = game_date - timedelta(days=1)
+    if end_date < season_start:
+        return pd.DataFrame()
+
+    raw_payloads: list[dict[str, Any]] = []
+    odds_payloads: list[dict[str, Any]] = []
+    for one_day in iter_dates(season_start, end_date):
+        raw_payload = store.read_raw_json(one_day)
+        if isinstance(raw_payload, dict):
+            raw_payloads.append(raw_payload)
+        odds_payload = store.read_odds_json(one_day)
+        if isinstance(odds_payload, dict):
+            odds_payloads.append(odds_payload)
+    if not raw_payloads or not odds_payloads:
+        return pd.DataFrame()
+    return build_vegas_review_games_frame(raw_payloads=raw_payloads, odds_payloads=odds_payloads)
 
 
 def _decode_csv_payload(csv_bytes: bytes) -> tuple[str, pd.DataFrame]:

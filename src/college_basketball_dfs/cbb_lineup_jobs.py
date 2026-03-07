@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import traceback
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -14,7 +15,12 @@ import pandas as pd
 
 from .cbb_api_service import (
     ensure_full_registry_coverage,
+    load_injuries_frame,
     load_lineupstarter_projection_frame,
+    load_odds_frame_for_date,
+    load_props_frame_for_date,
+    load_season_player_history_frame,
+    load_season_vegas_history_frame,
     resolve_rotowire_slate,
 )
 from .cbb_dk_optimizer import (
@@ -23,7 +29,9 @@ from .cbb_dk_optimizer import (
     generate_lineups,
     lineups_slots_frame,
     lineups_summary_frame,
+    remove_injured_players,
 )
+from .cbb_tail_model import fit_total_tail_model, score_odds_games_for_tail
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_JOBS_ROOT = REPO_ROOT / "data" / "api_jobs"
 
@@ -191,6 +199,21 @@ def _runtime_controls(contest_type: str, model_cfg: dict[str, Any], request: dic
         if key in request and request.get(key) is not None:
             controls[key] = request.get(key)
     return controls
+
+
+def _resolve_bookmaker_filter(request: dict[str, Any]) -> str | None:
+    for key in ["bookmaker", "bookmaker_filter"]:
+        raw = str(request.get(key) or "").strip()
+        if raw:
+            first = next((part.strip().lower() for part in raw.split(",") if part.strip()), "")
+            if first:
+                return first
+    env_raw = str(os.getenv("CBB_ODDS_BOOKMAKERS") or "").strip()
+    if env_raw:
+        first = next((part.strip().lower() for part in env_raw.split(",") if part.strip()), "")
+        if first:
+            return first
+    return "fanduel"
 
 
 def _annotate_lineups_with_version_metadata(
@@ -375,6 +398,11 @@ def run_lineup_job_request(
     high_risk_extra_shrink = float(request.get("high_risk_extra_shrink") or 0.08)
     dnp_risk_threshold = float(request.get("dnp_risk_threshold") or 0.35)
     rotowire_cookie = request.get("rotowire_cookie")
+    bookmaker_filter = _resolve_bookmaker_filter(request)
+    bucket_name = (str(request.get("bucket_name") or "").strip() or None)
+    gcp_project = (str(request.get("gcp_project") or "").strip() or None)
+    service_account_json = (str(request.get("service_account_json") or "").strip() or None)
+    service_account_json_b64 = (str(request.get("service_account_json_b64") or "").strip() or None)
 
     progress(5, "Loading RotoWire slate")
     resolved_bundle = resolve_rotowire_slate(
@@ -385,10 +413,10 @@ def run_lineup_job_request(
         slate_id=request.get("rotowire_slate_id"),
         site_id=int(request.get("site_id") or 1),
         cookie_header=str(rotowire_cookie) if rotowire_cookie else None,
-        bucket_name=(str(request.get("bucket_name") or "").strip() or None),
-        gcp_project=(str(request.get("gcp_project") or "").strip() or None),
-        service_account_json=(str(request.get("service_account_json") or "").strip() or None),
-        service_account_json_b64=(str(request.get("service_account_json_b64") or "").strip() or None),
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
     )
     rotowire_df = resolved_bundle.get("rotowire_df")
     slate_meta = dict(resolved_bundle.get("slate") or {})
@@ -406,22 +434,63 @@ def run_lineup_job_request(
         lineupstarter_df = load_lineupstarter_projection_frame(
             selected_date=selected_date,
             slate_key=slate_key,
-            bucket_name=(str(request.get("bucket_name") or "").strip() or None),
-            gcp_project=(str(request.get("gcp_project") or "").strip() or None),
-            service_account_json=(str(request.get("service_account_json") or "").strip() or None),
-            service_account_json_b64=(str(request.get("service_account_json_b64") or "").strip() or None),
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
         )
     except ValueError:
         lineupstarter_df = pd.DataFrame()
 
+    progress(20, "Loading injury, props, and season context")
+    injuries_df = load_injuries_frame(
+        selected_date=selected_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    filtered_slate, removed_injured_df = remove_injured_players(resolved_slate, injuries_df)
+    season_history_df = load_season_player_history_frame(
+        selected_date=selected_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    odds_df = load_odds_frame_for_date(
+        selected_date=selected_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    vegas_history_df = load_season_vegas_history_frame(
+        selected_date=selected_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    tail_model = fit_total_tail_model(vegas_history_df)
+    odds_scored_df = score_odds_games_for_tail(odds_df, tail_model) if not odds_df.empty else pd.DataFrame()
+    props_df = load_props_frame_for_date(
+        selected_date=selected_date,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+
     progress(22, "Building player pool")
     pool_df = build_player_pool(
-        slate_df=resolved_slate,
-        props_df=None,
-        season_stats_df=None,
+        slate_df=filtered_slate,
+        props_df=props_df,
+        season_stats_df=season_history_df,
         ownership_history_df=None,
         rotowire_df=rotowire_df,
-        odds_games_df=None,
+        bookmaker_filter=bookmaker_filter,
+        odds_games_df=odds_scored_df,
         recent_form_games=int(request.get("recent_form_games") or 7),
         recent_points_weight=float(request.get("recent_points_weight") or 0.0),
         lineupstarter_df=lineupstarter_df,
@@ -507,6 +576,14 @@ def run_lineup_job_request(
                 "coverage": coverage,
                 "lineupstarter_loaded": bool(not lineupstarter_df.empty),
                 "lineupstarter_players": int(lineupstarter_df["ID"].nunique()) if not lineupstarter_df.empty else 0,
+                "bookmaker_filter": bookmaker_filter,
+                "injury_rows": int(len(injuries_df)),
+                "removed_injured_rows": int(len(removed_injured_df)),
+                "season_history_rows": int(len(season_history_df)),
+                "props_rows": int(len(props_df)),
+                "odds_rows": int(len(odds_df)),
+                "odds_tail_rows": int(len(odds_scored_df)),
+                "pool_rows": int(len(pool_df)),
                 "model": model_cfg,
                 "lineups_generated": len(annotated_lineups),
                 "warnings_count": len(warnings),
@@ -524,6 +601,13 @@ def run_lineup_job_request(
         "slate": slate_meta,
         "coverage": coverage,
         "lineupstarter_loaded": bool(not lineupstarter_df.empty),
+        "bookmaker_filter": bookmaker_filter,
+        "injury_rows": int(len(injuries_df)),
+        "removed_injured_rows": int(len(removed_injured_df)),
+        "season_history_rows": int(len(season_history_df)),
+        "props_rows": int(len(props_df)),
+        "odds_rows": int(len(odds_df)),
+        "odds_tail_rows": int(len(odds_scored_df)),
         "model": model_cfg,
         "runtime_controls": controls,
     }

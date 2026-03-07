@@ -1790,6 +1790,15 @@ def build_player_pool(
     out["blended_projection"] = out["projected_dk_points"]
     out["projection_per_dollar"] = out["projected_dk_points"] / out["Salary"].replace(0, pd.NA)
     out["value_per_1k"] = out["projection_per_dollar"] * 1000.0
+    out["our_projection_raw"] = pd.to_numeric(out.get("our_dk_projection"), errors="coerce").round(4)
+    out["rotowire_projection_raw"] = rotowire_proj.round(4)
+    out["lineupstarter_projection_raw"] = lineupstarter_proj.round(4)
+    out["projection_consensus"] = pd.to_numeric(out.get("consensus_dk_projection"), errors="coerce").round(4)
+    out["projection_weight_rotowire"] = pd.to_numeric(out.get("rotowire_blend_weight"), errors="coerce").round(4)
+    out["projection_weight_lineupstarter"] = pd.to_numeric(out.get("lineupstarter_blend_weight"), errors="coerce").round(4)
+    out["our_minutes_raw"] = pd.to_numeric(our_minutes_signal, errors="coerce").round(3)
+    out["rotowire_minutes_raw"] = rotowire_minutes.round(3)
+    out["minutes_consensus"] = pd.to_numeric(out.get("consensus_minutes_proj"), errors="coerce").round(3)
 
     our = pd.to_numeric(out["our_dk_projection"], errors="coerce")
     vegas = pd.to_numeric(out["vegas_dk_projection"], errors="coerce")
@@ -2139,6 +2148,10 @@ def build_player_pool(
     out["lineupstarter_ownership_blend_weight"] = lineupstarter_ownership_blend_weight.round(4)
     out["lineupstarter_ownership_delta"] = (ownership_alloc - ownership_pre_lineupstarter).round(4)
     out["projected_ownership"] = ownership_alloc.round(2)
+    out["ownership_model_raw"] = ownership_pre_lineupstarter.round(3)
+    out["lineupstarter_ownership_raw"] = lineupstarter_own.round(3)
+    out["ownership_consensus"] = pd.to_numeric(out.get("projected_ownership"), errors="coerce").round(2)
+    out["ownership_weight_lineupstarter"] = lineupstarter_ownership_blend_weight.round(4)
     out["ownership_chalk_surge_score"] = (100.0 * surge_score).round(3)
     out["ownership_chalk_surge_flag"] = surge_flag.astype(bool)
     out["ownership_confidence"] = (1.0 - surge_uncertainty).clip(lower=0.0, upper=1.0).round(4)
