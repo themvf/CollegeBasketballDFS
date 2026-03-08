@@ -355,6 +355,76 @@ def test_build_player_pool_blends_rotowire_projection_and_minutes_signal() -> No
     assert round(float(rw_g1["minutes_consensus"]), 3) == round(float(rw_g1["consensus_minutes_proj"]), 3)
 
 
+def test_build_player_pool_assigns_minutes_stability_and_role_change_labels() -> None:
+    season_rows: list[dict[str, object]] = []
+
+    def add_player_games(player_name: str, team_name: str, minutes: list[float]) -> None:
+        for game_idx, mins in enumerate(minutes, start=1):
+            season_rows.append(
+                {
+                    "game_date": f"2026-02-{game_idx:02d}",
+                    "player_name": player_name,
+                    "team_name": team_name,
+                    "minutes_played": mins,
+                    "points": round(float(mins) * 0.55, 2),
+                    "rebounds": round(float(mins) * 0.18, 2),
+                    "assists": round(float(mins) * 0.14, 2),
+                    "tpm": round(float(mins) * 0.05, 2),
+                    "steals": 1.0,
+                    "blocks": 0.5,
+                    "turnovers": 2.0,
+                    "fga": round(float(mins) * 0.32, 2),
+                    "fta": round(float(mins) * 0.12, 2),
+                    "dk_fpts": round(float(mins) * 0.95, 2),
+                }
+            )
+
+    add_player_games("Guard 1", "CCC", [34, 34, 35, 34, 35, 34, 35])
+    add_player_games("Guard 2", "AAA", [36, 34, 32, 28, 24, 20, 18])
+    add_player_games("Forward 1", "DDD", [22, 23, 24, 24, 25, 26, 27])
+    add_player_games("Forward 2", "EEE", [12, 36, 18, 38, 16, 35, 20])
+
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=pd.DataFrame(season_rows),
+        rotowire_df=pd.DataFrame(
+            [
+                {
+                    "player_name": "Forward 1",
+                    "team_abbr": "DDD",
+                    "proj_fantasy_points": 33.2,
+                    "proj_minutes": 31.0,
+                    "proj_value_per_1k": 5.94,
+                }
+            ]
+        ),
+        recent_form_games=5,
+        bookmaker_filter="fanduel",
+    )
+
+    guard_1 = pool.loc[pool["Name"] == "Guard 1"].iloc[0]
+    guard_2 = pool.loc[pool["Name"] == "Guard 2"].iloc[0]
+    forward_1 = pool.loc[pool["Name"] == "Forward 1"].iloc[0]
+    forward_2 = pool.loc[pool["Name"] == "Forward 2"].iloc[0]
+
+    assert guard_1["minutes_stability_label"] == "Stable"
+    assert guard_1["role_change_label"] == "Neutral"
+    assert "clustered" in str(guard_1["role_change_reason"]).lower()
+
+    assert guard_2["role_change_label"] == "Falling"
+    assert float(guard_2["role_change_delta_minutes"]) < 0.0
+
+    assert forward_1["role_change_label"] == "Rising"
+    assert float(forward_1["role_change_delta_minutes"]) > 2.5
+
+    assert forward_2["minutes_stability_label"] == "Volatile"
+    assert any(
+        token in str(forward_2["role_change_reason"]).lower()
+        for token in ["swings", "std"]
+    )
+
+
 def test_build_player_pool_handles_rotowire_frame_with_no_matching_players() -> None:
     pool = build_player_pool(
         _sample_slate(),
@@ -402,6 +472,44 @@ def test_build_player_pool_handles_rotowire_name_only_match_without_exact_column
     assert bool(guard_1["rotowire_minutes_available"]) is True
     assert float(guard_1["rotowire_proj_fantasy_points"]) == 33.5
     assert float(guard_1["rotowire_proj_minutes"]) == 34.0
+
+
+def test_build_player_pool_matches_rotowire_suffix_mismatch_by_loose_name() -> None:
+    slate = pd.DataFrame(
+        [
+            {
+                "Position": "G",
+                "Name + ID": "Brad Longcor III (42219512)",
+                "Name": "Brad Longcor III",
+                "ID": "42219512",
+                "Roster Position": "G/UTIL",
+                "Salary": 3000,
+                "Game Info": "PAC@STC 03/08/2026 10:50PM ET",
+                "TeamAbbrev": "STC",
+                "AvgPointsPerGame": 0.0,
+            }
+        ]
+    )
+    pool = build_player_pool(
+        slate,
+        _sample_props(),
+        rotowire_df=pd.DataFrame(
+            [
+                {
+                    "player_name": "Brad Longcor",
+                    "team_abbr": "STC",
+                    "proj_fantasy_points": 3.06,
+                    "proj_minutes": 12.0,
+                }
+            ]
+        ),
+        bookmaker_filter="fanduel",
+    )
+
+    row = pool.iloc[0]
+    assert row["rotowire_match_source"] == "team_suffix_fallback"
+    assert float(row["rotowire_proj_fantasy_points"]) == 3.06
+    assert float(row["rotowire_proj_minutes"]) == 12.0
 
 
 def test_build_player_pool_rotowire_supplement_priority_overrides_base_projection() -> None:
@@ -699,6 +807,21 @@ def test_generate_lineups_respects_locks_and_excludes() -> None:
 
     upload_csv = build_dk_upload_csv(lineups)
     assert upload_csv.startswith("G,G,G,F,F,F,UTIL,UTIL")
+
+
+def test_generate_lineups_accepts_legacy_spike_max_pair_overlap_kwarg() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=4,
+        contest_type="Large GPP",
+        lineup_strategy="spike",
+        spike_max_pair_overlap=4,
+        random_seed=13,
+    )
+
+    assert warnings == []
+    assert len(lineups) == 4
 
 
 def test_lineup_minutes_summary_columns_present() -> None:
@@ -1133,6 +1256,8 @@ def test_apply_minutes_shock_override_boosts_positive_minute_deltas() -> None:
     assert float(adjusted.loc[0, "minutes_shock_boost_pct"]) > 0.0
     assert float(after.iloc[0]) > float(before.iloc[0])
     assert float(adjusted.loc[1, "minutes_shock_boost_pct"]) <= float(adjusted.loc[0, "minutes_shock_boost_pct"])
+    assert adjusted.loc[0, "role_change_label"] == "Rising"
+    assert float(adjusted.loc[0, "role_change_delta_minutes"]) > 0.0
 
 
 def test_apply_chalk_ceiling_guardrail_softly_lifts_top_candidates() -> None:

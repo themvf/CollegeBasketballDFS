@@ -20,11 +20,18 @@ INJURY_STATUSES_REMOVE_DEFAULT = ("out", "doubtful")
 PROJECTION_SALARY_BUCKETS = ("lt4500", "4500_6999", "7000_9999", "gte10000")
 PROJECTION_ROLE_BUCKETS = ("guard", "forward", "center", "other")
 OWNERSHIP_SALARY_BUCKETS = ("lt5500", "5500_7499", "gte7500")
+NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v", "vi"}
 
 
 def _normalize_text(value: Any) -> str:
     text = str(value or "").strip().lower()
     return re.sub(r"[^a-z0-9]", "", text)
+
+
+def _normalize_text_without_suffix(value: Any) -> str:
+    tokens = re.findall(r"[a-z0-9]+", str(value or "").strip().lower())
+    tokens = [token for token in tokens if token not in NAME_SUFFIX_TOKENS]
+    return "".join(tokens)
 
 
 def _player_team_key(player_name: Any, team: Any) -> str:
@@ -428,6 +435,7 @@ def _attach_rotowire_priors(
     rw["player_name"] = rw["player_name"].astype(str).str.strip()
     rw["team_abbr"] = rw["team_abbr"].astype(str).str.strip().str.upper()
     rw["_name_norm"] = rw["player_name"].map(_normalize_text)
+    rw["_name_norm_loose"] = rw["player_name"].map(_normalize_text_without_suffix)
     rw["_team_norm"] = rw["team_abbr"].map(_normalize_text)
     rw["proj_fantasy_points"] = pd.to_numeric(rw.get("proj_fantasy_points"), errors="coerce")
     rw["proj_minutes"] = pd.to_numeric(rw.get("proj_minutes"), errors="coerce")
@@ -489,6 +497,37 @@ def _attach_rotowire_priors(
     if not exact.empty:
         out = out.merge(exact, on=["_name_norm", "_team_norm"], how="left")
 
+    loose_exact = (
+        rw_unique.loc[(rw_unique["_team_norm"] != "") & (rw_unique["_name_norm_loose"] != "")]
+        .drop_duplicates(subset=["_name_norm_loose", "_team_norm"], keep="first")
+        [
+            [
+                "_name_norm_loose",
+                "_team_norm",
+                "proj_fantasy_points",
+                "proj_minutes",
+                "proj_value_per_1k",
+                "avg_fpts_last5",
+                "avg_fpts_season",
+                "usage_rate",
+                "salary",
+            ]
+        ]
+        .rename(
+            columns={
+                "proj_fantasy_points": "rotowire_proj_fantasy_points_loose_exact",
+                "proj_minutes": "rotowire_proj_minutes_loose_exact",
+                "proj_value_per_1k": "rotowire_value_per_1k_loose_exact",
+                "avg_fpts_last5": "rotowire_avg_fpts_last5_loose_exact",
+                "avg_fpts_season": "rotowire_avg_fpts_season_loose_exact",
+                "usage_rate": "rotowire_usage_rate_loose_exact",
+                "salary": "rotowire_salary_loose_exact",
+            }
+        )
+    )
+    if not loose_exact.empty:
+        out = out.merge(loose_exact, on=["_name_norm_loose", "_team_norm"], how="left")
+
     current_name_counts = out["_name_norm"].value_counts(dropna=False)
     unique_current_names = set(current_name_counts.loc[current_name_counts == 1].index.tolist())
     rw_name_counts = rw_unique["_name_norm"].value_counts(dropna=False)
@@ -524,6 +563,41 @@ def _attach_rotowire_priors(
     if not fallback.empty:
         out = out.merge(fallback, on="_name_norm", how="left")
 
+    current_loose_counts = out["_name_norm_loose"].value_counts(dropna=False)
+    unique_current_loose = set(current_loose_counts.loc[current_loose_counts == 1].index.tolist())
+    rw_loose_counts = rw_unique["_name_norm_loose"].value_counts(dropna=False)
+    unique_rw_loose = set(rw_loose_counts.loc[rw_loose_counts == 1].index.tolist())
+    loose_fallback_keys = unique_current_loose & unique_rw_loose
+    loose_fallback = (
+        rw_unique.loc[rw_unique["_name_norm_loose"].isin(loose_fallback_keys)]
+        .drop_duplicates(subset=["_name_norm_loose"], keep="first")
+        [
+            [
+                "_name_norm_loose",
+                "proj_fantasy_points",
+                "proj_minutes",
+                "proj_value_per_1k",
+                "avg_fpts_last5",
+                "avg_fpts_season",
+                "usage_rate",
+                "salary",
+            ]
+        ]
+        .rename(
+            columns={
+                "proj_fantasy_points": "rotowire_proj_fantasy_points_loose_name",
+                "proj_minutes": "rotowire_proj_minutes_loose_name",
+                "proj_value_per_1k": "rotowire_value_per_1k_loose_name",
+                "avg_fpts_last5": "rotowire_avg_fpts_last5_loose_name",
+                "avg_fpts_season": "rotowire_avg_fpts_season_loose_name",
+                "usage_rate": "rotowire_usage_rate_loose_name",
+                "salary": "rotowire_salary_loose_name",
+            }
+        )
+    )
+    if not loose_fallback.empty:
+        out = out.merge(loose_fallback, on="_name_norm_loose", how="left")
+
     for base_col in [
         "rotowire_proj_fantasy_points",
         "rotowire_proj_minutes",
@@ -534,22 +608,38 @@ def _attach_rotowire_priors(
         "rotowire_salary",
     ]:
         exact_col = f"{base_col}_exact"
+        loose_exact_col = f"{base_col}_loose_exact"
         name_col = f"{base_col}_name"
+        loose_name_col = f"{base_col}_loose_name"
         exact_values = _numeric_merge_col(exact_col)
+        loose_exact_values = _numeric_merge_col(loose_exact_col)
         name_values = _numeric_merge_col(name_col)
-        out[base_col] = exact_values.where(exact_values.notna(), name_values)
+        loose_name_values = _numeric_merge_col(loose_name_col)
+        out[base_col] = exact_values.where(exact_values.notna(), loose_exact_values)
+        out[base_col] = out[base_col].where(out[base_col].notna(), name_values)
+        out[base_col] = out[base_col].where(out[base_col].notna(), loose_name_values)
 
     match_source = pd.Series([""] * len(out), index=out.index, dtype="object")
     exact_available = (
         _numeric_merge_col("rotowire_proj_fantasy_points_exact").notna()
         | _numeric_merge_col("rotowire_proj_minutes_exact").notna()
     )
+    loose_exact_available = (
+        _numeric_merge_col("rotowire_proj_fantasy_points_loose_exact").notna()
+        | _numeric_merge_col("rotowire_proj_minutes_loose_exact").notna()
+    )
     fallback_available = (
         _numeric_merge_col("rotowire_proj_fantasy_points_name").notna()
         | _numeric_merge_col("rotowire_proj_minutes_name").notna()
     )
+    loose_fallback_available = (
+        _numeric_merge_col("rotowire_proj_fantasy_points_loose_name").notna()
+        | _numeric_merge_col("rotowire_proj_minutes_loose_name").notna()
+    )
     match_source.loc[exact_available] = "team_exact"
+    match_source.loc[(match_source == "") & loose_exact_available] = "team_suffix_fallback"
     match_source.loc[(match_source == "") & fallback_available] = "name_only"
+    match_source.loc[(match_source == "") & loose_fallback_available] = "name_suffix_fallback"
     out["rotowire_match_source"] = match_source
     out["rotowire_projection_available"] = _numeric_merge_col("rotowire_proj_fantasy_points").notna()
     out["rotowire_minutes_available"] = _numeric_merge_col("rotowire_proj_minutes").notna()
@@ -569,6 +659,20 @@ def _attach_rotowire_priors(
         "rotowire_avg_fpts_season_name",
         "rotowire_usage_rate_name",
         "rotowire_salary_name",
+        "rotowire_proj_fantasy_points_loose_exact",
+        "rotowire_proj_minutes_loose_exact",
+        "rotowire_value_per_1k_loose_exact",
+        "rotowire_avg_fpts_last5_loose_exact",
+        "rotowire_avg_fpts_season_loose_exact",
+        "rotowire_usage_rate_loose_exact",
+        "rotowire_salary_loose_exact",
+        "rotowire_proj_fantasy_points_loose_name",
+        "rotowire_proj_minutes_loose_name",
+        "rotowire_value_per_1k_loose_name",
+        "rotowire_avg_fpts_last5_loose_name",
+        "rotowire_avg_fpts_season_loose_name",
+        "rotowire_usage_rate_loose_name",
+        "rotowire_salary_loose_name",
     ]
     existing_helpers = [col for col in helper_cols if col in out.columns]
     if existing_helpers:
@@ -1053,6 +1157,159 @@ def _refresh_ceiling_projection(pool_df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def _append_role_change_signals(pool_df: pd.DataFrame) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    mins_avg = _pool_numeric_series(out, "our_minutes_avg", default=None)
+    mins_last7 = _pool_numeric_series(out, "our_minutes_last7", default=None)
+    mins_last3 = _pool_numeric_series(out, "our_minutes_last3", default=None)
+    mins_recent = _pool_numeric_series(out, "our_minutes_recent", default=None)
+    mins_recent = mins_recent.where(mins_recent.notna(), mins_last3)
+    mins_recent = mins_recent.where(mins_recent.notna(), mins_last7)
+    mins_recent = mins_recent.where(mins_recent.notna(), mins_avg)
+
+    consensus_minutes = _pool_numeric_series(out, "consensus_minutes_proj", default=None)
+    consensus_minutes = consensus_minutes.where(consensus_minutes.notna(), mins_recent)
+    consensus_minutes = consensus_minutes.where(consensus_minutes.notna(), mins_last3)
+    consensus_minutes = consensus_minutes.where(consensus_minutes.notna(), mins_last7)
+    consensus_minutes = consensus_minutes.where(consensus_minutes.notna(), mins_avg)
+
+    rotowire_minutes = _pool_numeric_series(out, "rotowire_minutes_raw", default=None)
+    recent_minutes_std = _pool_numeric_series(out, "our_minutes_std_last7", default=None)
+    uncertainty = _pool_numeric_series(out, "projection_uncertainty_score", default=0.0).clip(lower=0.0, upper=1.0)
+    dnp_risk = _pool_numeric_series(out, "dnp_risk_score", default=0.0).clip(lower=0.0, upper=1.0)
+    minutes_drop = _pool_numeric_series(out, "minutes_drop_ratio", default=0.0).clip(lower=0.0, upper=1.0)
+    minutes_boost = _pool_numeric_series(out, "minutes_shock_boost_pct", default=0.0).clip(lower=0.0)
+    expected_rotation = _pool_numeric_series(out, "expected_rotation_flag", default=0.0).clip(lower=0.0, upper=1.0)
+
+    baseline_weight = (mins_avg.notna().astype(float) * 0.60) + (mins_last7.notna().astype(float) * 0.40)
+    baseline_minutes = (
+        ((mins_avg.fillna(0.0) * 0.60) + (mins_last7.fillna(0.0) * 0.40))
+        / baseline_weight.replace(0.0, pd.NA)
+    )
+    baseline_minutes = baseline_minutes.where(baseline_minutes.notna(), mins_last3)
+    baseline_minutes = baseline_minutes.where(baseline_minutes.notna(), mins_recent)
+    baseline_minutes = baseline_minutes.where(baseline_minutes.notna(), consensus_minutes)
+    baseline_minutes = pd.to_numeric(baseline_minutes, errors="coerce").fillna(0.0)
+
+    expected_minutes = consensus_minutes.where(consensus_minutes.notna(), mins_recent)
+    expected_minutes = expected_minutes.where(expected_minutes.notna(), mins_last3)
+    expected_minutes = expected_minutes.where(expected_minutes.notna(), mins_last7)
+    expected_minutes = expected_minutes.where(expected_minutes.notna(), mins_avg)
+    expected_minutes = expected_minutes.fillna(0.0)
+
+    windows = pd.concat([mins_avg, mins_last7, mins_last3, mins_recent], axis=1)
+    window_mean = pd.to_numeric(windows.mean(axis=1, skipna=True), errors="coerce")
+    window_mean = pd.to_numeric(window_mean.where(window_mean.notna(), expected_minutes), errors="coerce").fillna(0.0)
+    window_std = pd.to_numeric(windows.std(axis=1, ddof=0, skipna=True), errors="coerce").fillna(0.0)
+    window_min = pd.to_numeric(windows.min(axis=1, skipna=True), errors="coerce")
+    window_min = pd.to_numeric(window_min.where(window_min.notna(), expected_minutes), errors="coerce").fillna(0.0)
+    window_max = pd.to_numeric(windows.max(axis=1, skipna=True), errors="coerce")
+    window_max = pd.to_numeric(window_max.where(window_max.notna(), expected_minutes), errors="coerce").fillna(0.0)
+    window_range = (window_max - window_min).clip(lower=0.0)
+    variation_ratio = pd.to_numeric(window_std / window_mean.replace(0.0, pd.NA), errors="coerce").fillna(0.0)
+    variation_ratio = variation_ratio.clip(lower=0.0, upper=1.0)
+    range_ratio = pd.to_numeric(window_range / window_mean.replace(0.0, pd.NA), errors="coerce").fillna(0.0)
+    range_ratio = range_ratio.clip(lower=0.0, upper=1.0)
+    recent_std_ratio = pd.to_numeric(
+        recent_minutes_std / window_mean.replace(0.0, pd.NA),
+        errors="coerce",
+    ).fillna(0.0).clip(lower=0.0, upper=1.0)
+    stability_score = (
+        1.0
+        - (
+            (0.36 * (variation_ratio / 0.16).clip(lower=0.0, upper=1.0))
+            + (0.21 * (range_ratio / 0.28).clip(lower=0.0, upper=1.0))
+            + (0.23 * (recent_std_ratio / 0.18).clip(lower=0.0, upper=1.0))
+            + (0.12 * uncertainty)
+            + (0.08 * dnp_risk)
+        )
+    ).clip(lower=0.0, upper=1.0)
+
+    stability_label = pd.Series(["Moderate"] * len(out), index=out.index, dtype="object")
+    stability_label.loc[stability_score >= 0.70] = "Stable"
+    stability_label.loc[stability_score < 0.46] = "Volatile"
+    stability_label.loc[
+        (recent_minutes_std.fillna(0.0) >= 6.0) | (recent_std_ratio >= 0.24)
+    ] = "Volatile"
+
+    trend_anchor = mins_last3.where(mins_last3.notna(), mins_recent)
+    trend_anchor = trend_anchor.where(trend_anchor.notna(), expected_minutes)
+    trend_minutes = (trend_anchor - baseline_minutes).fillna(0.0)
+    role_change_delta = (expected_minutes - baseline_minutes).fillna(0.0)
+    role_change_delta_pct = pd.to_numeric(
+        role_change_delta / baseline_minutes.replace(0.0, pd.NA),
+        errors="coerce",
+    ).fillna(0.0).clip(lower=-0.60, upper=0.60)
+    trend_delta_pct = pd.to_numeric(
+        trend_minutes / baseline_minutes.replace(0.0, pd.NA),
+        errors="coerce",
+    ).fillna(0.0).clip(lower=-0.60, upper=0.60)
+    rotowire_delta = (rotowire_minutes.fillna(expected_minutes) - mins_recent.fillna(baseline_minutes)).fillna(0.0)
+    rotowire_delta_pct = pd.to_numeric(
+        rotowire_delta / baseline_minutes.replace(0.0, pd.NA),
+        errors="coerce",
+    ).fillna(0.0).clip(lower=-0.50, upper=0.50)
+    boost_norm = (minutes_boost / 12.0).clip(lower=0.0, upper=1.0)
+
+    rise_signal = (
+        (0.46 * role_change_delta_pct.clip(lower=0.0))
+        + (0.20 * trend_delta_pct.clip(lower=0.0))
+        + (0.16 * rotowire_delta_pct.clip(lower=0.0))
+        + (0.10 * boost_norm)
+        + (0.08 * expected_rotation)
+    ).clip(lower=0.0, upper=1.0)
+    fall_signal = (
+        (0.46 * (-role_change_delta_pct).clip(lower=0.0))
+        + (0.18 * (-trend_delta_pct).clip(lower=0.0))
+        + (0.22 * minutes_drop)
+        + (0.14 * dnp_risk)
+    ).clip(lower=0.0, upper=1.0)
+    role_change_score = (rise_signal - fall_signal).clip(lower=-1.0, upper=1.0)
+
+    role_change_label = pd.Series(["Neutral"] * len(out), index=out.index, dtype="object")
+    rising_mask = (
+        ((role_change_delta >= 2.5) | (role_change_score >= 0.16))
+        & (fall_signal < 0.48)
+    )
+    falling_mask = (
+        ((role_change_delta <= -2.0) | (minutes_drop >= 0.18) | (role_change_score <= -0.16))
+        & ~rising_mask
+    )
+    role_change_label.loc[rising_mask] = "Rising"
+    role_change_label.loc[falling_mask] = "Falling"
+
+    stable_reason = window_mean.round(1).map(lambda x: f"Windows clustered near {float(x):.1f} min")
+    volatile_reason = recent_minutes_std.round(1).map(lambda x: f"Last-7 minute std {float(x):.1f}")
+    volatile_reason.loc[recent_minutes_std.fillna(0.0) <= 0.0] = window_range.loc[
+        recent_minutes_std.fillna(0.0) <= 0.0
+    ].round(1).map(lambda x: f"Recent window swings {float(x):.1f} min")
+    neutral_reason = pd.Series(["Minutes holding near baseline"] * len(out), index=out.index, dtype="object")
+    neutral_reason.loc[stability_label == "Stable"] = stable_reason.loc[stability_label == "Stable"]
+    neutral_reason.loc[stability_label == "Volatile"] = volatile_reason.loc[stability_label == "Volatile"]
+    rising_reason = role_change_delta.round(1).map(lambda x: f"Expected {float(x):+.1f} min vs baseline")
+    rising_external_reason = rotowire_delta.round(1).map(lambda x: f"RotoWire {float(x):+.1f} min vs recent")
+    use_external_reason = rotowire_minutes.notna() & (rotowire_delta >= 2.0)
+    rising_reason.loc[use_external_reason] = rising_external_reason.loc[use_external_reason]
+    falling_reason = role_change_delta.round(1).map(lambda x: f"Expected {float(x):+.1f} min vs baseline")
+    drop_reason = minutes_drop.map(lambda x: f"Recent minutes down {int(round(float(x) * 100.0))}% vs baseline")
+    falling_reason.loc[minutes_drop >= 0.18] = drop_reason.loc[minutes_drop >= 0.18]
+
+    role_change_reason = neutral_reason.copy()
+    role_change_reason.loc[rising_mask] = rising_reason.loc[rising_mask]
+    role_change_reason.loc[falling_mask] = falling_reason.loc[falling_mask]
+
+    out["minutes_stability_score"] = stability_score.round(4)
+    out["minutes_stability_label"] = stability_label
+    out["role_change_score"] = role_change_score.round(4)
+    out["role_change_label"] = role_change_label
+    out["role_change_delta_minutes"] = role_change_delta.round(3)
+    out["role_change_reason"] = role_change_reason
+    return out
+
+
 def _ownership_external_prior_series(pool_df: pd.DataFrame) -> pd.Series:
     lineupstarter_prior = pd.to_numeric(
         pool_df.get("lineupstarter_projected_ownership", pd.Series([pd.NA] * len(pool_df), index=pool_df.index)),
@@ -1490,6 +1747,7 @@ def build_player_pool(
     out["AvgPointsPerGame"] = pd.to_numeric(out.get("AvgPointsPerGame"), errors="coerce")
     out["game_key"] = out.get("Game Info", "").map(_game_key)
     out["_name_norm"] = out["Name"].map(_normalize_text)
+    out["_name_norm_loose"] = out["Name"].map(_normalize_text_without_suffix)
     out["_team_norm"] = out["TeamAbbrev"].map(_normalize_text)
     out = _attach_historical_ownership_priors(out, ownership_history_df)
     out = _attach_rotowire_priors(out, rotowire_df)
@@ -1595,6 +1853,28 @@ def build_player_pool(
                 )
             )
 
+        def _recent_minutes_std_rollup(
+            frame: pd.DataFrame,
+            group_cols: list[str],
+            sort_cols: list[str],
+            window: int,
+            suffix: str,
+        ) -> pd.DataFrame:
+            return (
+                frame.sort_values(sort_cols)
+                .groupby(group_cols, as_index=False, group_keys=False)
+                .tail(int(window))
+                .groupby(group_cols, as_index=False)
+                .agg(
+                    **{
+                        f"our_minutes_std_{suffix}": (
+                            "minutes_played",
+                            lambda s: float(pd.to_numeric(s, errors="coerce").std(ddof=0)),
+                        )
+                    }
+                )
+            )
+
         recent_last7_team = _recent_rollup(
             s,
             group_cols=["_name_norm", "_team_norm"],
@@ -1603,6 +1883,20 @@ def build_player_pool(
             suffix="last7_team",
         )
         recent_last7_name = _recent_rollup(
+            s,
+            group_cols=["_name_norm"],
+            sort_cols=["_name_norm", "game_date"],
+            window=7,
+            suffix="last7_name",
+        )
+        recent_last7_std_team = _recent_minutes_std_rollup(
+            s,
+            group_cols=["_name_norm", "_team_norm"],
+            sort_cols=["_name_norm", "_team_norm", "game_date"],
+            window=7,
+            suffix="last7_team",
+        )
+        recent_last7_std_name = _recent_minutes_std_rollup(
             s,
             group_cols=["_name_norm"],
             sort_cols=["_name_norm", "game_date"],
@@ -1642,6 +1936,8 @@ def build_player_pool(
         out = out.merge(agg_name, on=["_name_norm"], how="left")
         out = out.merge(recent_last7_team, on=["_name_norm", "_team_norm"], how="left")
         out = out.merge(recent_last7_name, on=["_name_norm"], how="left")
+        out = out.merge(recent_last7_std_team, on=["_name_norm", "_team_norm"], how="left")
+        out = out.merge(recent_last7_std_name, on=["_name_norm"], how="left")
         out = out.merge(recent_last3_team, on=["_name_norm", "_team_norm"], how="left")
         out = out.merge(recent_last3_name, on=["_name_norm"], how="left")
         out = out.merge(recent_dynamic_team, on=["_name_norm", "_team_norm"], how="left")
@@ -1674,6 +1970,12 @@ def build_player_pool(
             out["our_minutes_last7"].notna(),
             pd.to_numeric(out.get("our_minutes_avg"), errors="coerce"),
         )
+        out["our_minutes_std_last7"] = pd.to_numeric(out.get("our_minutes_std_last7_team"), errors="coerce")
+        out["our_minutes_std_last7"] = out["our_minutes_std_last7"].where(
+            out["our_minutes_std_last7"].notna(),
+            pd.to_numeric(out.get("our_minutes_std_last7_name"), errors="coerce"),
+        )
+        out["our_minutes_std_last7"] = out["our_minutes_std_last7"].fillna(0.0)
         out["our_minutes_recent"] = pd.to_numeric(out.get("our_minutes_recent_team"), errors="coerce")
         out["our_minutes_recent"] = out["our_minutes_recent"].where(
             out["our_minutes_recent"].notna(),
@@ -2375,6 +2677,7 @@ def build_player_pool(
         out["recommended_stack_size"] = 2
 
     out = _refresh_ceiling_projection(out)
+    out = _append_role_change_signals(out)
 
     out["low_own_ceiling_flag"] = (
         (
@@ -2392,6 +2695,7 @@ def build_player_pool(
 
     drop_cols = [
         "_name_norm",
+        "_name_norm_loose",
         "_team_norm",
         "our_points_avg_team",
         "our_rebounds_avg_team",
@@ -2423,6 +2727,8 @@ def build_player_pool(
         "our_dk_fpts_recent_name",
         "our_minutes_last7_team",
         "our_minutes_last7_name",
+        "our_minutes_std_last7_team",
+        "our_minutes_std_last7_name",
         "our_minutes_last3_team",
         "our_minutes_last3_name",
         "our_points_last7_team",
@@ -3160,7 +3466,8 @@ def apply_minutes_shock_override(
     out["minutes_shock_delta"] = minutes_delta.round(3)
     out["minutes_shock_boost_pct"] = (minutes_boost * 100.0).round(3)
     out["minutes_shock_multiplier"] = multiplier.round(4)
-    return _refresh_ceiling_projection(out)
+    out = _refresh_ceiling_projection(out)
+    return _append_role_change_signals(out)
 
 
 def apply_chalk_ceiling_guardrail(
@@ -3640,11 +3947,13 @@ def _rerank_lineup_portfolio(
     preferred_target_count: int,
     low_own_target_count: int,
     salary_left_target: int | None,
+    max_pair_overlap: int | None = None,
 ) -> list[dict[str, Any]]:
     candidates = [dict(lineup) for lineup in (candidate_lineups or [])]
     requested = max(0, int(target_lineups))
     if requested <= 0 or not candidates:
         return []
+    overlap_cap = 5 if max_pair_overlap is None else max(0, int(max_pair_overlap))
 
     def _uncertainty_mean(players: list[dict[str, Any]]) -> float:
         if not players:
@@ -3722,7 +4031,7 @@ def _rerank_lineup_portfolio(
             if selected:
                 overlap_penalty = max(
                     0.0,
-                    float(max(_lineup_overlap_count(lineup, prior) for prior in selected) - 5),
+                    float(max(_lineup_overlap_count(lineup, prior) for prior in selected) - overlap_cap),
                 ) * 2.4
             exposure_penalty = 0.0
             for pid in lineup_ids:
@@ -3919,6 +4228,7 @@ def generate_lineups(
     max_salary_left: int | None = None,
     lineup_strategy: str = "standard",
     include_tail_signals: bool = False,
+    spike_max_pair_overlap: int | None = None,
     cluster_target_count: int = 15,
     cluster_variants_per_cluster: int = 10,
     projection_scale: float = 1.0,
@@ -3965,6 +4275,7 @@ def generate_lineups(
 
     requested_num_lineups = int(num_lineups)
     candidate_num_lineups = _portfolio_candidate_count(requested_num_lineups, contest_type, lineup_strategy)
+    spike_overlap_cap = 6 if spike_max_pair_overlap is None else max(0, int(spike_max_pair_overlap))
 
     if progress_callback is not None:
         progress_callback(0, requested_num_lineups, "Starting lineup generation...")
@@ -4331,8 +4642,15 @@ def generate_lineups(
         "projected_ownership",
         "our_minutes_avg",
         "our_minutes_last7",
+        "our_minutes_std_last7",
         "our_minutes_last3",
         "our_minutes_recent",
+        "minutes_stability_score",
+        "minutes_stability_label",
+        "role_change_score",
+        "role_change_label",
+        "role_change_delta_minutes",
+        "role_change_reason",
         "game_tail_event_id",
         "game_tail_match_score",
         "game_p_plus_8",
@@ -4591,7 +4909,8 @@ def generate_lineups(
 
             if lineups:
                 max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)
-                selected_score -= max(0, max_overlap - 6) * 2.0
+                overlap_cap = spike_overlap_cap if spike_mode else 6
+                selected_score -= max(0, max_overlap - overlap_cap) * 2.0
 
             if selected_score > best_score:
                 best_score = selected_score
@@ -4680,6 +4999,7 @@ def generate_lineups(
         preferred_target_count=final_preferred_target,
         low_own_target_count=final_low_own_target,
         salary_left_target=salary_target,
+        max_pair_overlap=spike_overlap_cap if spike_mode else None,
     )
     if len(reranked_lineups) < requested_num_lineups:
         warnings.append(

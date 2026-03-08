@@ -62,6 +62,57 @@ def test_normalize_rotowire_upload_frame_maps_aliases_and_computes_value() -> No
     assert round(float(row["proj_value_per_1k"]), 4) == round((34.5 / 6900.0) * 1000.0, 4)
 
 
+def test_normalize_rotowire_upload_frame_preserves_ambiguous_blank_team_rows() -> None:
+    normalized = normalize_rotowire_upload_frame(
+        pd.DataFrame(
+            [
+                {
+                    "Player": "Alex Johnson",
+                    "Projection": "24.5",
+                    "Minutes": "28",
+                    "Salary": "5500",
+                },
+                {
+                    "Player": "Alex Johnson",
+                    "Projection": "31.0",
+                    "Minutes": "34",
+                    "Salary": "6100",
+                },
+            ]
+        )
+    )
+
+    assert len(normalized) == 2
+    assert normalized["team_abbr"].astype(str).tolist() == ["", ""]
+    assert set(pd.to_numeric(normalized["proj_fantasy_points"], errors="coerce").tolist()) == {24.5, 31.0}
+
+
+def test_normalize_rotowire_upload_frame_maps_value_export_and_strips_status_suffixes() -> None:
+    normalized = normalize_rotowire_upload_frame(
+        pd.DataFrame(
+            [
+                {
+                    "Player": "Gehrig NormandGTD",
+                    "team": "SANTAC",
+                    "opp": "@PAC",
+                    "min": "0",
+                    "salary": "$3200",
+                    "value": "0.96",
+                }
+            ]
+        )
+    )
+
+    assert len(normalized) == 1
+    row = normalized.iloc[0]
+    assert row["player_name"] == "Gehrig Normand"
+    assert row["team_abbr"] == "STC"
+    assert row["opp_abbr"] == "PAC"
+    assert pd.isna(row["proj_minutes"])
+    assert round(float(row["proj_value_per_1k"]), 2) == 0.96
+    assert round(float(row["proj_fantasy_points"]), 3) == round((3200.0 * 0.96) / 1000.0, 3)
+
+
 def test_merge_manual_overrides_dedupes_by_player_team_slate_key() -> None:
     existing = pd.DataFrame(
         [

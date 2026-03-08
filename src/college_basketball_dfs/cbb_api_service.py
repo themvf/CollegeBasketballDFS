@@ -1796,6 +1796,49 @@ def _lineupstarter_numeric(value: Any) -> float | None:
         return None
 
 
+_ROTOWIRE_STATUS_SUFFIXES = (
+    "gtd",
+    "dtd",
+    "out",
+    "questionable",
+    "doubtful",
+    "probable",
+    "inactive",
+    "suspended",
+)
+
+_ROTOWIRE_TEAM_ABBR_ALIASES = {
+    "SANTAC": "STC",
+    "SANFR": "SFO",
+    "OREST": "ORST",
+    "NDAKST": "NDSU",
+    "NORDAK": "UND",
+}
+
+
+def _clean_rotowire_player_name(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text:
+        return ""
+    cleaned = text
+    changed = True
+    while changed:
+        changed = False
+        for suffix in _ROTOWIRE_STATUS_SUFFIXES:
+            updated = re.sub(rf"(?:[\s\-/()]|^)*{re.escape(suffix)}$", "", cleaned, flags=re.IGNORECASE).strip()
+            if updated != cleaned:
+                cleaned = updated
+                changed = True
+    return cleaned.strip(" -/()")
+
+
+def _normalize_rotowire_team_abbr(value: Any) -> str:
+    raw = str(value or "").strip().upper().lstrip("@")
+    if not raw:
+        return ""
+    return _ROTOWIRE_TEAM_ABBR_ALIASES.get(raw, raw)
+
+
 def normalize_rotowire_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
     columns = [
         "player_name",
@@ -1841,6 +1884,8 @@ def normalize_rotowire_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
         "min": "proj_minutes",
         "projvalueper1k": "proj_value_per_1k",
         "valueper1k": "proj_value_per_1k",
+        "value": "proj_value_per_1k",
+        "val": "proj_value_per_1k",
         "avgfptslast3": "avg_fpts_last3",
         "avgfptslast5": "avg_fpts_last5",
         "avgfptslast7": "avg_fpts_last7",
@@ -1862,9 +1907,9 @@ def normalize_rotowire_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
         if col not in out.columns:
             out[col] = ""
 
-    out["player_name"] = out["player_name"].astype(str).str.strip()
-    out["team_abbr"] = out["team_abbr"].astype(str).str.strip().str.upper()
-    out["opp_abbr"] = out["opp_abbr"].astype(str).str.strip().str.upper()
+    out["player_name"] = out["player_name"].map(_clean_rotowire_player_name)
+    out["team_abbr"] = out["team_abbr"].map(_normalize_rotowire_team_abbr)
+    out["opp_abbr"] = out["opp_abbr"].map(_normalize_rotowire_team_abbr)
     for col in [
         "salary",
         "proj_fantasy_points",
@@ -1878,6 +1923,14 @@ def normalize_rotowire_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
         "supplement_priority",
     ]:
         out[col] = out[col].map(_lineupstarter_numeric)
+    out["proj_minutes"] = out["proj_minutes"].where(
+        pd.to_numeric(out["proj_minutes"], errors="coerce").fillna(0.0) > 0.0,
+        pd.NA,
+    )
+    out["proj_fantasy_points"] = out["proj_fantasy_points"].where(
+        out["proj_fantasy_points"].notna(),
+        (out["proj_value_per_1k"] * out["salary"]) / 1000.0,
+    )
 
     out = out.loc[
         (out["player_name"] != "")
@@ -1898,7 +1951,16 @@ def normalize_rotowire_upload_frame(df: pd.DataFrame | None) -> pd.DataFrame:
         ascending=[True, True, False, False, False],
         kind="stable",
     )
-    out = out.drop_duplicates(subset=["player_name", "team_abbr"], keep="first")
+    with_team = out.loc[out["team_abbr"] != ""].drop_duplicates(subset=["player_name", "team_abbr"], keep="first")
+    # Blank-team uploads are inherently ambiguous, so only collapse rows that are
+    # fully identical after normalization instead of assuming name-only uniqueness.
+    without_team = out.loc[out["team_abbr"] == ""].drop_duplicates(subset=columns, keep="first")
+    out = pd.concat([with_team, without_team], ignore_index=True, sort=False)
+    out = out.sort_values(
+        ["player_name", "team_abbr", "supplement_priority", "proj_fantasy_points", "proj_minutes"],
+        ascending=[True, True, False, False, False],
+        kind="stable",
+    )
     return out[columns].reset_index(drop=True)
 
 

@@ -30,6 +30,7 @@ from college_basketball_dfs.cbb_pipeline import run_cbb_cache_pipeline
 from college_basketball_dfs.cbb_props_pipeline import run_cbb_props_pipeline
 from college_basketball_dfs.cbb_team_lookup import rows_from_payloads
 from college_basketball_dfs.cbb_dk_optimizer import (
+    build_game_focus_summary,
     build_dk_upload_csv,
     build_player_pool,
     generate_lineups,
@@ -111,6 +112,8 @@ def _resolve_odds_api_key() -> str | None:
 
 
 ROLE_FILTER_OPTIONS = ["All", "Guard (G)", "Forward (F)"]
+MINUTES_STABILITY_FILTER_OPTIONS = ["All", "Stable", "Moderate", "Volatile"]
+ROLE_CHANGE_FILTER_OPTIONS = ["All", "Rising", "Neutral", "Falling"]
 COMMON_ODDS_BOOKMAKER_KEYS = [
     "fanduel",
     "draftkings",
@@ -1178,6 +1181,17 @@ def _filter_frame_by_role(
     if selected_role == "Forward (F)":
         return df.loc[pos.str.startswith("F")].copy()
     return df
+
+
+def _filter_frame_by_exact_label(
+    df: pd.DataFrame,
+    selected_value: str,
+    column_name: str,
+) -> pd.DataFrame:
+    if df.empty or selected_value == "All" or column_name not in df.columns:
+        return df
+    values = df[column_name].astype(str).str.strip().str.casefold()
+    return df.loc[values == str(selected_value).strip().casefold()].copy()
 
 
 def _dk_slate_blob_name(slate_date: date, slate_key: str | None = None) -> str:
@@ -3382,6 +3396,7 @@ def render_slate_supplement_tab(
     summary_key = f"cbb_slate_supplement_{slot_index}_summary"
     type_key = f"slate_supplement_{slot_index}_type"
     upload_key_prefix = f"slate_supplement_{slot_index}_upload"
+    upload_nonce_key = f"slate_supplement_{slot_index}_upload_nonce"
     save_key = f"save_slate_supplement_{slot_index}"
     delete_key = f"delete_slate_supplement_{slot_index}"
     confirm_delete_key = f"confirm_delete_slate_supplement_{slot_index}"
@@ -3409,6 +3424,7 @@ def render_slate_supplement_tab(
         st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "RotoWire"
         st.session_state[confirm_delete_key] = False
         st.session_state.pop(summary_key, None)
+        st.session_state[upload_nonce_key] = int(st.session_state.get(upload_nonce_key, 0) or 0) + 1
     elif type_key not in st.session_state:
         st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "RotoWire"
     elif str(st.session_state.get(type_key) or "").strip() == "Rotowire":
@@ -3421,8 +3437,9 @@ def render_slate_supplement_tab(
     )
     supplement_type = str(supplement_type_label or "").strip().lower()
     selected_parser_label = _supplement_type_label(supplement_type)
+    upload_nonce = int(st.session_state.get(upload_nonce_key, 0) or 0)
     upload_key = (
-        f"{upload_key_prefix}_{selected_date.isoformat()}_{_slate_key_from_label(selected_slate_key)}_{supplement_type}"
+        f"{upload_key_prefix}_{selected_date.isoformat()}_{_slate_key_from_label(selected_slate_key)}_{supplement_type}_{upload_nonce}"
     )
 
     status_cols = st.columns(4)
@@ -3453,6 +3470,10 @@ def render_slate_supplement_tab(
         help="RotoWire expects player/team/projection columns. LineupStarter expects player/salary/projected points/projected ownership columns.",
     )
     st.caption(f"Current parser: `{selected_parser_label}`")
+    if supplement_type == "rotowire":
+        st.caption("RotoWire parser keeps player/team projections and minutes. Team is preferred, but blank-team rows are preserved when they are not exact duplicates.")
+    else:
+        st.caption("LineupStarter parser must map every uploaded row to the active DK slate before save is allowed.")
 
     active_slate_df = pd.DataFrame()
     active_ready = False
@@ -3553,13 +3574,26 @@ def render_slate_supplement_tab(
     else:
         st.caption(f"Choose a CSV to preview how this slot will be parsed as `{selected_parser_label}`.")
 
+    if saved_df.empty and bool(st.session_state.get(confirm_delete_key)):
+        st.session_state[confirm_delete_key] = False
+
     save_col, delete_col = st.columns(2)
-    save_clicked = save_col.button("Save Supplement", key=save_key)
-    delete_clicked = delete_col.button("Delete Saved Supplement", key=delete_key)
+    save_clicked = save_col.button(
+        "Save Supplement",
+        key=save_key,
+        type="primary",
+        disabled=supplement_upload is None,
+    )
+    delete_clicked = delete_col.button(
+        "Delete Saved Supplement",
+        key=delete_key,
+        disabled=saved_df.empty,
+    )
     confirm_delete = st.checkbox(
         "Confirm delete for this supplement slot",
         value=False,
         key=confirm_delete_key,
+        disabled=saved_df.empty,
     )
 
     if save_clicked:
@@ -3631,6 +3665,8 @@ def render_slate_supplement_tab(
                         "blob_name": blob_name,
                         "coverage": coverage_summary,
                     }
+                    st.session_state[upload_nonce_key] = upload_nonce + 1
+                    st.session_state[confirm_delete_key] = False
                     st.success(f"Saved Slate Supplement #{slot_index} to `{blob_name}`.")
                     st.rerun()
 
@@ -3654,6 +3690,8 @@ def render_slate_supplement_tab(
             )
             load_slate_supplement_frame_for_date.clear()
             st.session_state.pop(summary_key, None)
+            st.session_state[upload_nonce_key] = upload_nonce + 1
+            st.session_state[confirm_delete_key] = False
             if deleted:
                 st.success(f"Deleted Slate Supplement #{slot_index} from `{blob_name}`.")
             else:
@@ -5200,6 +5238,55 @@ with tab_slate_vegas:
                 if pool_df.empty:
                     st.warning("Player pool is empty after injury filtering.")
                 else:
+                    game_focus_df = build_game_focus_summary(pool_df)
+                    if not game_focus_df.empty:
+                        game_tail_to_own_df = pool_df[["game_key", "game_tail_to_ownership"]].copy()
+                        game_tail_to_own_df["game_tail_to_ownership"] = pd.to_numeric(
+                            game_tail_to_own_df["game_tail_to_ownership"],
+                            errors="coerce",
+                        )
+                        game_tail_to_own_df = (
+                            game_tail_to_own_df.groupby("game_key", as_index=False)["game_tail_to_ownership"]
+                            .mean()
+                            .rename(columns={"game_tail_to_ownership": "game_tail_to_ownership_mean"})
+                        )
+                        game_focus_view = game_focus_df.merge(game_tail_to_own_df, on="game_key", how="left")
+                        game_focus_view["stack_outlook"] = pd.to_numeric(
+                            game_focus_view.get("game_stack_focus_score"),
+                            errors="coerce",
+                        ).map(
+                            lambda x: "Target"
+                            if _safe_float_value(x, 0.0) >= 75.0
+                            else ("Mix-in" if _safe_float_value(x, 0.0) >= 55.0 else "Caution")
+                        )
+                        game_focus_cols = [
+                            "game_key",
+                            "stack_outlook",
+                            "game_stack_focus_score",
+                            "recommended_stack_size",
+                            "game_total_line",
+                            "game_spread_abs",
+                            "projected_points_sum",
+                            "projected_ownership_mean",
+                            "game_tail_score_mean",
+                            "game_tail_to_ownership_mean",
+                            "cheap_value_rate",
+                        ]
+                        st.subheader("Game Stack / Leverage View")
+                        st.caption(
+                            "Higher `game_stack_focus_score` and `game_tail_to_ownership` usually matter more for GPP stacks "
+                            "than raw game total alone."
+                        )
+                        st.dataframe(
+                            game_focus_view[game_focus_cols].sort_values(
+                                ["game_stack_focus_score", "game_tail_score_mean"],
+                                ascending=False,
+                                kind="stable",
+                            ),
+                            hide_index=True,
+                            use_container_width=True,
+                        )
+
                     show_cols = [
                         "ID",
                         "Name + ID",
@@ -5211,7 +5298,17 @@ with tab_slate_vegas:
                         "blended_projection",
                         "our_minutes_avg",
                         "our_minutes_last7",
+                        "our_minutes_std_last7",
                         "our_minutes_recent",
+                        "minutes_stability_label",
+                        "minutes_stability_score",
+                        "role_change_label",
+                        "role_change_delta_minutes",
+                        "role_change_reason",
+                        "minutes_drop_ratio",
+                        "projection_uncertainty_score",
+                        "dnp_risk_score",
+                        "high_uncertainty_flag",
                         "our_points_recent",
                         "our_usage_proxy",
                         "our_points_proj",
@@ -5256,6 +5353,8 @@ with tab_slate_vegas:
                         "game_avg_projected_ownership",
                         "game_tail_to_ownership",
                         "game_tail_score",
+                        "game_stack_focus_score",
+                        "recommended_stack_size",
                         "vegas_over_our_flag",
                         "low_own_ceiling_flag",
                         "vegas_vs_our_delta_pct",
@@ -5281,7 +5380,13 @@ with tab_slate_vegas:
                         "blended_projection",
                         "our_minutes_avg",
                         "our_minutes_last7",
+                        "our_minutes_std_last7",
                         "our_minutes_recent",
+                        "minutes_stability_score",
+                        "role_change_delta_minutes",
+                        "minutes_drop_ratio",
+                        "projection_uncertainty_score",
+                        "dnp_risk_score",
                         "our_points_recent",
                         "our_usage_proxy",
                         "our_points_proj",
@@ -5325,6 +5430,8 @@ with tab_slate_vegas:
                         "game_avg_projected_ownership",
                         "game_tail_to_ownership",
                         "game_tail_score",
+                        "game_stack_focus_score",
+                        "recommended_stack_size",
                         "vegas_vs_our_delta_pct",
                         "blend_points_proj",
                         "blend_rebounds_proj",
@@ -5341,17 +5448,46 @@ with tab_slate_vegas:
                     for col in numeric_cols:
                         if col in display_pool.columns:
                             display_pool[col] = pd.to_numeric(display_pool[col], errors="coerce")
-                    slate_role_filter = st.selectbox(
+                    filter_c1, filter_c2, filter_c3 = st.columns(3)
+                    slate_role_filter = filter_c1.selectbox(
                         "Role Filter",
                         options=ROLE_FILTER_OPTIONS,
                         index=0,
                         key="slate_vegas_role_filter",
                         help="Filter the table by DraftKings role.",
                     )
+                    minutes_stability_filter = filter_c2.selectbox(
+                        "Minutes Stability",
+                        options=MINUTES_STABILITY_FILTER_OPTIONS,
+                        index=0,
+                        key="slate_vegas_minutes_stability_filter",
+                        help="Filter for players with stable, moderate, or volatile minute windows.",
+                    )
+                    role_change_filter = filter_c3.selectbox(
+                        "Role Change",
+                        options=ROLE_CHANGE_FILTER_OPTIONS,
+                        index=0,
+                        key="slate_vegas_role_change_filter",
+                        help="Filter for rising, neutral, or falling role signals.",
+                    )
                     display_pool_view = _filter_frame_by_role(
                         display_pool,
                         selected_role=slate_role_filter,
                         position_col="Position",
+                    )
+                    display_pool_view = _filter_frame_by_exact_label(
+                        display_pool_view,
+                        selected_value=minutes_stability_filter,
+                        column_name="minutes_stability_label",
+                    )
+                    display_pool_view = _filter_frame_by_exact_label(
+                        display_pool_view,
+                        selected_value=role_change_filter,
+                        column_name="role_change_label",
+                    )
+                    st.caption(
+                        "Leverage usually lives where `game_tail_score`, `game_tail_to_ownership`, and `vegas_vs_our_delta_pct` "
+                        "stay strong without matching ownership inflation."
                     )
                     st.caption(f"Showing `{len(display_pool_view)}` of `{len(display_pool)}` players.")
                     st.dataframe(display_pool_view, hide_index=True, use_container_width=True)
