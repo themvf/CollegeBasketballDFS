@@ -492,6 +492,31 @@ def test_build_player_pool_blends_lineupstarter_projection_and_ownership_prior()
     assert abs(float(ls_g1["projected_ownership"]) - float(ls_g1["projected_ownership_pre_lineupstarter"])) > 0.01
 
 
+def test_build_player_pool_supplement_signals_raise_explicit_ceiling_projection() -> None:
+    base_pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        bookmaker_filter="fanduel",
+    )
+    supplement_pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        rotowire_df=_sample_rotowire_players(),
+        lineupstarter_df=_sample_lineupstarter_players(),
+        bookmaker_filter="fanduel",
+    )
+
+    base_g1 = base_pool.loc[base_pool["Name"] == "Guard 1"].iloc[0]
+    supplement_g1 = supplement_pool.loc[supplement_pool["Name"] == "Guard 1"].iloc[0]
+
+    assert float(supplement_g1["ceiling_projection"]) > float(supplement_g1["projected_dk_points"])
+    assert float(supplement_g1["ceiling_projection_delta"]) > float(base_g1["ceiling_projection_delta"])
+    assert float(supplement_g1["ceiling_signal_score"]) > 0.0
+    assert float(supplement_g1["ceiling_bonus_projection_points"]) > 0.0
+
+
 def test_build_player_pool_lineupstarter_supplement_priority_overrides_base_projection() -> None:
     lineupstarter_rows = pd.concat(
         [
@@ -1360,6 +1385,38 @@ def test_apply_model_profile_adjustments_salary_efficiency_ceiling_boosts_ceilin
     assert float(adjusted.loc[0, "objective_score"]) > float(scored.loc[0, "objective_score"])
 
 
+def test_apply_contest_objective_large_gpp_prefers_higher_explicit_ceiling_signal() -> None:
+    pool = pd.DataFrame(
+        [
+            {
+                "ID": "1",
+                "Name": "Player A",
+                "projected_dk_points": 30.0,
+                "projected_ownership": 15.0,
+                "ceiling_projection": 40.0,
+                "ceiling_signal_score": 0.82,
+                "game_tail_score": 0.0,
+                "game_tail_to_ownership_pct": 0.0,
+            },
+            {
+                "ID": "2",
+                "Name": "Player B",
+                "projected_dk_points": 30.0,
+                "projected_ownership": 15.0,
+                "ceiling_projection": 34.0,
+                "ceiling_signal_score": 0.18,
+                "game_tail_score": 0.0,
+                "game_tail_to_ownership_pct": 0.0,
+            },
+        ]
+    )
+
+    scored = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
+
+    assert float(scored.loc[0, "objective_score"]) > float(scored.loc[1, "objective_score"])
+    assert float(scored.loc[0, "ceiling_to_ownership_score"]) >= float(scored.loc[1, "ceiling_to_ownership_score"])
+
+
 def test_generate_lineups_records_model_profile_in_payload() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     lineups, warnings = generate_lineups(
@@ -1374,6 +1431,31 @@ def test_generate_lineups_records_model_profile_in_payload() -> None:
     assert len(lineups) == 6
     assert all(str(lineup.get("model_profile")) == "standout_capture_v1" for lineup in lineups)
     assert all(float(lineup.get("ceiling_projection") or 0.0) > float(lineup.get("projected_points") or 0.0) for lineup in lineups)
+
+
+def test_generate_lineups_payload_uses_sum_of_player_ceiling_projection() -> None:
+    pool = build_player_pool(
+        _sample_slate(),
+        _sample_props(),
+        season_stats_df=_sample_season_stats(),
+        rotowire_df=_sample_rotowire_players(),
+        lineupstarter_df=_sample_lineupstarter_players(),
+        bookmaker_filter="fanduel",
+    )
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=4,
+        contest_type="Large GPP",
+        include_tail_signals=True,
+        random_seed=13,
+    )
+
+    assert warnings == []
+    assert len(lineups) == 4
+    first = lineups[0]
+    expected_ceiling = sum(float(player.get("ceiling_projection") or 0.0) for player in first["players"])
+    assert all("ceiling_projection" in player for player in first["players"])
+    assert abs(float(first["ceiling_projection"]) - round(expected_ceiling, 2)) < 0.01
 
 
 def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:
