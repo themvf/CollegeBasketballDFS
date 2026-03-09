@@ -69,6 +69,7 @@ from college_basketball_dfs.cbb_ai_review import (
     MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT,
     build_ai_review_user_prompt,
     build_daily_ai_review_packet,
+    build_tournament_postmortem_glossary,
     build_game_slate_ai_review_packet,
     build_game_slate_ai_review_user_prompt,
     build_global_ai_review_packet,
@@ -76,6 +77,7 @@ from college_basketball_dfs.cbb_ai_review import (
     build_market_correlation_ai_review_packet,
     build_market_correlation_ai_review_user_prompt,
     request_openai_review,
+    resolve_postmortem_contest_id,
 )
 from college_basketball_dfs.cbb_vegas_review import build_vegas_review_games_frame
 from college_basketball_dfs.cbb_api_service import (
@@ -8650,9 +8652,19 @@ with tab_tournament_review:
                         ),
                     )
                 ) / 100.0
+                resolved_postmortem_contest = resolve_postmortem_contest_id(
+                    tr_contest_id,
+                    upload_filename=(tr_upload.name if tr_upload is not None else None),
+                )
+                resolved_postmortem_contest_id = str(
+                    resolved_postmortem_contest.get("contest_id") or str(tr_contest_id or "").strip() or "contest"
+                )
+                postmortem_glossary = build_tournament_postmortem_glossary(
+                    missed_stack_underexposure_ratio=missed_stack_underexposure_ratio,
+                )
                 post_packet = build_daily_ai_review_packet(
                     review_date=tr_date.isoformat(),
-                    contest_id=tr_contest_id,
+                    contest_id=resolved_postmortem_contest_id,
                     projection_comparison_df=pm_proj_compare_df,
                     entries_df=pm_entries_df,
                     exposure_df=pm_exposure_df,
@@ -9007,6 +9019,31 @@ with tab_tournament_review:
                                 ascending=[False, False, False],
                             ).head(post_focus_limit)
 
+                post_packet_focus_tables = post_packet.get("focus_tables") or {}
+                ownership_tracker_top_rows = list(post_packet_focus_tables.get("ownership_miss_tracker_top") or [])
+                ownership_tracker_missing_game_context = int(
+                    sum(1 for row in ownership_tracker_top_rows if not str((row or {}).get("game_key") or "").strip())
+                )
+                packet_warnings: list[str] = []
+                if bool(resolved_postmortem_contest.get("contest_id_placeholder")):
+                    packet_warnings.append(
+                        "Contest ID is unresolved. The packet fell back to a placeholder because no reliable contest ID was supplied."
+                    )
+                if _safe_int_value(projection_quality.get("vegas_matched_rows"), default=0) <= 0:
+                    packet_warnings.append(
+                        "Vegas benchmark rows are unavailable for this review; do not rely on market-vs-model conclusions."
+                    )
+                if missed_game_stack_df.empty:
+                    packet_warnings.append(
+                        "No rows qualified for `likely_missed_game_stacks` at the current under-exposure threshold. "
+                        "Discuss only summary stack-rate imbalances, not exact missed stack combinations."
+                    )
+                if ownership_tracker_missing_game_context > 0:
+                    packet_warnings.append(
+                        f"`ownership_miss_tracker_top` is missing game context on {ownership_tracker_missing_game_context} row(s). "
+                        "Avoid game-environment claims for those players."
+                    )
+
                 rw1, rw2, rw3, rw4, rw5 = st.columns(5)
                 rw1.metric("Field Entries", _safe_int_value(field_quality.get("field_entries"), default=0))
                 rw2.metric("Projection Blend MAE", f"{_safe_float_value(projection_quality.get('blend_mae'), default=0.0):.2f}")
@@ -9337,23 +9374,38 @@ with tab_tournament_review:
                         }
                     )
                 improvement_df = pd.DataFrame(improvement_rows).sort_values("priority")
+                if not improvement_df.empty:
+                    improvement_df = improvement_df.reset_index(drop=True)
+                    improvement_df["priority"] = improvement_df.index + 1
                 st.subheader("What To Improve Next Slate")
                 st.dataframe(improvement_df, hide_index=True, use_container_width=True)
+                with st.expander("Postmortem Glossary", expanded=False):
+                    st.caption(
+                        "Definitions used by the postmortem packet and agent. "
+                        "This is also embedded in the downloadable JSON."
+                    )
+                    st.json(postmortem_glossary)
 
                 postmortem_payload = {
                     "schema_version": "tournament_postmortem_v1",
                     "review_context": {
                         "review_date": tr_date.isoformat(),
-                        "contest_id": str(tr_contest_id or "").strip(),
+                        "contest_id": resolved_postmortem_contest_id,
+                        "contest_id_source": str(resolved_postmortem_contest.get("contest_id_source") or ""),
+                        "contest_id_placeholder": bool(resolved_postmortem_contest.get("contest_id_placeholder")),
+                        "provided_contest_id": resolved_postmortem_contest.get("provided_contest_id"),
+                        "filename_contest_id": resolved_postmortem_contest.get("filename_contest_id"),
                     },
+                    "glossary": postmortem_glossary,
                     "data_quality": {
                         "mapped_player_coverage_pct": round(100.0 * float(mapping_coverage), 2),
                         "projected_ownership_rows": int(projected_own_rows),
                         "actual_ownership_rows": int(actual_own_rows),
                         "missed_stack_underexposure_ratio": float(missed_stack_underexposure_ratio),
+                        "warnings": packet_warnings,
                     },
                     "scorecards": scorecards,
-                    "focus_tables": post_packet.get("focus_tables") or {},
+                    "focus_tables": post_packet_focus_tables,
                     "top10_user_summary": top10_user_df.to_dict(orient="records") if not top10_user_df.empty else [],
                     "missed_player_standouts": missed_player_df.to_dict(orient="records") if not missed_player_df.empty else [],
                     "low_own_standouts": low_own_standout_df.to_dict(orient="records") if not low_own_standout_df.empty else [],
@@ -9407,6 +9459,12 @@ with tab_tournament_review:
                     "Constraints:\n"
                     "- Use only evidence in the JSON packet.\n"
                     "- Cite exact metric names/values.\n"
+                    "- Read `glossary` first and follow those definitions exactly.\n"
+                    "- Treat `field_ownership_pct` as the canonical actual ownership for packet-level ownership error claims.\n"
+                    "- Treat `actual_ownership_from_file` as supporting reference only unless a table explicitly states otherwise.\n"
+                    "- `winner_gap` is defined as `winner_points - best_actual_points`; negative means phantoms beat the winner.\n"
+                    "- `stack_underexposure_gap` is defined as `field_stack_rate - phantom_stack_rate`; positive means phantoms were underexposed, negative means phantoms were overweight.\n"
+                    "- If `likely_missed_game_stacks` is empty, do not claim exact missed stack combinations.\n"
                     "- Reference `data_quality` when signals are missing or unreliable.\n"
                     "- If evidence is insufficient, state what is missing.\n\n"
                     "JSON packet:\n"

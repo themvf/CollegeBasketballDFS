@@ -12,7 +12,9 @@ from college_basketball_dfs.cbb_ai_review import (
     build_global_ai_review_user_prompt,
     build_market_correlation_ai_review_packet,
     build_market_correlation_ai_review_user_prompt,
+    build_tournament_postmortem_glossary,
     request_openai_review,
+    resolve_postmortem_contest_id,
 )
 
 
@@ -527,6 +529,24 @@ def test_build_ai_review_user_prompt_contains_json_packet() -> None:
     assert "Required output format" in prompt
     assert '"schema_version": "v1"' in prompt
     assert '"review_date": "2026-02-18"' in prompt
+
+
+def test_resolve_postmortem_contest_id_prefers_upload_filename_when_input_placeholder() -> None:
+    resolved = resolve_postmortem_contest_id(
+        "contest",
+        upload_filename="contest-standings-188603023.csv",
+    )
+    assert resolved["contest_id"] == "188603023"
+    assert resolved["contest_id_source"] == "upload_filename"
+    assert bool(resolved["contest_id_placeholder"]) is False
+
+
+def test_build_tournament_postmortem_glossary_defines_key_semantics() -> None:
+    glossary = build_tournament_postmortem_glossary(missed_stack_underexposure_ratio=0.6)
+    assert "Canonical actual ownership" in glossary["ownership"]["field_ownership_pct"]
+    assert "`field_ownership_pct - projected_ownership`" in glossary["ownership"]["ownership_diff_vs_proj"]
+    assert "winner_points - best_actual_points" in glossary["phantom"]["winner_gap"]
+    assert "60%" in glossary["stacks"]["missed_stack_underexposure_ratio"]
 
 
 def test_request_openai_review_uses_output_text(monkeypatch) -> None:

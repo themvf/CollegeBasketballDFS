@@ -48,6 +48,7 @@ OPENAI_REVIEW_MODEL_FALLBACKS = (
 )
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v"}
 OWNERSHIP_MISS_TRACKER_THRESHOLD = 8.0
+POSTMORTEM_CONTEST_ID_PLACEHOLDERS = {"", "contest", "unknown", "n/a", "na", "none", "null"}
 
 
 class OpenAIReviewError(RuntimeError):
@@ -117,6 +118,99 @@ def _game_environment_bucket(total_line: Any, abs_spread: Any) -> str:
     if total_v < 140.0:
         return "low_total"
     return "neutral"
+
+
+def resolve_postmortem_contest_id(
+    contest_id: Any,
+    *,
+    upload_filename: str | None = None,
+) -> dict[str, Any]:
+    provided = str(contest_id or "").strip()
+    provided_key = provided.lower()
+    upload_name = str(upload_filename or "").strip()
+
+    filename_match = re.search(
+        r"contest-standings-(?P<contest_id>[A-Za-z0-9_-]+)\.(csv|zip)$",
+        upload_name,
+        flags=re.IGNORECASE,
+    )
+    filename_contest_id = str(filename_match.group("contest_id") or "").strip() if filename_match else ""
+
+    if provided and provided_key not in POSTMORTEM_CONTEST_ID_PLACEHOLDERS:
+        return {
+            "contest_id": provided,
+            "contest_id_source": "user_input",
+            "contest_id_placeholder": False,
+            "provided_contest_id": provided,
+            "filename_contest_id": filename_contest_id or None,
+        }
+
+    if filename_contest_id:
+        return {
+            "contest_id": filename_contest_id,
+            "contest_id_source": "upload_filename",
+            "contest_id_placeholder": False,
+            "provided_contest_id": provided or None,
+            "filename_contest_id": filename_contest_id,
+        }
+
+    fallback = provided or "contest"
+    return {
+        "contest_id": fallback,
+        "contest_id_source": "placeholder",
+        "contest_id_placeholder": True,
+        "provided_contest_id": provided or None,
+        "filename_contest_id": None,
+    }
+
+
+def build_tournament_postmortem_glossary(
+    *,
+    missed_stack_underexposure_ratio: float,
+) -> dict[str, Any]:
+    ratio_value = max(0.0, float(missed_stack_underexposure_ratio))
+    ratio_pct = 100.0 * ratio_value
+    return {
+        "review_context": {
+            "contest_id": "Contest identifier for the reviewed tournament. If `contest_id_placeholder` is true, this metadata is unresolved.",
+            "contest_id_source": "Where `contest_id` came from: `user_input`, `upload_filename`, or `placeholder`.",
+            "contest_id_placeholder": "True when no reliable contest id was available and the packet fell back to a placeholder.",
+        },
+        "ownership": {
+            "field_ownership_pct": (
+                "Canonical actual ownership for packet-level analysis. Computed from parsed field lineups in the contest standings."
+            ),
+            "actual_ownership_from_file": (
+                "Supporting ownership value pulled from raw `%Drafted` rows in the standings export when present. "
+                "Use as reference, not as the canonical ownership error target."
+            ),
+            "projected_ownership": "Our projected player ownership for the slate snapshot used in the review.",
+            "ownership_diff_vs_proj": "Defined as `field_ownership_pct - projected_ownership`. Positive means we underprojected ownership; negative means we overprojected ownership.",
+        },
+        "phantom": {
+            "avg_actual_minus_projected": "Defined as `actual_points - projected_points`. Negative means the lineup/version underperformed projection; positive means it outperformed projection.",
+            "avg_would_beat_pct": "Average percentage of field entries a phantom lineup or lineup bucket would have beaten.",
+            "winner_gap": "Defined as `winner_points - best_actual_points`. Negative means the best phantom lineup beat the winning score; positive means it fell short.",
+            "pct_of_winner": "Defined as `100 * best_actual_points / winner_points`. Values above 100 mean a phantom lineup beat the winning score.",
+        },
+        "stacks": {
+            "field_stack_rate": "Share of field lineups containing the game stack at the configured stack-size threshold.",
+            "phantom_stack_rate": "Share of phantom lineups containing the same game stack.",
+            "phantom_to_field_stack_rate": "Ratio `phantom_stack_rate / field_stack_rate`. Above 1 means phantoms were overweight relative to the field.",
+            "stack_underexposure_gap": "Defined as `field_stack_rate - phantom_stack_rate`. Positive means phantoms were underexposed relative to the field; negative means phantoms were overweight.",
+            "missed_stack_underexposure_ratio": (
+                f"Threshold used for `likely_missed_game_stacks`. A game is flagged when `phantom_stack_rate` is below {ratio_pct:.0f}% of `field_stack_rate`."
+            ),
+            "likely_missed_game_stacks": (
+                "Canonical list of missed field stack signals. If empty, do not claim exact missed stacks; only discuss relative stack-rate imbalances from summary tables."
+            ),
+        },
+        "data_quality": {
+            "projected_ownership_rows": "Count of players with projected ownership available in the reviewed exposure table.",
+            "actual_ownership_rows": "Count of players with actual ownership signals available in the reviewed exposure table.",
+            "mapped_player_coverage_pct": "Share of parsed standings player rows that mapped successfully to slate/player results data.",
+        },
+    }
 
 
 def _to_num_series(df: pd.DataFrame, col: str) -> pd.Series:
