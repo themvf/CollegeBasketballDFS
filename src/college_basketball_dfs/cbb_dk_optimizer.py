@@ -1048,6 +1048,11 @@ def _refresh_ceiling_projection(pool_df: pd.DataFrame) -> pd.DataFrame:
     out = pool_df.copy()
     if out.empty:
         for col in [
+            "projection_stdev_points",
+            "projection_stdev_multiplier",
+            "ceiling_distribution_points",
+            "ceiling_distribution_multiplier",
+            "gpp_ceiling_score",
             "ceiling_projection",
             "ceiling_projection_delta",
             "ceiling_projection_multiplier",
@@ -1086,6 +1091,7 @@ def _refresh_ceiling_projection(pool_df: pd.DataFrame) -> pd.DataFrame:
     recent_minutes = recent_minutes.where(recent_minutes.notna(), _pool_numeric_series(out, "our_minutes_last7", default=None))
     recent_minutes = recent_minutes.where(recent_minutes.notna(), _pool_numeric_series(out, "our_minutes_avg", default=None))
     recent_minutes = recent_minutes.where(recent_minutes.notna(), consensus_minutes)
+    recent_minutes_std = _pool_numeric_series(out, "our_minutes_std_last7", default=0.0).clip(lower=0.0)
     rotowire_minutes = _pool_numeric_series(out, "rotowire_minutes_raw", default=None)
     positive_minutes_delta = (rotowire_minutes - recent_minutes).clip(lower=0.0).fillna(0.0)
 
@@ -1103,14 +1109,20 @@ def _refresh_ceiling_projection(pool_df: pd.DataFrame) -> pd.DataFrame:
     rotowire_delta_norm = (rotowire_projection_delta / 8.0).clip(lower=0.0, upper=1.0)
     lineupstarter_delta_norm = (lineupstarter_projection_delta / 8.0).clip(lower=0.0, upper=1.0)
     minutes_delta_norm = (positive_minutes_delta / 6.0).clip(lower=0.0, upper=1.0)
+    minutes_std_ratio = pd.to_numeric(
+        recent_minutes_std / recent_minutes.replace(0.0, pd.NA),
+        errors="coerce",
+    ).fillna(0.0).clip(lower=0.0, upper=0.35)
+    minutes_std_norm = (minutes_std_ratio / 0.25).clip(lower=0.0, upper=1.0)
     ceiling_signal = (
-        (0.24 * tail_norm)
-        + (0.18 * rotowire_signal)
-        + (0.14 * value_signal)
+        (0.21 * tail_norm)
+        + (0.15 * rotowire_signal)
+        + (0.12 * value_signal)
         + (0.10 * volatility_pct)
         + (0.14 * rotowire_delta_norm)
         + (0.12 * lineupstarter_delta_norm)
         + (0.08 * minutes_delta_norm)
+        + (0.08 * minutes_std_norm)
     ).clip(lower=0.0, upper=1.0)
 
     projection_bonus_points = ((0.55 * rotowire_projection_delta) + (0.45 * lineupstarter_projection_delta)).clip(lower=0.0)
@@ -1120,6 +1132,30 @@ def _refresh_ceiling_projection(pool_df: pd.DataFrame) -> pd.DataFrame:
         / base_projection.replace(0.0, pd.NA)
     ).fillna(0.0).clip(lower=0.0, upper=0.35)
     risk_penalty = ((0.55 * dnp_risk) + (0.45 * uncertainty)).clip(lower=0.0, upper=1.0)
+    stdev_multiplier = (
+        0.12
+        + (0.06 * tail_norm)
+        + (0.05 * volatility_pct)
+        + (0.05 * minutes_std_norm)
+        + (0.03 * uncertainty)
+        + (0.02 * minutes_boost_norm)
+    ).clip(lower=0.10, upper=0.28)
+    projection_stdev_points = (base_projection * stdev_multiplier).clip(lower=1.5)
+    stdev_cap = ((base_projection * 0.42).clip(lower=4.0)).where(base_projection > 0.0, 0.0)
+    projection_stdev_points = pd.concat([projection_stdev_points, stdev_cap], axis=1).min(axis=1)
+    ceiling_distribution_multiplier = (
+        1.14
+        + (0.18 * tail_norm)
+        + (0.12 * volatility_pct)
+        + (0.10 * rotowire_signal)
+        + (0.08 * value_signal)
+        + (0.08 * minutes_delta_norm)
+        + (0.06 * minutes_std_norm)
+        + (0.05 * lineupstarter_delta_norm)
+        - (0.08 * risk_penalty)
+    ).clip(lower=1.08, upper=1.48)
+    ceiling_distribution_points = (projection_stdev_points * ceiling_distribution_multiplier).clip(lower=0.0)
+    gpp_ceiling_score = base_projection + ceiling_distribution_points
 
     multiplier = (
         1.12
@@ -1137,12 +1173,17 @@ def _refresh_ceiling_projection(pool_df: pd.DataFrame) -> pd.DataFrame:
 
     baseline_ceiling = base_projection * multiplier
     additive_ceiling = base_projection + projection_bonus_points + minutes_bonus_points
-    ceiling_projection = pd.concat([baseline_ceiling, additive_ceiling], axis=1).max(axis=1)
+    ceiling_projection = pd.concat([baseline_ceiling, additive_ceiling, gpp_ceiling_score], axis=1).max(axis=1)
     ceiling_projection = pd.concat([ceiling_projection, base_projection], axis=1).max(axis=1)
     ceiling_cap = (base_projection * 1.46).where(base_projection > 0.0, 0.0)
     ceiling_projection = pd.concat([ceiling_projection, ceiling_cap], axis=1).min(axis=1)
     ceiling_projection = ceiling_projection.where(base_projection > 0.0, 0.0)
 
+    out["projection_stdev_points"] = projection_stdev_points.round(4)
+    out["projection_stdev_multiplier"] = stdev_multiplier.round(4)
+    out["ceiling_distribution_points"] = ceiling_distribution_points.round(4)
+    out["ceiling_distribution_multiplier"] = ceiling_distribution_multiplier.round(4)
+    out["gpp_ceiling_score"] = gpp_ceiling_score.round(4)
     out["ceiling_projection"] = ceiling_projection.round(4)
     out["ceiling_projection_delta"] = (ceiling_projection - base_projection).clip(lower=0.0).round(4)
     out["ceiling_projection_multiplier"] = (
@@ -2635,6 +2676,9 @@ def build_player_pool(
     out["ownership_leverage_shrink"] = pd.to_numeric(leverage_shrink, errors="coerce").fillna(0.0).round(4)
     out["rotowire_chalk_floor_flag"] = rotowire_chalk_floor_flag.astype(bool)
     out["rotowire_chalk_floor_target"] = rotowire_chalk_floor.where(rotowire_chalk_floor_flag, 0.0).round(3)
+    out = _refresh_ceiling_projection(out)
+    out = apply_midrange_chalk_floor(out)
+    out["ownership_consensus"] = pd.to_numeric(out.get("projected_ownership"), errors="coerce").round(2)
 
     for col in ["game_p_plus_8", "game_p_plus_12", "game_volatility_score", "game_tail_residual_mu", "game_tail_sigma", "game_tail_match_score"]:
         if col not in out.columns:
@@ -2679,14 +2723,14 @@ def build_player_pool(
     out = _refresh_ceiling_projection(out)
     out = _append_role_change_signals(out)
 
+    low_own_ceiling_delta = (
+        pd.to_numeric(out.get("ceiling_projection"), errors="coerce").fillna(0.0)
+        - pd.to_numeric(out.get("projected_dk_points"), errors="coerce").fillna(0.0)
+    ).clip(lower=0.0)
     out["low_own_ceiling_flag"] = (
         (
             (pd.to_numeric(out["projected_ownership"], errors="coerce") < 10.0)
-            & (pd.to_numeric(out.get("ceiling_projection"), errors="coerce") >= 24.0)
-            & (
-                (pd.to_numeric(out.get("ceiling_signal_score"), errors="coerce").fillna(0.0) >= 0.45)
-                | (pd.to_numeric(out.get("game_tail_score"), errors="coerce").fillna(0.0) >= 55.0)
-            )
+            & (low_own_ceiling_delta >= 10.0)
         )
         .map(lambda x: "🔥" if bool(x) else "")
         .astype(str)
@@ -2787,20 +2831,38 @@ def apply_contest_objective(
     ceiling = pd.to_numeric(out.get("ceiling_projection"), errors="coerce")
     ceiling = ceiling.where(ceiling.notna(), base * 1.18)
     ceiling_delta = (ceiling - base).clip(lower=0.0)
+    projection_stdev = _pool_numeric_series(out, "projection_stdev_points", default=None)
+    projection_stdev = projection_stdev.where(projection_stdev.notna(), ceiling_delta * 0.55).fillna(0.0)
+    variance_pct = _rank_pct_series(projection_stdev)
     ceiling_signal = pd.to_numeric(out.get("ceiling_signal_score"), errors="coerce").fillna(0.0).clip(lower=0.0, upper=1.0)
     ceiling_to_own = _rank_pct_series(ceiling / (own + 6.0))
     out["ceiling_to_ownership_score"] = ceiling_to_own.round(4)
     tail_score = pd.to_numeric(out.get("game_tail_score"), errors="coerce").fillna(0.0) / 100.0
     tail_to_own = pd.to_numeric(out.get("game_tail_to_ownership_pct"), errors="coerce").fillna(0.0)
+    out["gpp_variance_score"] = variance_pct.round(4)
 
     if ct == "cash":
         out["objective_score"] = base
     elif ct == "small gpp":
-        out["objective_score"] = base + (0.25 * leverage) + (0.06 * ceiling_delta) + (1.4 * ceiling_signal)
+        out["objective_score"] = (
+            base
+            + (0.25 * leverage)
+            + (0.06 * ceiling_delta)
+            + (0.03 * projection_stdev)
+            + (0.8 * variance_pct)
+            + (1.4 * ceiling_signal)
+        )
         if include_tail_signals:
             out["objective_score"] = out["objective_score"] + (3.0 * tail_score) + (1.6 * tail_to_own) + (0.8 * ceiling_to_own)
     else:  # large gpp default
-        out["objective_score"] = base + (0.45 * leverage) + (0.12 * ceiling_delta) + (2.3 * ceiling_signal)
+        out["objective_score"] = (
+            base
+            + (0.45 * leverage)
+            + (0.12 * ceiling_delta)
+            + (0.08 * projection_stdev)
+            + (1.35 * variance_pct)
+            + (2.3 * ceiling_signal)
+        )
         if include_tail_signals:
             out["objective_score"] = out["objective_score"] + (5.0 * tail_score) + (2.3 * tail_to_own) + (1.4 * ceiling_to_own)
     return out
@@ -3154,6 +3216,85 @@ def apply_ownership_surprise_guardrails(
     return _recompute_leverage_score(out)
 
 
+def apply_midrange_chalk_floor(
+    pool_df: pd.DataFrame,
+    projection_rank_cutoff: int = 10,
+    salary_min: float = 5000.0,
+    salary_max: float = 7000.0,
+    ownership_floor: float = 18.0,
+    ownership_cap: float = 28.0,
+    min_projection: float = 16.0,
+) -> pd.DataFrame:
+    out = pool_df.copy()
+    if out.empty:
+        return out
+
+    projected_ownership = _pool_numeric_series(out, "projected_ownership", default=0.0).clip(lower=0.0, upper=100.0)
+    projection = _pool_numeric_series(out, "projected_dk_points", default=0.0)
+    salary = _pool_numeric_series(out, "Salary", default=None)
+    historical_baseline = _pool_numeric_series(out, "historical_ownership_baseline", default=0.0).clip(lower=0.0, upper=100.0)
+    external_prior = pd.to_numeric(_ownership_external_prior_series(out), errors="coerce").fillna(0.0).clip(lower=0.0, upper=100.0)
+    minutes_boost = _pool_numeric_series(out, "minutes_shock_boost_pct", default=0.0).clip(lower=0.0)
+    surge = _pool_numeric_series(out, "ownership_chalk_surge_score", default=0.0).clip(lower=0.0, upper=100.0)
+    ceiling_delta = (
+        _pool_numeric_series(out, "ceiling_projection", default=None).fillna(projection.fillna(0.0))
+        - projection.fillna(0.0)
+    ).clip(lower=0.0)
+
+    projection_rank = projection.rank(method="min", ascending=False, na_option="bottom")
+    cutoff = max(1, int(projection_rank_cutoff))
+    floor_min = max(0.0, float(ownership_floor))
+    floor_max = max(floor_min, float(ownership_cap))
+    projection_floor = max(0.0, float(min_projection))
+    candidate_mask = (
+        projection_rank.le(cutoff)
+        & salary.between(float(salary_min), float(salary_max), inclusive="both")
+        & projection.fillna(0.0).ge(projection_floor)
+    )
+
+    if float(minutes_boost.max()) > 0.0:
+        minutes_norm = (minutes_boost / float(minutes_boost.max())).clip(lower=0.0, upper=1.0)
+    else:
+        minutes_norm = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    surge_norm = (surge / 100.0).clip(lower=0.0, upper=1.0)
+    ceiling_norm = _rank_pct_series(ceiling_delta)
+    prior_floor = pd.concat(
+        [
+            pd.Series([floor_min] * len(out), index=out.index, dtype="float64"),
+            (0.88 * historical_baseline).clip(lower=0.0, upper=floor_max),
+            (0.72 * external_prior).clip(lower=0.0, upper=floor_max),
+        ],
+        axis=1,
+    ).max(axis=1)
+    support_score = (
+        (0.34 * surge_norm)
+        + (0.26 * minutes_norm)
+        + (0.22 * ceiling_norm)
+        + (0.18 * _rank_pct_series(external_prior))
+    ).clip(lower=0.0, upper=1.0)
+    target_floor = (floor_min + ((floor_max - floor_min) * support_score)).clip(lower=floor_min, upper=floor_max)
+    floor_target = pd.concat([prior_floor, target_floor], axis=1).max(axis=1).clip(lower=floor_min, upper=floor_max)
+    protected_floor = pd.Series([0.0] * len(out), index=out.index, dtype="float64")
+    protected_floor.loc[candidate_mask] = floor_target.loc[candidate_mask]
+    adjusted_ownership = pd.concat([projected_ownership, protected_floor], axis=1).max(axis=1)
+    desired_total = _ownership_target_total_from_pool(out)
+    current_total = float(adjusted_ownership.sum())
+    if desired_total > 0.0 and current_total > desired_total + 1e-6:
+        reducible = (adjusted_ownership - protected_floor).clip(lower=0.0)
+        reducible_total = float(reducible.sum())
+        if reducible_total > 0.0:
+            excess = current_total - desired_total
+            reduction = (reducible / reducible_total) * excess
+            adjusted_ownership = (adjusted_ownership - reduction).clip(lower=protected_floor)
+
+    out["midrange_chalk_floor_flag"] = candidate_mask.astype(bool)
+    out["midrange_chalk_floor_target"] = floor_target.round(3)
+    out["midrange_chalk_floor_delta"] = (adjusted_ownership - projected_ownership).round(3)
+    out["projected_ownership"] = adjusted_ownership.round(2)
+    out["ownership_total_projected"] = float(adjusted_ownership.sum())
+    return _recompute_leverage_score(out)
+
+
 def apply_focus_game_chalk_guardrail(
     pool_df: pd.DataFrame,
     projected_ownership_threshold: float = 18.0,
@@ -3399,6 +3540,8 @@ def apply_minutes_shock_override(
     max_boost_pct: float = 0.18,
     boost_per_minute: float = 0.025,
     expected_rotation_bonus_minutes: float = 2.0,
+    breakout_minutes_threshold: float = 3.0,
+    breakout_min_boost_pct: float = 0.10,
 ) -> pd.DataFrame:
     out = pool_df.copy()
     if out.empty:
@@ -3407,6 +3550,8 @@ def apply_minutes_shock_override(
     boost_cap = max(0.0, min(0.30, _safe_num(max_boost_pct, 0.18)))
     per_minute = max(0.0, min(0.05, _safe_num(boost_per_minute, 0.025)))
     rotation_bonus = max(0.0, min(4.0, _safe_num(expected_rotation_bonus_minutes, 2.0)))
+    breakout_threshold = max(0.0, min(8.0, _safe_num(breakout_minutes_threshold, 3.0)))
+    breakout_floor = max(0.0, min(boost_cap, _safe_num(breakout_min_boost_pct, 0.10)))
 
     mins_avg = pd.to_numeric(out.get("our_minutes_avg"), errors="coerce")
     mins_last7 = pd.to_numeric(out.get("our_minutes_last7"), errors="coerce")
@@ -3445,6 +3590,10 @@ def apply_minutes_shock_override(
     raw_boost = (minutes_delta * per_minute).clip(lower=0.0, upper=boost_cap)
     reliability = (1.0 - (0.55 * dnp_risk) - (0.35 * uncertainty)).clip(lower=0.35, upper=1.0)
     minutes_boost = (raw_boost * reliability).clip(lower=0.0, upper=boost_cap)
+    breakout_mask = minutes_delta >= breakout_threshold
+    breakout_increment = ((minutes_delta - breakout_threshold).clip(lower=0.0) * 0.02).clip(lower=0.0, upper=max(0.0, boost_cap - breakout_floor))
+    breakout_target_boost = (breakout_floor + breakout_increment).clip(lower=0.0, upper=boost_cap)
+    minutes_boost = minutes_boost.where(~breakout_mask, pd.concat([minutes_boost, breakout_target_boost], axis=1).max(axis=1))
     multiplier = (1.0 + minutes_boost).clip(lower=1.0, upper=1.0 + boost_cap)
 
     for col in ["projected_dk_points", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
@@ -3464,6 +3613,8 @@ def apply_minutes_shock_override(
 
     out["expected_rotation_flag"] = expected_rotation_flag.astype(bool)
     out["minutes_shock_delta"] = minutes_delta.round(3)
+    out["minutes_breakout_flag"] = breakout_mask.astype(bool)
+    out["minutes_breakout_floor_pct"] = (breakout_target_boost * 100.0).round(3)
     out["minutes_shock_boost_pct"] = (minutes_boost * 100.0).round(3)
     out["minutes_shock_multiplier"] = multiplier.round(4)
     out = _refresh_ceiling_projection(out)
@@ -3946,6 +4097,7 @@ def _rerank_lineup_portfolio(
     preferred_games: set[str],
     preferred_target_count: int,
     low_own_target_count: int,
+    ceiling_boost_target_count: int = 0,
     salary_left_target: int | None,
     max_pair_overlap: int | None = None,
 ) -> list[dict[str, Any]]:
@@ -4010,11 +4162,13 @@ def _rerank_lineup_portfolio(
     exposure_counts: dict[str, int] = {}
     selected_preferred = 0
     selected_low_own = 0
+    selected_ceiling_boost = 0
 
     while candidates and len(selected) < requested:
         remaining_slots = requested - len(selected)
         preferred_needed = max(0, int(preferred_target_count) - selected_preferred)
         low_own_needed = max(0, int(low_own_target_count) - selected_low_own)
+        ceiling_boost_needed = max(0, int(ceiling_boost_target_count) - selected_ceiling_boost)
         best_idx = None
         best_score = -10**12
 
@@ -4025,6 +4179,8 @@ def _rerank_lineup_portfolio(
             if preferred_needed >= remaining_slots and not bool(lineup.get("preferred_game_stack_met")):
                 continue
             if low_own_needed >= remaining_slots and _safe_num(lineup.get("low_own_upside_count"), 0.0) <= 0.0:
+                continue
+            if ceiling_boost_needed >= remaining_slots and not bool(lineup.get("ceiling_boost_active")):
                 continue
 
             overlap_penalty = 0.0
@@ -4043,6 +4199,8 @@ def _rerank_lineup_portfolio(
                 preference_bonus += 4.0
             if low_own_needed > 0 and _safe_num(lineup.get("low_own_upside_count"), 0.0) > 0.0:
                 preference_bonus += 2.5
+            if ceiling_boost_needed > 0 and bool(lineup.get("ceiling_boost_active")):
+                preference_bonus += 2.0
             candidate_score = float(lineup.get("_portfolio_base_score") or 0.0) + preference_bonus - overlap_penalty - (
                 1.4 * exposure_penalty
             )
@@ -4060,6 +4218,8 @@ def _rerank_lineup_portfolio(
             selected_preferred += 1
         if _safe_num(chosen.get("low_own_upside_count"), 0.0) > 0.0:
             selected_low_own += 1
+        if bool(chosen.get("ceiling_boost_active")):
+            selected_ceiling_boost += 1
         selected.append(chosen)
 
     for idx, lineup in enumerate(selected[:requested], start=1):
@@ -4309,6 +4469,7 @@ def generate_lineups(
     calibrated = apply_false_chalk_discount(calibrated)
     calibrated = apply_ownership_calibration(calibrated, contest_type=contest_type)
     calibrated = normalize_projected_ownership_total(calibrated)
+    calibrated = apply_midrange_chalk_floor(calibrated)
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = apply_stack_anchor_bias(scored)
     scored = apply_model_profile_adjustments(scored, model_profile=model_profile)
@@ -4380,6 +4541,7 @@ def generate_lineups(
             unsupported_false_chalk_cap = None
     ownership_reliability = _ownership_reliability_for_pool(scored)
     low_own_candidate_ids: set[str] = set()
+    low_own_bucket_rule = "disabled"
     requested_low_own_exposure = max(0.0, min(100.0, float(low_own_bucket_exposure_pct)))
     low_own_exposure = requested_low_own_exposure
     low_own_min_required = max(0, min(ROSTER_SIZE, int(low_own_bucket_min_per_lineup)))
@@ -4406,6 +4568,7 @@ def generate_lineups(
     if low_own_exposure > 0.0:
         proj = pd.to_numeric(scored.get("projected_dk_points"), errors="coerce").fillna(0.0)
         ceiling = pd.to_numeric(scored.get("ceiling_projection"), errors="coerce").fillna(proj * 1.18)
+        ceiling_delta = (ceiling - proj).clip(lower=0.0)
         own = pd.to_numeric(scored.get("projected_ownership"), errors="coerce").fillna(100.0)
         leverage = pd.to_numeric(scored.get("leverage_score"), errors="coerce")
         tail = pd.to_numeric(scored.get("game_tail_score"), errors="coerce").fillna(0.0)
@@ -4435,7 +4598,12 @@ def generate_lineups(
         )
         effective_ownership_cap = max(low_own_ownership_cap_input, 14.0 + (3.0 * (1.0 - ownership_reliability)))
         effective_tail_floor = min(low_own_tail_floor_input, 50.0)
-        low_own_mask = (
+        strict_ownership_cap = 10.0 if low_own_ownership_cap_input <= 0.0 else min(10.0, low_own_ownership_cap_input)
+        strict_low_own_mask = (
+            (own <= strict_ownership_cap)
+            & (ceiling_delta >= 10.0)
+        )
+        fallback_low_own_mask = (
             (own <= effective_ownership_cap)
             & (
                 (proj >= effective_projection_floor)
@@ -4449,8 +4617,20 @@ def generate_lineups(
                 | (ceiling_signal >= 0.58)
             )
         )
+        low_own_mask = strict_low_own_mask
+        if bool(strict_low_own_mask.any()):
+            low_own_bucket_rule = "strict_ceiling_spike"
+        else:
+            low_own_mask = fallback_low_own_mask
+            low_own_bucket_rule = "fallback_upside" if bool(fallback_low_own_mask.any()) else "none"
+            if low_own_min_required > 0 and bool(fallback_low_own_mask.any()):
+                warnings.append(
+                    "Strict low-owned smash candidates were unavailable, so the optimizer fell back to the broader upside bucket."
+                )
         scored["low_own_upside_v2_score"] = low_own_upside_score.round(4)
+        scored["low_own_ceiling_spike_flag"] = strict_low_own_mask.map(lambda x: bool(x))
         scored["low_own_upside_flag"] = low_own_mask.map(lambda x: bool(x))
+        scored["low_own_bucket_rule"] = low_own_bucket_rule
         low_own_candidate_ids = set(scored.loc[low_own_mask, "ID"].astype(str).tolist())
         if low_own_bonus > 0.0 and low_own_candidate_ids:
             low_own_score_by_id = (
@@ -4469,7 +4649,9 @@ def generate_lineups(
                 + pd.to_numeric(candidate_bonus, errors="coerce").fillna(0.0)
             ).clip(lower=0.01)
     else:
+        scored["low_own_ceiling_spike_flag"] = False
         scored["low_own_upside_flag"] = False
+        scored["low_own_bucket_rule"] = "disabled"
         scored["low_own_upside_v2_score"] = 0.0
 
     unsupported_false_chalk_ids: set[str] = set(
@@ -4990,6 +5172,7 @@ def generate_lineups(
 
     final_preferred_target = int(round((preferred_game_stack_lineup_pct_value / 100.0) * float(requested_num_lineups)))
     final_low_own_target = int(round((low_own_exposure / 100.0) * float(requested_num_lineups)))
+    final_ceiling_target = int(round((ceiling_pct / 100.0) * float(requested_num_lineups)))
     reranked_lineups = _rerank_lineup_portfolio(
         lineups,
         target_lineups=requested_num_lineups,
@@ -4998,6 +5181,7 @@ def generate_lineups(
         preferred_games=preferred_games,
         preferred_target_count=final_preferred_target,
         low_own_target_count=final_low_own_target,
+        ceiling_boost_target_count=final_ceiling_target,
         salary_left_target=salary_target,
         max_pair_overlap=spike_overlap_cap if spike_mode else None,
     )
@@ -5455,6 +5639,7 @@ def _generate_lineups_cluster_mode(
         )
     final_preferred_target = int(round((len(preferred_stack_required) / max(1, candidate_num_lineups)) * float(num_lineups)))
     final_low_own_target = int(round((len(low_own_required_idx) / max(1, candidate_num_lineups)) * float(num_lineups)))
+    final_ceiling_target = int(round((len(ceiling_idx) / max(1, candidate_num_lineups)) * float(num_lineups)))
     reranked_lineups = _rerank_lineup_portfolio(
         lineups,
         target_lineups=num_lineups,
@@ -5463,6 +5648,7 @@ def _generate_lineups_cluster_mode(
         preferred_games=preferred_games,
         preferred_target_count=final_preferred_target,
         low_own_target_count=final_low_own_target,
+        ceiling_boost_target_count=final_ceiling_target,
         salary_left_target=salary_target,
     )
     if len(reranked_lineups) < num_lineups:

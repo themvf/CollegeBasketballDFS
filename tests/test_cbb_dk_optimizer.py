@@ -6,6 +6,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     _apply_uncertainty_exposure_caps,
     _rerank_lineup_portfolio,
     apply_focus_game_chalk_guardrail,
+    apply_midrange_chalk_floor,
     apply_model_profile_adjustments,
     apply_ownership_calibration,
     apply_projection_uncertainty_adjustment,
@@ -1131,6 +1132,39 @@ def test_apply_contest_objective_can_toggle_tail_signals() -> None:
     assert float(tail["objective_score"].mean()) > float(legacy["objective_score"].mean())
 
 
+def test_apply_contest_objective_large_gpp_rewards_projection_variance() -> None:
+    pool = pd.DataFrame(
+        [
+            {
+                "ID": "1",
+                "projected_dk_points": 30.0,
+                "projected_ownership": 12.0,
+                "ceiling_projection": 40.0,
+                "projection_stdev_points": 8.0,
+                "ceiling_signal_score": 0.35,
+                "game_tail_score": 55.0,
+                "game_tail_to_ownership_pct": 0.45,
+            },
+            {
+                "ID": "2",
+                "projected_dk_points": 30.0,
+                "projected_ownership": 12.0,
+                "ceiling_projection": 40.0,
+                "projection_stdev_points": 2.0,
+                "ceiling_signal_score": 0.35,
+                "game_tail_score": 55.0,
+                "game_tail_to_ownership_pct": 0.45,
+            },
+        ]
+    )
+
+    scored = apply_contest_objective(pool, contest_type="Large GPP", include_tail_signals=True)
+
+    assert "gpp_variance_score" in scored.columns
+    assert float(scored.loc[0, "gpp_variance_score"]) > float(scored.loc[1, "gpp_variance_score"])
+    assert float(scored.loc[0, "objective_score"]) > float(scored.loc[1, "objective_score"])
+
+
 def test_apply_projection_calibration_scales_projection_columns() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     base = pool.loc[:, ["projected_dk_points", "blended_projection", "our_dk_projection"]].copy()
@@ -1260,6 +1294,25 @@ def test_apply_minutes_shock_override_boosts_positive_minute_deltas() -> None:
     assert float(adjusted.loc[0, "role_change_delta_minutes"]) > 0.0
 
 
+def test_apply_minutes_shock_override_breakout_floor_applies_at_three_minutes() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["our_minutes_avg"] = 20.0
+    pool["our_minutes_last7"] = 20.0
+    pool["our_minutes_recent"] = 20.0
+    pool["projection_uncertainty_score"] = 0.05
+    pool["dnp_risk_score"] = 0.05
+    pool["ownership_chalk_surge_score"] = 65.0
+
+    pool.loc[0, "our_minutes_last7"] = 23.0
+    pool.loc[0, "our_minutes_recent"] = 23.0
+
+    adjusted = apply_minutes_shock_override(pool)
+
+    assert bool(adjusted.loc[0, "minutes_breakout_flag"]) is True
+    assert float(adjusted.loc[0, "minutes_shock_boost_pct"]) >= 10.0
+    assert float(adjusted.loc[0, "minutes_breakout_floor_pct"]) >= 10.0
+
+
 def test_apply_chalk_ceiling_guardrail_softly_lifts_top_candidates() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
     pool["projected_ownership"] = 10.0
@@ -1360,6 +1413,34 @@ def test_apply_focus_game_chalk_guardrail_lifts_focus_game_candidates() -> None:
     assert float(adjusted.loc[0, "projected_ownership"]) > 9.0
     assert float(adjusted.loc[0, "focus_game_chalk_guardrail_delta"]) > 0.0
     assert bool(adjusted.loc[1, "focus_game_chalk_guardrail_flag"]) is False
+
+
+def test_apply_midrange_chalk_floor_enforces_midrange_projection_chalk_minimum() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["projected_ownership"] = 9.0
+    pool["ownership_chalk_surge_score"] = 42.0
+    pool["historical_ownership_baseline"] = 6.0
+    pool["minutes_shock_boost_pct"] = 0.0
+    pool["ceiling_projection"] = pd.to_numeric(pool["projected_dk_points"], errors="coerce") + 6.0
+
+    pool.loc[0, "Salary"] = 6200
+    pool.loc[0, "projected_dk_points"] = float(pd.to_numeric(pool["projected_dk_points"], errors="coerce").max()) + 5.0
+    pool.loc[0, "ceiling_projection"] = float(pool.loc[0, "projected_dk_points"]) + 12.0
+    pool.loc[0, "projected_ownership"] = 7.0
+    pool.loc[0, "ownership_chalk_surge_score"] = 88.0
+    pool.loc[0, "minutes_shock_boost_pct"] = 12.0
+    pool.loc[0, "historical_ownership_baseline"] = 20.0
+
+    pool.loc[1, "Salary"] = 7800
+    pool.loc[1, "projected_dk_points"] = float(pool.loc[0, "projected_dk_points"]) - 1.0
+    pool.loc[1, "projected_ownership"] = 7.0
+
+    adjusted = apply_midrange_chalk_floor(pool)
+
+    assert bool(adjusted.loc[0, "midrange_chalk_floor_flag"]) is True
+    assert float(adjusted.loc[0, "projected_ownership"]) >= 18.0
+    assert float(adjusted.loc[0, "midrange_chalk_floor_delta"]) > 0.0
+    assert bool(adjusted.loc[1, "midrange_chalk_floor_flag"]) is False
 
 
 def test_apply_false_chalk_discount_shrinks_unsupported_high_ownership_and_normalizes_total() -> None:
@@ -1589,9 +1670,24 @@ def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:
     pool["ownership_confidence"] = 0.0
     pool["game_tail_score"] = 40.0
     pool["leverage_score"] = pd.to_numeric(pool["projected_dk_points"], errors="coerce").fillna(0.0)
-    low_own_ids = pool.head(4)["ID"].astype(str).tolist()
+    low_own_ids = pool.iloc[[0, 1, 6, 7]]["ID"].astype(str).tolist()
     pool.loc[pool["ID"].astype(str).isin(low_own_ids), "projected_ownership"] = 7.0
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "Salary"] = 8200
     pool.loc[pool["ID"].astype(str).isin(low_own_ids), "game_tail_score"] = 85.0
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "rotowire_signal_score"] = 0.85
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "consensus_value_signal"] = 0.78
+    low_own_mask = pool["ID"].astype(str).isin(low_own_ids)
+    base_projection = pd.to_numeric(pool["projected_dk_points"], errors="coerce").fillna(0.0)
+    pool.loc[low_own_mask, "projection_pre_rotowire"] = base_projection.loc[low_own_mask]
+    pool.loc[low_own_mask, "projection_pre_lineupstarter"] = base_projection.loc[low_own_mask]
+    pool.loc[low_own_mask, "rotowire_projection_raw"] = base_projection.loc[low_own_mask] + 9.0
+    pool.loc[low_own_mask, "lineupstarter_projection_raw"] = base_projection.loc[low_own_mask] + 5.0
+    pool.loc[low_own_mask, "our_minutes_avg"] = 20.0
+    pool.loc[low_own_mask, "our_minutes_last7"] = 28.0
+    pool.loc[low_own_mask, "our_minutes_recent"] = 28.0
+    pool.loc[low_own_mask, "consensus_minutes_proj"] = 20.0
+    pool.loc[low_own_mask, "rotowire_minutes_raw"] = 31.0
+    pool.loc[low_own_mask, "our_minutes_std_last7"] = 5.0
     pool["ownership_target_total"] = float(pd.to_numeric(pool["projected_ownership"], errors="coerce").sum())
 
     requested_lineups = 12
@@ -1614,6 +1710,60 @@ def test_generate_lineups_low_own_bucket_enforces_required_share() -> None:
     scaled_share = required_share * 0.35
     min_expected = int(round((scaled_share / 100.0) * requested_lineups))
     assert lineups_with_low_own >= min_expected
+
+
+def test_generate_lineups_low_own_bucket_prefers_strict_ceiling_spikes() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    pool["projected_ownership"] = 24.0
+    pool["ownership_confidence"] = 1.0
+    pool["game_tail_score"] = 42.0
+    pool["leverage_score"] = pd.to_numeric(pool["projected_dk_points"], errors="coerce").fillna(0.0)
+
+    strict_ids = pool.iloc[[0, 1, 6, 7]]["ID"].astype(str).tolist()
+    fallback_ids = pool.iloc[[2, 8]]["ID"].astype(str).tolist()
+    low_own_ids = strict_ids + fallback_ids
+
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "projected_ownership"] = 7.0
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "Salary"] = 8200
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "game_tail_score"] = 88.0
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "rotowire_signal_score"] = 0.82
+    pool.loc[pool["ID"].astype(str).isin(low_own_ids), "consensus_value_signal"] = 0.74
+    base_projection = pd.to_numeric(pool["projected_dk_points"], errors="coerce").fillna(0.0)
+    low_own_mask = pool["ID"].astype(str).isin(low_own_ids)
+    strict_mask = pool["ID"].astype(str).isin(strict_ids)
+    fallback_mask = pool["ID"].astype(str).isin(fallback_ids)
+    pool.loc[low_own_mask, "projection_pre_rotowire"] = base_projection.loc[low_own_mask]
+    pool.loc[low_own_mask, "projection_pre_lineupstarter"] = base_projection.loc[low_own_mask]
+    pool.loc[low_own_mask, "our_minutes_avg"] = 20.0
+    pool.loc[low_own_mask, "our_minutes_last7"] = 27.0
+    pool.loc[low_own_mask, "our_minutes_recent"] = 27.0
+    pool.loc[low_own_mask, "consensus_minutes_proj"] = 20.0
+    pool.loc[low_own_mask, "rotowire_minutes_raw"] = 30.0
+    pool.loc[low_own_mask, "our_minutes_std_last7"] = 5.0
+    pool.loc[strict_mask, "rotowire_projection_raw"] = base_projection.loc[strict_mask] + 9.0
+    pool.loc[strict_mask, "lineupstarter_projection_raw"] = base_projection.loc[strict_mask] + 5.0
+    pool.loc[fallback_mask, "rotowire_projection_raw"] = base_projection.loc[fallback_mask] + 2.0
+    pool.loc[fallback_mask, "lineupstarter_projection_raw"] = base_projection.loc[fallback_mask] + 1.0
+    pool["ownership_target_total"] = float(pd.to_numeric(pool["projected_ownership"], errors="coerce").sum())
+
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=8,
+        contest_type="Large GPP",
+        low_own_bucket_exposure_pct=100.0,
+        low_own_bucket_min_per_lineup=1,
+        low_own_bucket_max_projected_ownership=10.0,
+        low_own_bucket_min_projection=10.0,
+        low_own_bucket_min_tail_score=55.0,
+        random_seed=13,
+    )
+
+    assert len(lineups) == 8
+    assert not any("fell back to the broader upside bucket" in warning for warning in warnings)
+    assert all(
+        any(str(pid) in strict_ids for pid in (lineup.get("player_ids") or []))
+        for lineup in lineups
+    )
 
 
 def test_generate_lineups_preferred_game_bonus_increases_preferred_exposure() -> None:
