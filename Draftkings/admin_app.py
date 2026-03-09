@@ -3834,6 +3834,228 @@ def render_slate_supplement_tab(
     st.dataframe(saved_df[display_cols], hide_index=True, use_container_width=True)
 
 
+def render_lineupstarter_tab(
+    *,
+    selected_date: date,
+    selected_slate_key: str,
+    selected_slate_label: str,
+    contest_type: str,
+    slate_name: str,
+    slate_id_text: str,
+    site_id: int,
+    cookie_header: str,
+    bucket_name: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> None:
+    st.subheader("LineupStarter")
+    st.caption(
+        "Step 2 of the slate workflow: after uploading the DraftKings slate, "
+        "upload LineupStarter projected points and ownership here."
+    )
+    st.caption(f"Active slate context: `{selected_slate_label}` (key: `{selected_slate_key}`)")
+
+    active_slate_df = pd.DataFrame()
+    active_ready = False
+    active_source = ""
+    active_source_label = ""
+    active_source_detail = ""
+    if bucket_name:
+        try:
+            active_context = load_active_slate_context(
+                selected_date=selected_date,
+                slate_key=selected_slate_key,
+                contest_type=contest_type,
+                slate_name=(slate_name.strip() or "All"),
+                slate_id=(_safe_int_value(slate_id_text, default=0) or None),
+                site_id=int(site_id),
+                cookie_header=(cookie_header.strip() or None),
+                bucket_name=bucket_name,
+                gcp_project=gcp_project,
+                service_account_json=service_account_json,
+                service_account_json_b64=service_account_json_b64,
+            )
+            active_slate_df = (
+                active_context.get("active_slate_df").copy()
+                if isinstance(active_context.get("active_slate_df"), pd.DataFrame)
+                else pd.DataFrame()
+            )
+            active_ready = bool(active_context.get("active_ready"))
+            active_source = str(active_context.get("active_source") or "").strip()
+            active_source_label = str(active_context.get("active_source_label") or "").strip()
+            active_source_detail = str(active_context.get("active_source_detail") or "").strip()
+        except Exception as exc:
+            st.exception(exc)
+
+    source_label = active_source_label or "Unavailable"
+    if active_source == "legacy_dk_fallback":
+        source_label = "Uploaded DraftKings slate"
+    ls_status_1, ls_status_2, ls_status_3 = st.columns(3)
+    ls_status_1.metric("Active Source", source_label)
+    ls_status_2.metric("Active Slate Rows", int(len(active_slate_df)))
+    ls_status_3.metric("Ready", "Yes" if active_ready and not active_slate_df.empty else "No")
+    if not bucket_name:
+        st.info("Set a GCS bucket in the sidebar before uploading LineupStarter data.")
+    elif active_slate_df.empty or not active_ready:
+        st.info(
+            "Upload the DraftKings slate on the `DK Slate` tab first. "
+            "LineupStarter mapping needs the active DK slate to match players."
+        )
+        if active_source_detail:
+            st.caption(active_source_detail)
+    elif active_source_detail:
+        st.caption(active_source_detail)
+
+    lineupstarter_upload_summary = st.session_state.get("cbb_lineupstarter_upload_summary") or {}
+    if lineupstarter_upload_summary:
+        st.subheader("Last Save")
+        st.json(
+            {
+                "selected_date": lineupstarter_upload_summary.get("selected_date"),
+                "rows_saved": lineupstarter_upload_summary.get("rows_saved"),
+                "players": lineupstarter_upload_summary.get("players"),
+                "blob_name": lineupstarter_upload_summary.get("blob_name"),
+                "coverage": lineupstarter_upload_summary.get("coverage"),
+            }
+        )
+
+    lineupstarter_upload = st.file_uploader(
+        "Upload LineupStarter CSV",
+        type=["csv"],
+        key="lineupstarter_projection_upload",
+        help="Include player, salary, projected points, and projected ownership columns.",
+    )
+    preview_lineupstarter_df = pd.DataFrame()
+    preview_lineupstarter_coverage: dict[str, Any] = {}
+    if active_source == "legacy_dk_fallback" and active_ready:
+        st.caption("LineupStarter mapping is using the uploaded DraftKings slate for this date.")
+    if lineupstarter_upload is not None and not active_slate_df.empty:
+        preview_payload = _read_uploaded_csv_frame(lineupstarter_upload)
+        if preview_payload.get("decode_warning"):
+            st.caption(str(preview_payload.get("decode_warning")))
+        preview_frame = preview_payload.get("frame")
+        if not isinstance(preview_frame, pd.DataFrame) or preview_frame.empty:
+            parse_error = str(preview_payload.get("parse_error") or "").strip()
+            if parse_error:
+                st.warning(f"Could not parse LineupStarter upload: {parse_error}")
+        else:
+            preview_lineupstarter_df, preview_lineupstarter_coverage = normalize_lineupstarter_upload_frame(
+                preview_frame,
+                slate_df=active_slate_df,
+            )
+            lp1, lp2, lp3, lp4 = st.columns(4)
+            lp1.metric("Preview Rows", int(preview_lineupstarter_coverage.get("rows_total") or 0))
+            lp2.metric("Matched", int(preview_lineupstarter_coverage.get("matched_rows") or 0))
+            lp3.metric("Unresolved", int(preview_lineupstarter_coverage.get("unresolved_rows") or 0))
+            lp4.metric("Coverage %", f"{float(preview_lineupstarter_coverage.get('coverage_pct') or 0.0):.1f}")
+            if bool(preview_lineupstarter_coverage.get("fully_resolved")):
+                st.success("LineupStarter upload maps cleanly to the current active DK slate.")
+            else:
+                st.warning("LineupStarter upload still has unresolved rows. Save is blocked until coverage is 100%.")
+                unresolved_preview = preview_lineupstarter_df.loc[
+                    preview_lineupstarter_df["lineupstarter_match_status"] != "matched"
+                ].copy()
+                if not unresolved_preview.empty:
+                    preview_cols = [
+                        c
+                        for c in [
+                            "lineupstarter_source_player_name",
+                            "lineupstarter_source_team_abbr",
+                            "lineupstarter_source_position",
+                            "Salary",
+                            "lineupstarter_match_method",
+                            "lineupstarter_match_status",
+                        ]
+                        if c in unresolved_preview.columns
+                    ]
+                    st.dataframe(unresolved_preview[preview_cols], hide_index=True, use_container_width=True)
+
+    save_lineupstarter_clicked = st.button(
+        "Save LineupStarter Priors to GCS",
+        key="save_lineupstarter_priors",
+        disabled=(not active_ready),
+    )
+    if save_lineupstarter_clicked:
+        if not bucket_name:
+            st.error("Set a GCS bucket before saving LineupStarter priors.")
+        elif active_slate_df.empty or not active_ready:
+            st.error("Upload the DraftKings slate on the `DK Slate` tab before saving LineupStarter priors.")
+        elif lineupstarter_upload is None:
+            st.error("Choose a LineupStarter CSV file before saving.")
+        elif preview_lineupstarter_coverage and not bool(preview_lineupstarter_coverage.get("fully_resolved")):
+            st.error("LineupStarter upload is not fully mapped to the current DK slate yet.")
+        else:
+            try:
+                lineupstarter_summary = import_lineupstarter_projection_csv(
+                    csv_bytes=lineupstarter_upload.getvalue(),
+                    resolved_slate_df=active_slate_df,
+                    selected_date=selected_date,
+                    slate_key=selected_slate_key,
+                    bucket_name=bucket_name,
+                    gcp_project=gcp_project or None,
+                    service_account_json=service_account_json,
+                    service_account_json_b64=service_account_json_b64,
+                )
+                st.session_state["cbb_lineupstarter_upload_summary"] = lineupstarter_summary
+                load_lineupstarter_frame_for_date.clear()
+                st.success(
+                    f"Saved LineupStarter priors for {int(lineupstarter_summary.get('players') or 0)} players "
+                    f"to `{lineupstarter_summary.get('blob_name')}`."
+                )
+                st.rerun()
+            except Exception as exc:
+                st.exception(exc)
+
+    st.markdown("---")
+    st.subheader("Saved LineupStarter Priors")
+    if not bucket_name:
+        st.info("Set a GCS bucket in the sidebar to load saved LineupStarter priors.")
+        return
+
+    saved_lineupstarter_df = load_lineupstarter_frame_for_date(
+        bucket_name=bucket_name,
+        selected_date=selected_date,
+        selected_slate_key=selected_slate_key,
+        gcp_project=gcp_project or None,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if saved_lineupstarter_df.empty:
+        st.info("No saved LineupStarter priors found for the selected date.")
+        return
+
+    ls1, ls2, ls3, ls4 = st.columns(4)
+    ls1.metric("Saved Rows", int(len(saved_lineupstarter_df)))
+    ls2.metric(
+        "Players",
+        int(saved_lineupstarter_df["ID"].nunique()) if "ID" in saved_lineupstarter_df.columns else int(len(saved_lineupstarter_df)),
+    )
+    ls3.metric(
+        "Projection Rows",
+        int(pd.to_numeric(saved_lineupstarter_df.get("lineupstarter_projected_points"), errors="coerce").notna().sum()),
+    )
+    ls4.metric(
+        "Ownership Rows",
+        int(pd.to_numeric(saved_lineupstarter_df.get("lineupstarter_projected_ownership"), errors="coerce").notna().sum()),
+    )
+    saved_cols = [
+        c
+        for c in [
+            "Name + ID",
+            "Name",
+            "TeamAbbrev",
+            "Salary",
+            "lineupstarter_projected_points",
+            "lineupstarter_projected_ownership",
+            "lineupstarter_source_player_name",
+            "lineupstarter_match_method",
+        ]
+        if c in saved_lineupstarter_df.columns
+    ]
+    st.dataframe(saved_lineupstarter_df[saved_cols], hide_index=True, use_container_width=True)
+
+
 st.set_page_config(page_title="CBB Admin Cache", layout="wide")
 st.title("College Basketball Admin Cache")
 st.caption("Cache-first data pipeline backed by Google Cloud Storage.")
@@ -3899,14 +4121,14 @@ if not cred_json and not cred_json_b64:
         "Using default Google credentials if available."
     )
 
-tab_game, tab_props, tab_backfill, tab_dk, tab_supplement_1, tab_supplement_2, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
+tab_game, tab_props, tab_backfill, tab_dk, tab_lineupstarter, tab_supplements, tab_injuries, tab_slate_vegas, tab_lineups, tab_projection_review, tab_tournament_review = st.tabs(
     [
         "Game Data",
         "Prop Data",
         "Backfill",
         "DK Slate",
-        "Slate Supplement #1",
-        "Slate Supplement #2",
+        "LineupStarter",
+        "Supplements",
         "Injuries",
         "Slate + Vegas",
         "Lineup Generator",
@@ -4051,88 +4273,91 @@ with tab_backfill:
     run_odds_backfill_clicked = c5.button("Run Odds Season Backfill", key="run_odds_season_backfill")
 
 with tab_dk:
-    st.subheader("Load Slate")
+    st.subheader("DraftKings Slate")
     st.caption(
-        "Use RotoWire as the primary slate source. "
-        "Only upload a DraftKings CSV if you need to repair missing DK IDs for export."
+        "Step 1 of the slate workflow: upload the DraftKings slate CSV here. "
+        "Then use the separate `LineupStarter` tab if you want projection and ownership overlays."
     )
-    dk_slate_date = st.date_input("RotoWire Slate Date", value=game_selected_date, key="dk_slate_date")
+    dk_slate_date = st.date_input("Slate Date", value=game_selected_date, key="dk_slate_date")
     dk_slate_label = shared_slate_label
     dk_slate_key = shared_slate_key
-    slate_source = st.radio(
-        "Slate Source",
-        options=["Fetch RotoWire (Recommended)", "Upload DraftKings CSV (Fallback)"],
-        index=0,
-        horizontal=True,
-        key="load_slate_source",
-    )
-    rw1, rw2, rw3 = st.columns(3)
-    rotowire_contest_type = rw1.selectbox(
-        "Contest Type",
-        options=["Classic", "Showdown", "Single Game", "Turbo"],
-        index=0,
-        key="load_slate_rotowire_contest_type",
-    )
-    rotowire_slate_name = rw2.text_input(
-        "Slate Name",
-        value=str(st.session_state.get("load_slate_rotowire_slate_name") or "All"),
-        key="load_slate_rotowire_slate_name",
-        help="Exact RotoWire slate name. Use `All` for the default classic slate unless you need a specific variant.",
-    )
-    rotowire_slate_id_text = rw3.text_input(
-        "Slate ID (optional)",
-        value=str(st.session_state.get("load_slate_rotowire_slate_id") or ""),
-        key="load_slate_rotowire_slate_id",
-        help="Use a specific RotoWire slate ID if filters are ambiguous.",
-    )
-    rw4, rw5 = st.columns(2)
-    rotowire_site_id = int(
-        rw4.number_input(
-            "Site ID",
-            min_value=1,
-            max_value=10,
-            value=max(1, _safe_int_value(st.session_state.get("load_slate_rotowire_site_id"), default=1)),
-            step=1,
-            key="load_slate_rotowire_site_id",
-        )
-    )
-    rotowire_cookie = rw5.text_input(
-        "RotoWire Cookie Header (optional)",
-        value=os.getenv("ROTOWIRE_COOKIE", "").strip(),
-        type="password",
-        key="load_slate_rotowire_cookie",
-        help="Optional member-authenticated Cookie header for RotoWire requests.",
-    )
+    rotowire_contest_type = str(st.session_state.get("load_slate_rotowire_contest_type") or "Classic")
+    rotowire_slate_name = str(st.session_state.get("load_slate_rotowire_slate_name") or "All")
+    rotowire_slate_id_text = str(st.session_state.get("load_slate_rotowire_slate_id") or "")
+    rotowire_site_id = max(1, _safe_int_value(st.session_state.get("load_slate_rotowire_site_id"), default=1))
+    rotowire_cookie = str(st.session_state.get("load_slate_rotowire_cookie") or os.getenv("ROTOWIRE_COOKIE", "").strip())
     st.caption(f"Active slate context: `{dk_slate_label}` (key: `{dk_slate_key}`)")
-    ls1, ls2 = st.columns(2)
-    refresh_resolved_slate_clicked = ls1.button("Refresh RotoWire Slate", key="refresh_resolved_rotowire_slate")
-    load_dk_slate_clicked = ls2.button("Refresh Cached Slate View", key="refresh_dk_slate_view")
-
-    repair_dk_slate_upload = st.file_uploader(
-        "Upload DraftKings CSV (Repair Missing IDs)",
-        type=["csv"],
-        key="dk_slate_repair_upload",
-        help="Use only if RotoWire coverage is incomplete and you need to derive missing DK IDs.",
-        disabled=(slate_source != "Upload DraftKings CSV (Fallback)"),
-    )
-    repair_dk_slate_clicked = st.button(
-        "Repair Missing DK IDs",
-        key="repair_dk_slate_ids",
-        disabled=(slate_source != "Upload DraftKings CSV (Fallback)"),
-    )
-
-    st.markdown("---")
-    st.subheader("Legacy DraftKings Slate Upload")
-    st.caption(
-        "Backward-compatible GCS upload for historical or manual workflows. "
-        "Lineup generation now uses the resolved RotoWire slate instead."
-    )
+    st.markdown("1. Upload `DraftKings Slate CSV`.\n2. Confirm the cached slate loads below.\n3. Open the `LineupStarter` tab if you want overlays.")
+    dtop1, dtop2 = st.columns(2)
+    load_dk_slate_clicked = dtop1.button("Refresh DraftKings Slate", key="refresh_dk_slate_view")
     uploaded_dk_slate = st.file_uploader(
         "Upload DraftKings Slate CSV",
         type=["csv"],
         key="dk_slate_upload",
         help="Upload the DraftKings player/salary slate CSV for this date+slate.",
     )
+    with st.expander("Advanced RotoWire / Alias Repair (Optional)", expanded=False):
+        st.caption(
+            "Optional fallback tools for old RotoWire workflows and alias repair. "
+            "Most slates should only need the DraftKings upload above."
+        )
+        rw1, rw2, rw3 = st.columns(3)
+        rotowire_contest_type = rw1.selectbox(
+            "Contest Type",
+            options=["Classic", "Showdown", "Single Game", "Turbo"],
+            index=["Classic", "Showdown", "Single Game", "Turbo"].index(rotowire_contest_type)
+            if rotowire_contest_type in {"Classic", "Showdown", "Single Game", "Turbo"}
+            else 0,
+            key="load_slate_rotowire_contest_type",
+        )
+        rotowire_slate_name = rw2.text_input(
+            "Slate Name",
+            value=rotowire_slate_name,
+            key="load_slate_rotowire_slate_name",
+            help="Exact RotoWire slate name. Use `All` for the default classic slate unless you need a specific variant.",
+        )
+        rotowire_slate_id_text = rw3.text_input(
+            "Slate ID (optional)",
+            value=rotowire_slate_id_text,
+            key="load_slate_rotowire_slate_id",
+            help="Use a specific RotoWire slate ID if filters are ambiguous.",
+        )
+        rw4, rw5 = st.columns(2)
+        rotowire_site_id = int(
+            rw4.number_input(
+                "Site ID",
+                min_value=1,
+                max_value=10,
+                value=int(rotowire_site_id),
+                step=1,
+                key="load_slate_rotowire_site_id",
+            )
+        )
+        rotowire_cookie = rw5.text_input(
+            "RotoWire Cookie Header (optional)",
+            value=rotowire_cookie,
+            type="password",
+            key="load_slate_rotowire_cookie",
+            help="Optional member-authenticated Cookie header for RotoWire requests.",
+        )
+        ar1, ar2 = st.columns(2)
+        refresh_resolved_slate_clicked = ar1.button("Refresh RotoWire Slate", key="refresh_resolved_rotowire_slate")
+        repair_dk_slate_upload = st.file_uploader(
+            "Upload DraftKings CSV (Repair Missing IDs)",
+            type=["csv"],
+            key="dk_slate_repair_upload",
+            help="Use only if you need to derive missing DK IDs from a CSV against the RotoWire slate.",
+        )
+        repair_dk_slate_clicked = ar2.button(
+            "Repair Missing DK IDs",
+            key="repair_dk_slate_ids",
+        )
+    if "refresh_resolved_slate_clicked" not in locals():
+        refresh_resolved_slate_clicked = False
+    if "repair_dk_slate_upload" not in locals():
+        repair_dk_slate_upload = None
+    if "repair_dk_slate_clicked" not in locals():
+        repair_dk_slate_clicked = False
     delete_dk_slate_confirm = st.checkbox(
         "Confirm delete for selected date + slate",
         value=False,
@@ -4497,28 +4722,9 @@ with tab_dk:
                 except Exception as exc:
                     st.exception(exc)
 
-    repair_summary = st.session_state.get("cbb_rotowire_dk_repair_summary") or {}
-    if repair_summary:
-        st.subheader("Fallback Repair Summary")
-        st.json(
-            {
-                "slate": repair_summary.get("slate"),
-                "coverage_before": repair_summary.get("coverage_before"),
-                "coverage_after": repair_summary.get("coverage_after"),
-                "derived_override_count": repair_summary.get("derived_override_count"),
-                "remaining_unresolved_after_count": repair_summary.get("remaining_unresolved_after_count"),
-                "persisted_manual_overrides_path": repair_summary.get("persisted_manual_overrides_path"),
-            }
-        )
-
-    manual_resolution_summary = st.session_state.get("cbb_manual_resolution_summary") or {}
-    if manual_resolution_summary:
-        st.subheader("Manual Alias Repair Summary")
-        st.json(manual_resolution_summary)
-
     dk_upload_summary = st.session_state.get("cbb_dk_upload_summary")
     if dk_upload_summary:
-        st.subheader("Legacy DK Upload Summary")
+        st.subheader("DraftKings Upload Summary")
         st.json(dk_upload_summary)
 
     try:
@@ -4563,268 +4769,134 @@ with tab_dk:
             else pd.DataFrame()
         )
         unresolved_df = filter_unresolved_resolution_rows(resolution_df)
+        source_label = active_source_label or "Unavailable"
+        if active_source == "legacy_dk_fallback":
+            source_label = "Uploaded DraftKings slate"
 
-        st.subheader("Resolved RotoWire Slate")
-        m1, m2, m3, m4 = st.columns(4)
-        m1.metric("Slate Players", int(coverage.get("players_total") or len(resolved_slate_df)))
-        m2.metric("Resolved", int(coverage.get("resolved_players") or 0))
-        m3.metric("Unresolved", int(coverage.get("unresolved_players") or 0))
-        m4.metric("Conflicts", int(coverage.get("conflict_players") or 0))
-        st.caption(
-            f"RotoWire slate `{slate_meta.get('contest_type') or rotowire_contest_type}` / "
-            f"`{slate_meta.get('slate_name') or (rotowire_slate_name.strip() or 'All')}` "
-            f"on `{slate_meta.get('slate_date') or dk_slate_date.isoformat()}` "
-            f"(slate_id={slate_meta.get('slate_id')}, games={slate_meta.get('game_count')}, "
-            f"coverage={float(coverage.get('coverage_pct') or 0.0):.1f}%)."
-        )
-
-        if resolved_slate_df.empty:
-            if active_source == "legacy_dk_fallback" and not legacy_dk_slate_df.empty:
-                st.warning("No resolved RotoWire slate is available. The cached legacy DK slate will control the optimizer.")
-            else:
-                st.warning("No RotoWire slate rows were returned for the selected configuration.")
-        elif coverage_ok:
-            st.success("Full coverage resolved. Lineup generation and DK export are enabled.")
+        st.subheader("Active Slate")
+        a1, a2, a3, a4 = st.columns(4)
+        a1.metric("Source", source_label)
+        a2.metric("Active Rows", int(len(active_slate_df)))
+        a3.metric("Cached DK Rows", int(len(legacy_dk_slate_df)))
+        a4.metric("Slate Games", int(slate_meta.get("game_count") or 0))
+        if active_ready and active_source == "legacy_dk_fallback":
+            st.success("Using the uploaded DraftKings slate as the active optimizer source.")
+        elif active_ready:
+            st.info(active_source_detail or "Using an alternate active slate source.")
         else:
-            st.warning(str(active_context.get("coverage_error") or "DK registry coverage is incomplete."))
+            st.warning(
+                active_source_detail
+                or "No active slate source is ready yet. Upload a DraftKings slate CSV to continue."
+            )
 
-        if not unresolved_df.empty:
-            st.subheader("Coverage Gaps")
-            st.dataframe(unresolved_df, hide_index=True, use_container_width=True)
+        repair_summary = st.session_state.get("cbb_rotowire_dk_repair_summary") or {}
+        manual_resolution_summary = st.session_state.get("cbb_manual_resolution_summary") or {}
+        with st.expander("Advanced Coverage / RotoWire Debug (Optional)", expanded=False):
+            if repair_summary:
+                st.subheader("Fallback Repair Summary")
+                st.json(
+                    {
+                        "slate": repair_summary.get("slate"),
+                        "coverage_before": repair_summary.get("coverage_before"),
+                        "coverage_after": repair_summary.get("coverage_after"),
+                        "derived_override_count": repair_summary.get("derived_override_count"),
+                        "remaining_unresolved_after_count": repair_summary.get("remaining_unresolved_after_count"),
+                        "persisted_manual_overrides_path": repair_summary.get("persisted_manual_overrides_path"),
+                    }
+                )
+            if manual_resolution_summary:
+                st.subheader("Manual Alias Repair Summary")
+                st.json(manual_resolution_summary)
 
-            manual_seed = unresolved_df.copy()
-            manual_seed["roster_position"] = manual_seed.get("position", "").map(_default_roster_position)
-            manual_seed["dk_id"] = ""
-            manual_seed["name_plus_id"] = ""
-            manual_seed["reason"] = "manual_alias_review"
-            manual_editor = st.data_editor(
-                manual_seed[
-                    [
+            st.subheader("Resolved RotoWire Slate")
+            m1, m2, m3, m4 = st.columns(4)
+            m1.metric("Slate Players", int(coverage.get("players_total") or len(resolved_slate_df)))
+            m2.metric("Resolved", int(coverage.get("resolved_players") or 0))
+            m3.metric("Unresolved", int(coverage.get("unresolved_players") or 0))
+            m4.metric("Conflicts", int(coverage.get("conflict_players") or 0))
+            st.caption(
+                f"RotoWire slate `{slate_meta.get('contest_type') or rotowire_contest_type}` / "
+                f"`{slate_meta.get('slate_name') or (rotowire_slate_name.strip() or 'All')}` "
+                f"on `{slate_meta.get('slate_date') or dk_slate_date.isoformat()}` "
+                f"(slate_id={slate_meta.get('slate_id')}, games={slate_meta.get('game_count')}, "
+                f"coverage={float(coverage.get('coverage_pct') or 0.0):.1f}%)."
+            )
+
+            if resolved_slate_df.empty:
+                if active_source == "legacy_dk_fallback" and not legacy_dk_slate_df.empty:
+                    st.info("No resolved RotoWire slate is available. The uploaded DraftKings slate is controlling the optimizer.")
+                else:
+                    st.info("No RotoWire slate rows were returned for the selected configuration.")
+            elif coverage_ok:
+                st.success("Full coverage resolved. Lineup generation and DK export are enabled.")
+            else:
+                st.warning(str(active_context.get("coverage_error") or "DK registry coverage is incomplete."))
+
+            if not unresolved_df.empty:
+                st.subheader("Coverage Gaps")
+                st.dataframe(unresolved_df, hide_index=True, use_container_width=True)
+
+                manual_seed = unresolved_df.copy()
+                manual_seed["roster_position"] = manual_seed.get("position", "").map(_default_roster_position)
+                manual_seed["dk_id"] = ""
+                manual_seed["name_plus_id"] = ""
+                manual_seed["reason"] = "manual_alias_review"
+                manual_editor = st.data_editor(
+                    manual_seed[
+                        [
+                            "player_name",
+                            "team_abbr",
+                            "opp_abbr",
+                            "salary",
+                            "position",
+                            "dk_resolution_status",
+                            "dk_match_reason",
+                            "roster_position",
+                            "dk_id",
+                            "name_plus_id",
+                            "reason",
+                        ]
+                    ],
+                    num_rows="dynamic",
+                    use_container_width=True,
+                    key="manual_dk_resolution_editor",
+                    disabled=[
                         "player_name",
                         "team_abbr",
                         "opp_abbr",
                         "salary",
-                        "position",
                         "dk_resolution_status",
                         "dk_match_reason",
-                        "roster_position",
-                        "dk_id",
-                        "name_plus_id",
-                        "reason",
-                    ]
-                ],
-                num_rows="dynamic",
-                use_container_width=True,
-                key="manual_dk_resolution_editor",
-                disabled=[
-                    "player_name",
-                    "team_abbr",
-                    "opp_abbr",
-                    "salary",
-                    "dk_resolution_status",
-                    "dk_match_reason",
-                ],
-            )
-            save_manual_resolution_clicked = st.button(
-                "Save Manual Alias Repairs",
-                key="save_manual_dk_alias_repairs",
-            )
-            if save_manual_resolution_clicked:
-                try:
-                    manual_summary = save_manual_resolution_overrides(
-                        overrides_frame=manual_editor,
-                        selected_date=dk_slate_date,
-                        slate_key=dk_slate_key,
-                        bucket_name=bucket_name,
-                        gcp_project=gcp_project,
-                        service_account_json=cred_json,
-                        service_account_json_b64=cred_json_b64,
-                    )
-                    st.session_state["cbb_manual_resolution_summary"] = manual_summary
-                    load_resolved_rotowire_slate_context.clear()
-                    load_active_slate_context.clear()
-                    st.success(
-                        f"Saved {int(manual_summary.get('saved_override_count') or 0)} manual override(s) "
-                        "and reloaded coverage."
-                    )
-                    st.rerun()
-                except Exception as exc:
-                    st.exception(exc)
-
-        if not resolved_slate_df.empty:
-            st.dataframe(resolved_slate_df, hide_index=True, use_container_width=True)
-
-        st.subheader("Active Slate Source")
-        a1, a2, a3, a4 = st.columns(4)
-        a1.metric("Source", active_source_label or "Unavailable")
-        a2.metric("Active Rows", int(len(active_slate_df)))
-        a3.metric("Legacy DK Rows", int(len(legacy_dk_slate_df)))
-        a4.metric("RotoWire Coverage %", f"{float(coverage.get('coverage_pct') or 0.0):.1f}")
-        if active_ready:
-            if active_source == "legacy_dk_fallback":
-                st.warning(
-                    active_source_detail
-                    or "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+                    ],
                 )
-            else:
-                st.success(active_source_detail or "Using resolved RotoWire slate as the active optimizer source.")
-        else:
-            st.error(active_source_detail or "No active slate source is ready.")
-
-        if active_source == "legacy_dk_fallback" and not active_slate_df.empty:
-            st.caption(
-                "RotoWire mismatch coverage is still shown above for repair. The optimizer will use the cached DK slate, "
-                "and RotoWire priors will attach only where player/team matching still succeeds."
-            )
-            st.dataframe(active_slate_df, hide_index=True, use_container_width=True)
-
-        st.subheader("LineupStarter Priors")
-        st.caption(
-            "Upload the LineupStarter slate CSV to add projected points and projected ownership. "
-            "The saved file is reused by Slate + Vegas and the lineup generator."
-        )
-        lineupstarter_upload_summary = st.session_state.get("cbb_lineupstarter_upload_summary") or {}
-        if lineupstarter_upload_summary:
-            st.json(
-                {
-                    "selected_date": lineupstarter_upload_summary.get("selected_date"),
-                    "rows_saved": lineupstarter_upload_summary.get("rows_saved"),
-                    "players": lineupstarter_upload_summary.get("players"),
-                    "blob_name": lineupstarter_upload_summary.get("blob_name"),
-                    "coverage": lineupstarter_upload_summary.get("coverage"),
-                }
-            )
-
-        lineupstarter_upload = st.file_uploader(
-            "Upload LineupStarter CSV",
-            type=["csv"],
-            key="lineupstarter_projection_upload",
-            help="Include player, salary, projected points, and projected ownership columns.",
-        )
-        preview_lineupstarter_df = pd.DataFrame()
-        preview_lineupstarter_coverage: dict[str, Any] = {}
-        if active_source == "legacy_dk_fallback":
-            st.caption("LineupStarter mapping is using the active legacy DK fallback slate for this date.")
-        if lineupstarter_upload is not None and not active_slate_df.empty:
-            preview_payload = _read_uploaded_csv_frame(lineupstarter_upload)
-            if preview_payload.get("decode_warning"):
-                st.caption(str(preview_payload.get("decode_warning")))
-            preview_frame = preview_payload.get("frame")
-            if not isinstance(preview_frame, pd.DataFrame) or preview_frame.empty:
-                parse_error = str(preview_payload.get("parse_error") or "").strip()
-                if parse_error:
-                    st.warning(f"Could not parse LineupStarter upload: {parse_error}")
-            else:
-                preview_lineupstarter_df, preview_lineupstarter_coverage = normalize_lineupstarter_upload_frame(
-                    preview_frame,
-                    slate_df=active_slate_df,
+                save_manual_resolution_clicked = st.button(
+                    "Save Manual Alias Repairs",
+                    key="save_manual_dk_alias_repairs",
                 )
-                lp1, lp2, lp3, lp4 = st.columns(4)
-                lp1.metric("Preview Rows", int(preview_lineupstarter_coverage.get("rows_total") or 0))
-                lp2.metric("Matched", int(preview_lineupstarter_coverage.get("matched_rows") or 0))
-                lp3.metric("Unresolved", int(preview_lineupstarter_coverage.get("unresolved_rows") or 0))
-                lp4.metric("Coverage %", f"{float(preview_lineupstarter_coverage.get('coverage_pct') or 0.0):.1f}")
-                if bool(preview_lineupstarter_coverage.get("fully_resolved")):
-                    st.success("LineupStarter upload maps cleanly to the current active DK slate.")
-                else:
-                    st.warning("LineupStarter upload still has unresolved rows. Save is blocked until coverage is 100%.")
-                    unresolved_preview = preview_lineupstarter_df.loc[
-                        preview_lineupstarter_df["lineupstarter_match_status"] != "matched"
-                    ].copy()
-                    if not unresolved_preview.empty:
-                        preview_cols = [
-                            c
-                            for c in [
-                                "lineupstarter_source_player_name",
-                                "lineupstarter_source_team_abbr",
-                                "lineupstarter_source_position",
-                                "Salary",
-                                "lineupstarter_match_method",
-                                "lineupstarter_match_status",
-                            ]
-                            if c in unresolved_preview.columns
-                        ]
-                        st.dataframe(unresolved_preview[preview_cols], hide_index=True, use_container_width=True)
+                if save_manual_resolution_clicked:
+                    try:
+                        manual_summary = save_manual_resolution_overrides(
+                            overrides_frame=manual_editor,
+                            selected_date=dk_slate_date,
+                            slate_key=dk_slate_key,
+                            bucket_name=bucket_name,
+                            gcp_project=gcp_project,
+                            service_account_json=cred_json,
+                            service_account_json_b64=cred_json_b64,
+                        )
+                        st.session_state["cbb_manual_resolution_summary"] = manual_summary
+                        load_resolved_rotowire_slate_context.clear()
+                        load_active_slate_context.clear()
+                        st.success(
+                            f"Saved {int(manual_summary.get('saved_override_count') or 0)} manual override(s) "
+                            "and reloaded coverage."
+                        )
+                        st.rerun()
+                    except Exception as exc:
+                        st.exception(exc)
 
-        save_lineupstarter_clicked = st.button(
-            "Save LineupStarter Priors to GCS",
-            key="save_lineupstarter_priors",
-            disabled=(not active_ready),
-        )
-        if save_lineupstarter_clicked:
-            if not bucket_name:
-                st.error("Set a GCS bucket before saving LineupStarter priors.")
-            elif active_slate_df.empty or not active_ready:
-                st.error("Load an active DK slate source before saving LineupStarter priors.")
-            elif lineupstarter_upload is None:
-                st.error("Choose a LineupStarter CSV file before saving.")
-            elif preview_lineupstarter_coverage and not bool(preview_lineupstarter_coverage.get("fully_resolved")):
-                st.error("LineupStarter upload is not fully mapped to the current DK slate yet.")
-            else:
-                try:
-                    lineupstarter_summary = import_lineupstarter_projection_csv(
-                        csv_bytes=lineupstarter_upload.getvalue(),
-                        resolved_slate_df=active_slate_df,
-                        selected_date=dk_slate_date,
-                        slate_key=dk_slate_key,
-                        bucket_name=bucket_name,
-                        gcp_project=gcp_project or None,
-                        service_account_json=cred_json,
-                        service_account_json_b64=cred_json_b64,
-                    )
-                    st.session_state["cbb_lineupstarter_upload_summary"] = lineupstarter_summary
-                    load_lineupstarter_frame_for_date.clear()
-                    st.success(
-                        f"Saved LineupStarter priors for {int(lineupstarter_summary.get('players') or 0)} players "
-                        f"to `{lineupstarter_summary.get('blob_name')}`."
-                    )
-                    st.rerun()
-                except Exception as exc:
-                    st.exception(exc)
-
-        if not bucket_name:
-            st.info("Set a GCS bucket in sidebar to load saved LineupStarter priors.")
-        else:
-            saved_lineupstarter_df = load_lineupstarter_frame_for_date(
-                bucket_name=bucket_name,
-                selected_date=dk_slate_date,
-                selected_slate_key=dk_slate_key,
-                gcp_project=gcp_project or None,
-                service_account_json=cred_json,
-                service_account_json_b64=cred_json_b64,
-            )
-            if saved_lineupstarter_df.empty:
-                st.info("No saved LineupStarter priors found for the selected date.")
-            else:
-                ls1, ls2, ls3, ls4 = st.columns(4)
-                ls1.metric("Saved Rows", int(len(saved_lineupstarter_df)))
-                ls2.metric(
-                    "Players",
-                    int(saved_lineupstarter_df["ID"].nunique()) if "ID" in saved_lineupstarter_df.columns else int(len(saved_lineupstarter_df)),
-                )
-                ls3.metric(
-                    "Projection Rows",
-                    int(pd.to_numeric(saved_lineupstarter_df.get("lineupstarter_projected_points"), errors="coerce").notna().sum()),
-                )
-                ls4.metric(
-                    "Ownership Rows",
-                    int(pd.to_numeric(saved_lineupstarter_df.get("lineupstarter_projected_ownership"), errors="coerce").notna().sum()),
-                )
-                saved_cols = [
-                    c
-                    for c in [
-                        "Name + ID",
-                        "Name",
-                        "TeamAbbrev",
-                        "Salary",
-                        "lineupstarter_projected_points",
-                        "lineupstarter_projected_ownership",
-                        "lineupstarter_source_player_name",
-                        "lineupstarter_match_method",
-                    ]
-                    if c in saved_lineupstarter_df.columns
-                ]
-                st.dataframe(saved_lineupstarter_df[saved_cols], hide_index=True, use_container_width=True)
+            if not resolved_slate_df.empty:
+                st.dataframe(resolved_slate_df, hide_index=True, use_container_width=True)
     except Exception as exc:
         st.exception(exc)
 
@@ -4844,7 +4916,7 @@ with tab_dk:
             if dk_df.empty:
                 st.warning(
                     "No cached DraftKings slate found for selected date+slate. "
-                    "Use the legacy upload above if you still need a stored CSV."
+                    "Upload a DraftKings slate CSV above to continue."
                 )
             else:
                 st.caption(f"Rows: {len(dk_df):,} | Columns: {len(dk_df.columns):,}")
@@ -4852,7 +4924,27 @@ with tab_dk:
         except Exception as exc:
             st.exception(exc)
 
-with tab_supplement_1:
+with tab_lineupstarter:
+    render_lineupstarter_tab(
+        selected_date=dk_slate_date,
+        selected_slate_key=shared_slate_key,
+        selected_slate_label=shared_slate_label,
+        contest_type=rotowire_contest_type,
+        slate_name=rotowire_slate_name,
+        slate_id_text=rotowire_slate_id_text,
+        site_id=int(rotowire_site_id),
+        cookie_header=rotowire_cookie,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=cred_json,
+        service_account_json_b64=cred_json_b64,
+    )
+
+with tab_supplements:
+    st.subheader("Supplements")
+    st.caption(
+        "Optional advanced overlays. Most slates should only need the DraftKings upload plus LineupStarter."
+    )
     render_slate_supplement_tab(
         slot_index=1,
         selected_date=dk_slate_date,
@@ -4868,8 +4960,7 @@ with tab_supplement_1:
         service_account_json=cred_json,
         service_account_json_b64=cred_json_b64,
     )
-
-with tab_supplement_2:
+    st.markdown("---")
     render_slate_supplement_tab(
         slot_index=2,
         selected_date=dk_slate_date,
