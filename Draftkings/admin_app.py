@@ -69,6 +69,7 @@ from college_basketball_dfs.cbb_ai_review import (
     GAME_SLATE_AI_REVIEW_SYSTEM_PROMPT,
     MARKET_CORRELATION_AI_REVIEW_SYSTEM_PROMPT,
     build_ai_review_user_prompt,
+    build_lineup_settings_snapshot,
     build_daily_ai_review_packet,
     build_tournament_postmortem_glossary,
     build_game_slate_ai_review_packet,
@@ -539,6 +540,12 @@ def build_lineup_consistency_packet(
 ) -> dict[str, Any]:
     run_data = run_bundle if isinstance(run_bundle, dict) else {}
     settings = run_data.get("settings") if isinstance(run_data.get("settings"), dict) else {}
+    settings_snapshot = build_lineup_settings_snapshot(settings=settings)
+    contest_profile_snapshot = (
+        settings_snapshot.get("contest_profile_snapshot")
+        if isinstance(settings_snapshot.get("contest_profile_snapshot"), dict)
+        else {}
+    )
     version_data = active_version if isinstance(active_version, dict) else {}
     version_warnings = [str(x).strip() for x in (version_data.get("warnings") or []) if str(x).strip()]
     low_own_candidates_unavailable = any(
@@ -618,6 +625,26 @@ def build_lineup_consistency_packet(
             target="pre-game readiness checks",
             actual="phantom metrics unavailable (optional)",
             note="Core consistency checks run before lock without phantom results.",
+        )
+    if not bool(settings_snapshot.get("settings_available")):
+        add_check(
+            area="Run Settings",
+            status="warn",
+            target="saved lineup settings available",
+            actual="missing settings snapshot",
+            gap="settings unavailable",
+            note="Historical run may predate saved lineup settings and auto contest-profile metadata.",
+        )
+    elif str(contest_profile_snapshot.get("contest_profile_mode") or "") == "auto" and not bool(
+        contest_profile_snapshot.get("auto_profile_available")
+    ):
+        add_check(
+            area="Contest Profile Context",
+            status="warn",
+            target="saved auto contest-profile metadata",
+            actual="auto mode without auto metadata",
+            gap="context incomplete",
+            note="Review can use effective settings, but profile label/bucket context is missing.",
         )
 
     lineup_player_ids: list[set[str]] = []
@@ -1064,17 +1091,7 @@ def build_lineup_consistency_packet(
             "warn_checks": warn_count,
             "fail_checks": fail_count,
         },
-        "settings_snapshot": {
-            "lineup_count": _safe_int_value(settings.get("lineup_count"), default=0),
-            "contest_type": str(settings.get("contest_type") or ""),
-            "salary_left_target": settings.get("salary_left_target"),
-            "low_own_bucket_exposure_pct": settings.get("low_own_bucket_exposure_pct"),
-            "low_own_bucket_min_per_lineup": settings.get("low_own_bucket_min_per_lineup"),
-            "ceiling_boost_lineup_pct": settings.get("ceiling_boost_lineup_pct"),
-            "apply_game_agent_stack_bias": bool(settings.get("apply_game_agent_stack_bias")),
-            "preferred_game_keys": sorted(preferred_games),
-            "promote_phantom_constructions": bool(settings.get("promote_phantom_constructions")),
-        },
+        "settings_snapshot": settings_snapshot,
         "checks": checks,
         "gap_candidates": gap_rows,
         "upside_candidates": upside_rows,
@@ -6881,6 +6898,7 @@ with tab_lineups:
                         "Constraints:\n"
                         "- Use only evidence in the JSON packet.\n"
                         "- Cite exact metric names and values.\n"
+                        "- Use `settings_snapshot.contest_profile_snapshot` when evaluating slate-size and contest-fit decisions.\n"
                         "- If data is insufficient, state exactly what is missing.\n\n"
                         "JSON packet:\n"
                         f"{consistency_packet_json}\n"
@@ -8393,6 +8411,7 @@ with tab_tournament_review:
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
             )
+            selected_manifest: dict[str, Any] = {}
             if not phantom_manifests:
                 st.info("No saved lineup runs found for this date.")
             else:
@@ -9140,6 +9159,15 @@ with tab_tournament_review:
                 ownership_tracker_missing_game_context = int(
                     sum(1 for row in ownership_tracker_top_rows if not str((row or {}).get("game_key") or "").strip())
                 )
+                postmortem_run_settings = (
+                    selected_manifest.get("settings") if isinstance(selected_manifest.get("settings"), dict) else {}
+                )
+                lineup_settings_snapshot = build_lineup_settings_snapshot(settings=postmortem_run_settings)
+                contest_profile_snapshot = (
+                    lineup_settings_snapshot.get("contest_profile_snapshot")
+                    if isinstance(lineup_settings_snapshot.get("contest_profile_snapshot"), dict)
+                    else {}
+                )
                 packet_warnings: list[str] = []
                 if bool(resolved_postmortem_contest.get("contest_id_placeholder")):
                     packet_warnings.append(
@@ -9158,6 +9186,17 @@ with tab_tournament_review:
                     packet_warnings.append(
                         f"`ownership_miss_tracker_top` is missing game context on {ownership_tracker_missing_game_context} row(s). "
                         "Avoid game-environment claims for those players."
+                    )
+                if not bool(lineup_settings_snapshot.get("settings_available")):
+                    packet_warnings.append(
+                        "Saved lineup settings are unavailable for this run. Do not infer contest-profile or lineup-tuning intent."
+                    )
+                elif str(contest_profile_snapshot.get("contest_profile_mode") or "") == "auto" and not bool(
+                    contest_profile_snapshot.get("auto_profile_available")
+                ):
+                    packet_warnings.append(
+                        "Auto contest-profile mode is recorded, but the saved auto-profile recommendation metadata is missing. "
+                        "Use the effective settings, but avoid claiming a specific auto profile label or bucket."
                     )
 
                 rw1, rw2, rw3, rw4, rw5 = st.columns(5)
@@ -9513,6 +9552,8 @@ with tab_tournament_review:
                         "filename_contest_id": resolved_postmortem_contest.get("filename_contest_id"),
                     },
                     "glossary": postmortem_glossary,
+                    "lineup_settings_snapshot": lineup_settings_snapshot,
+                    "contest_profile_snapshot": contest_profile_snapshot,
                     "data_quality": {
                         "mapped_player_coverage_pct": round(100.0 * float(mapping_coverage), 2),
                         "projected_ownership_rows": int(projected_own_rows),
@@ -9576,6 +9617,8 @@ with tab_tournament_review:
                     "- Use only evidence in the JSON packet.\n"
                     "- Cite exact metric names/values.\n"
                     "- Read `glossary` first and follow those definitions exactly.\n"
+                    "- Use `lineup_settings_snapshot` and `contest_profile_snapshot` when judging whether the lineup strategy fit the slate and contest format.\n"
+                    "- If `contest_profile_snapshot.settings_available` is false, say contest-profile context was unavailable instead of inferring it.\n"
                     "- Treat `field_ownership_pct` as the canonical actual ownership for packet-level ownership error claims.\n"
                     "- Treat `actual_ownership_from_file` as supporting reference only unless a table explicitly states otherwise.\n"
                     "- `winner_gap` is defined as `winner_points - best_actual_points`; negative means phantoms beat the winner.\n"

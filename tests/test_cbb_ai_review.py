@@ -5,11 +5,13 @@ from college_basketball_dfs.cbb_ai_review import (
     AI_REVIEW_SCHEMA_VERSION,
     GAME_SLATE_AI_REVIEW_SCHEMA_VERSION,
     build_ai_review_user_prompt,
+    build_contest_profile_snapshot,
     build_daily_ai_review_packet,
     build_game_slate_ai_review_packet,
     build_game_slate_ai_review_user_prompt,
     build_global_ai_review_packet,
     build_global_ai_review_user_prompt,
+    build_lineup_settings_snapshot,
     build_market_correlation_ai_review_packet,
     build_market_correlation_ai_review_user_prompt,
     build_tournament_postmortem_glossary,
@@ -541,12 +543,83 @@ def test_resolve_postmortem_contest_id_prefers_upload_filename_when_input_placeh
     assert bool(resolved["contest_id_placeholder"]) is False
 
 
+def test_build_contest_profile_snapshot_prefers_effective_saved_settings() -> None:
+    snapshot = build_contest_profile_snapshot(
+        settings={
+            "contest_profile_mode": "auto",
+            "contest_type": "Large GPP",
+            "contest_field_size": 12000,
+            "contest_entry_limit": "20_max",
+            "contest_entry_limit_label": "20-Max",
+            "spike_max_pair_overlap": 3,
+            "low_own_bucket_exposure_pct": 34.0,
+            "low_own_bucket_min_per_lineup": 1,
+            "low_own_bucket_max_projected_ownership": 9.0,
+            "low_own_bucket_min_projection": 18.0,
+            "ceiling_boost_lineup_pct": 37.0,
+            "ceiling_boost_stack_bonus": 2.7,
+            "ceiling_boost_salary_left_target": 140,
+            "auto_contest_profile_meta": {
+                "profile_label": "Large-Field Ceiling",
+                "field_size_bucket": "mega_field",
+                "field_size": 12000,
+                "entry_limit": "20_max",
+                "slate_game_count": 4,
+                "short_slate": True,
+                "spike_max_pair_overlap": 2,
+                "low_own_bucket_exposure_pct": 31.0,
+                "ceiling_boost_lineup_pct": 35.0,
+            },
+        }
+    )
+    assert snapshot["settings_available"] is True
+    assert snapshot["auto_profile_available"] is True
+    assert snapshot["contest_profile_mode"] == "auto"
+    assert snapshot["profile_label"] == "Large-Field Ceiling"
+    assert snapshot["field_size_bucket"] == "mega_field"
+    assert snapshot["field_size"] == 12000
+    assert snapshot["entry_limit"] == "20_max"
+    assert snapshot["entry_limit_label"] == "20-Max"
+    assert snapshot["slate_game_count"] == 4
+    assert snapshot["short_slate"] is True
+    assert snapshot["spike_max_pair_overlap"] == 3
+    assert snapshot["low_own_bucket_exposure_pct"] == 34.0
+    assert snapshot["ceiling_boost_lineup_pct"] == 37.0
+
+
+def test_build_lineup_settings_snapshot_includes_contest_profile_and_games() -> None:
+    snapshot = build_lineup_settings_snapshot(
+        settings={
+            "lineup_count": 20,
+            "contest_type": "Small GPP",
+            "salary_left_target": 100,
+            "low_own_bucket_exposure_pct": 18.0,
+            "low_own_bucket_min_per_lineup": 1,
+            "ceiling_boost_lineup_pct": 22.0,
+            "apply_game_agent_stack_bias": True,
+            "game_agent_bias_meta": {"applied_game_keys": ["sfo@orst", "pac@stc"]},
+            "promote_phantom_constructions": True,
+            "contest_profile_mode": "manual",
+            "contest_field_size": 457,
+            "contest_entry_limit": "single_entry",
+        }
+    )
+    assert snapshot["settings_available"] is True
+    assert snapshot["lineup_count"] == 20
+    assert snapshot["preferred_game_keys"] == ["PAC@STC", "SFO@ORST"]
+    assert snapshot["contest_profile_snapshot"]["contest_profile_mode"] == "manual"
+    assert snapshot["contest_profile_snapshot"]["entry_limit"] == "single_entry"
+    assert snapshot["contest_profile_snapshot"]["field_size"] == 457
+
+
 def test_build_tournament_postmortem_glossary_defines_key_semantics() -> None:
     glossary = build_tournament_postmortem_glossary(missed_stack_underexposure_ratio=0.6)
     assert "Canonical actual ownership" in glossary["ownership"]["field_ownership_pct"]
     assert "`field_ownership_pct - projected_ownership`" in glossary["ownership"]["ownership_diff_vs_proj"]
     assert "winner_points - best_actual_points" in glossary["phantom"]["winner_gap"]
     assert "60%" in glossary["stacks"]["missed_stack_underexposure_ratio"]
+    assert "auto-derived" in glossary["contest_profile"]["contest_profile_mode"]
+    assert "Saved effective lineup-generation settings" in glossary["lineup_settings"]["lineup_settings_snapshot"]
 
 
 def test_request_openai_review_uses_output_text(monkeypatch) -> None:

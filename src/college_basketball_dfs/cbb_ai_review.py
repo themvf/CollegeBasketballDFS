@@ -80,6 +80,31 @@ def _to_int(value: Any, default: int = 0) -> int:
         return int(default)
 
 
+def _to_optional_int(value: Any) -> int | None:
+    as_float = _to_float(value)
+    if as_float is None:
+        return None
+    try:
+        return int(as_float)
+    except (TypeError, ValueError, OverflowError):
+        return None
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str):
+            cleaned = value.strip()
+            if cleaned:
+                return cleaned
+            continue
+        if isinstance(value, (list, tuple, set, dict)) and not value:
+            continue
+        return value
+    return None
+
+
 def _norm_name(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
 
@@ -164,6 +189,134 @@ def resolve_postmortem_contest_id(
     }
 
 
+def _entry_limit_label(value: Any) -> str:
+    key = str(value or "").strip().lower()
+    if key == "single_entry":
+        return "Single Entry"
+    if key == "3_max":
+        return "3-Max"
+    if key == "10_max":
+        return "10-Max"
+    if key == "20_max":
+        return "20-Max"
+    if key == "150_max":
+        return "150-Max+"
+    return str(value or "").strip()
+
+
+def _normalize_snapshot_game_keys(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    keys = {
+        str(value or "").strip().upper()
+        for value in values
+        if str(value or "").strip()
+    }
+    return sorted(keys)
+
+
+def build_contest_profile_snapshot(
+    *,
+    settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    settings_map = settings if isinstance(settings, dict) else {}
+    auto_meta = settings_map.get("auto_contest_profile_meta")
+    auto_meta = auto_meta if isinstance(auto_meta, dict) else {}
+
+    contest_profile_mode = str(settings_map.get("contest_profile_mode") or "").strip().lower()
+    contest_type = str(settings_map.get("contest_type") or "").strip()
+    entry_limit = str(
+        _first_present(settings_map.get("contest_entry_limit"), auto_meta.get("entry_limit")) or ""
+    ).strip()
+    entry_limit_label = str(
+        _first_present(settings_map.get("contest_entry_limit_label"), _entry_limit_label(entry_limit)) or ""
+    ).strip()
+
+    return {
+        "settings_available": bool(settings_map),
+        "auto_profile_available": bool(auto_meta),
+        "contest_profile_mode": contest_profile_mode,
+        "contest_type": contest_type,
+        "field_size": _to_optional_int(_first_present(settings_map.get("contest_field_size"), auto_meta.get("field_size"))),
+        "field_size_bucket": str(auto_meta.get("field_size_bucket") or "").strip(),
+        "entry_limit": entry_limit,
+        "entry_limit_label": entry_limit_label,
+        "profile_label": str(auto_meta.get("profile_label") or "").strip(),
+        "slate_game_count": _to_optional_int(auto_meta.get("slate_game_count")),
+        "short_slate": bool(auto_meta.get("short_slate")) if auto_meta else None,
+        "spike_max_pair_overlap": _to_optional_int(
+            _first_present(settings_map.get("spike_max_pair_overlap"), auto_meta.get("spike_max_pair_overlap"))
+        ),
+        "low_own_bucket_exposure_pct": _to_float(
+            _first_present(
+                settings_map.get("low_own_bucket_exposure_pct"),
+                auto_meta.get("low_own_bucket_exposure_pct"),
+            )
+        ),
+        "low_own_bucket_min_per_lineup": _to_optional_int(
+            _first_present(
+                settings_map.get("low_own_bucket_min_per_lineup"),
+                auto_meta.get("low_own_bucket_min_per_lineup"),
+            )
+        ),
+        "low_own_bucket_max_projected_ownership": _to_float(
+            _first_present(
+                settings_map.get("low_own_bucket_max_projected_ownership"),
+                auto_meta.get("low_own_bucket_max_projected_ownership"),
+            )
+        ),
+        "low_own_bucket_min_projection": _to_float(
+            _first_present(
+                settings_map.get("low_own_bucket_min_projection"),
+                auto_meta.get("low_own_bucket_min_projection"),
+            )
+        ),
+        "ceiling_boost_lineup_pct": _to_float(
+            _first_present(
+                settings_map.get("ceiling_boost_lineup_pct"),
+                auto_meta.get("ceiling_boost_lineup_pct"),
+            )
+        ),
+        "ceiling_boost_stack_bonus": _to_float(
+            _first_present(
+                settings_map.get("ceiling_boost_stack_bonus"),
+                auto_meta.get("ceiling_boost_stack_bonus"),
+            )
+        ),
+        "ceiling_boost_salary_left_target": _to_optional_int(
+            _first_present(
+                settings_map.get("ceiling_boost_salary_left_target"),
+                auto_meta.get("ceiling_boost_salary_left_target"),
+            )
+        ),
+    }
+
+
+def build_lineup_settings_snapshot(
+    *,
+    settings: dict[str, Any] | None,
+) -> dict[str, Any]:
+    settings_map = settings if isinstance(settings, dict) else {}
+    game_agent_meta = settings_map.get("game_agent_bias_meta")
+    game_agent_meta = game_agent_meta if isinstance(game_agent_meta, dict) else {}
+    preferred_games = _normalize_snapshot_game_keys(
+        _first_present(game_agent_meta.get("applied_game_keys"), settings_map.get("game_agent_focus_games"), [])
+    )
+    return {
+        "settings_available": bool(settings_map),
+        "lineup_count": _to_optional_int(settings_map.get("lineup_count")),
+        "contest_type": str(settings_map.get("contest_type") or "").strip(),
+        "salary_left_target": _to_float(settings_map.get("salary_left_target")),
+        "low_own_bucket_exposure_pct": _to_float(settings_map.get("low_own_bucket_exposure_pct")),
+        "low_own_bucket_min_per_lineup": _to_optional_int(settings_map.get("low_own_bucket_min_per_lineup")),
+        "ceiling_boost_lineup_pct": _to_float(settings_map.get("ceiling_boost_lineup_pct")),
+        "apply_game_agent_stack_bias": bool(settings_map.get("apply_game_agent_stack_bias")),
+        "preferred_game_keys": preferred_games,
+        "promote_phantom_constructions": bool(settings_map.get("promote_phantom_constructions")),
+        "contest_profile_snapshot": build_contest_profile_snapshot(settings=settings_map),
+    }
+
+
 def build_tournament_postmortem_glossary(
     *,
     missed_stack_underexposure_ratio: float,
@@ -209,6 +362,28 @@ def build_tournament_postmortem_glossary(
             "projected_ownership_rows": "Count of players with projected ownership available in the reviewed exposure table.",
             "actual_ownership_rows": "Count of players with actual ownership signals available in the reviewed exposure table.",
             "mapped_player_coverage_pct": "Share of parsed standings player rows that mapped successfully to slate/player results data.",
+        },
+        "lineup_settings": {
+            "lineup_settings_snapshot": (
+                "Saved effective lineup-generation settings for the reviewed run. Values should reflect the actual inputs used after any auto-profile adjustments."
+            ),
+            "salary_left_target": "Requested salary-left target used during lineup generation.",
+            "low_own_bucket_exposure_pct": "Target percentage of generated lineups that should include at least one low-owned upside candidate.",
+            "ceiling_boost_lineup_pct": "Target percentage of generated lineups that should use the ceiling-boost archetype.",
+        },
+        "contest_profile": {
+            "settings_available": "True when the reviewed run saved lineup-generation settings. False usually means the run predates this metadata.",
+            "auto_profile_available": "True when the reviewed run saved the auto-derived contest-profile recommendation metadata.",
+            "contest_profile_mode": "Whether lineup settings were entered manually or auto-derived (`manual` or `auto`).",
+            "field_size": "Contest field size used to shape lineup settings.",
+            "field_size_bucket": "Derived field-size tier used by the auto profile (`small_field`, `mid_field`, `large_field`, `mega_field`).",
+            "entry_limit": "Normalized entry-limit key used for lineup tuning (for example `single_entry`, `10_max`, or `20_max`).",
+            "profile_label": "Human-readable label for the auto contest profile recommendation.",
+            "slate_game_count": "Number of games detected on the loaded slate when the auto profile was derived.",
+            "short_slate": "True when the auto profile treated the slate as a short slate (4 games or fewer).",
+            "spike_max_pair_overlap": "Maximum shared-player overlap allowed for spike-style lineup diversification.",
+            "low_own_bucket_exposure_pct": "Effective low-owned lineup injection target after contest-profile adjustments.",
+            "ceiling_boost_lineup_pct": "Effective ceiling-boost lineup share after contest-profile adjustments.",
         },
     }
 
