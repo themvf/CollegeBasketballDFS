@@ -4,6 +4,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_ownership_projection_diagnostics,
+    build_ownership_teacher_review,
     build_player_exposure_comparison,
     build_projection_bias_heatmap,
     build_segment_impact_table,
@@ -362,6 +363,116 @@ def test_player_exposure_ownership_alias_and_name_fallback() -> None:
     assert round(float(row["projected_ownership"]), 2) == 11.5
     assert round(float(row["actual_ownership_from_file"]), 2) == 18.0
     assert round(float(row["field_ownership_pct"]), 2) == 20.0
+
+
+def test_player_exposure_keeps_ownership_teacher_columns() -> None:
+    expanded = pd.DataFrame(
+        [
+            {"EntryId": "1", "resolved_name": "Alpha One", "TeamAbbrev": "AAA"},
+            {"EntryId": "2", "resolved_name": "Alpha One", "TeamAbbrev": "AAA"},
+        ]
+    )
+    projection_df = pd.DataFrame(
+        [
+            {
+                "ID": "101",
+                "Name": "Alpha One",
+                "TeamAbbrev": "AAA",
+                "Position": "PG",
+                "Salary": 4800,
+                "ownership_model_raw": 10.0,
+                "projected_ownership_pre_lineupstarter": 10.0,
+                "lineupstarter_projected_ownership": 14.0,
+                "projected_ownership": 12.5,
+                "ownership_consensus": 12.5,
+                "minutes_stability_label": "Stable",
+                "role_change_label": "Rising",
+            }
+        ]
+    )
+    exposure = build_player_exposure_comparison(
+        expanded_players_df=expanded,
+        entry_count=10,
+        projection_df=projection_df,
+        actual_ownership_df=pd.DataFrame([{"player_name": "Alpha One", "actual_ownership": 18.0}]),
+        actual_results_df=None,
+    )
+    assert len(exposure) == 1
+    row = exposure.iloc[0]
+    assert str(row["ID"]) == "101"
+    assert round(float(row["ownership_model_raw"]), 2) == 10.0
+    assert round(float(row["lineupstarter_projected_ownership"]), 2) == 14.0
+    assert round(float(row["ownership_consensus"]), 2) == 12.5
+    assert str(row["minutes_stability_label"]) == "Stable"
+    assert str(row["role_change_label"]) == "Rising"
+
+
+def test_build_ownership_teacher_review_summarizes_teacher_signal() -> None:
+    exposure = pd.DataFrame(
+        [
+            {
+                "Name": "Alpha One",
+                "TeamAbbrev": "AAA",
+                "ID": "101",
+                "Position": "PG",
+                "Salary": 4800,
+                "field_ownership_pct": 15.0,
+                "actual_ownership_from_file": 15.0,
+                "ownership_model_raw": 10.0,
+                "lineupstarter_projected_ownership": 14.0,
+                "projected_ownership": 12.0,
+                "ownership_consensus": 12.0,
+                "minutes_stability_label": "Stable",
+                "role_change_label": "Rising",
+            },
+            {
+                "Name": "Bravo Two",
+                "TeamAbbrev": "BBB",
+                "ID": "102",
+                "Position": "PF",
+                "Salary": 7200,
+                "field_ownership_pct": 16.0,
+                "actual_ownership_from_file": 16.0,
+                "ownership_model_raw": 20.0,
+                "lineupstarter_projected_ownership": 18.0,
+                "projected_ownership": 19.0,
+                "ownership_consensus": 19.0,
+                "minutes_stability_label": "Volatile",
+                "role_change_label": "Falling",
+            },
+            {
+                "Name": "Charlie Three",
+                "TeamAbbrev": "CCC",
+                "ID": "103",
+                "Position": "C",
+                "Salary": 9800,
+                "field_ownership_pct": 24.0,
+                "actual_ownership_from_file": 24.0,
+                "ownership_model_raw": 25.0,
+                "lineupstarter_projected_ownership": 32.0,
+                "projected_ownership": 28.0,
+                "ownership_consensus": 28.0,
+                "minutes_stability_label": "Moderate",
+                "role_change_label": "Neutral",
+            },
+        ]
+    )
+    out = build_ownership_teacher_review(exposure, top_n=2)
+    summary = out["summary"]
+    assert int(summary["samples"]) == 3
+    assert int(summary["teacher_samples"]) == 3
+    assert round(float(summary["raw_mae"]), 2) == round((5.0 + 4.0 + 1.0) / 3.0, 2)
+    assert round(float(summary["teacher_mae"]), 2) == round((1.0 + 2.0 + 8.0) / 3.0, 2)
+    assert round(float(summary["teacher_win_pct"]), 2) == round((2.0 / 3.0) * 100.0, 2)
+    segments = out["segments_df"]
+    assert not segments.empty
+    assert "teacher_gap_bucket" in segments["segment_group"].astype(str).tolist()
+    top_help = out["top_teacher_help_df"]
+    assert not top_help.empty
+    assert str(top_help.iloc[0]["Name"]) == "Alpha One"
+    top_hurt = out["top_teacher_hurt_df"]
+    assert not top_hurt.empty
+    assert str(top_hurt.iloc[0]["Name"]) == "Charlie Three"
 
 
 def test_player_exposure_keeps_rows_when_team_unmapped() -> None:

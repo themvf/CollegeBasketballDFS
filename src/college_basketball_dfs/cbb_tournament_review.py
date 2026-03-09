@@ -26,6 +26,7 @@ DIAGNOSTIC_SALARY_BUCKET_KEYS = {
 }
 DIAGNOSTIC_POSITION_ORDER = ("PG", "SG", "SF", "PF", "C", "UNK")
 OWNERSHIP_BUCKET_ORDER = ("<5%", "5-10%", "10-15%", "15-20%", "20-30%", "30%+")
+OWNERSHIP_TEACHER_GAP_ORDER = ("<= -5", "-5 to -2", "-2 to 2", "2 to 5", ">= 5", "Unknown")
 PROJECTED_OWNERSHIP_ALIASES = (
     "projected_ownership",
     "projected ownership",
@@ -140,6 +141,40 @@ def _ownership_bucket_label(value: Any) -> str:
     if own_val < 30.0:
         return "20-30%"
     return "30%+"
+
+
+def _ownership_teacher_gap_bucket_label(value: Any) -> str:
+    gap = pd.to_numeric(value, errors="coerce")
+    if pd.isna(gap):
+        return "Unknown"
+    gap_val = float(gap)
+    if gap_val <= -5.0:
+        return "<= -5"
+    if gap_val < -2.0:
+        return "-5 to -2"
+    if gap_val <= 2.0:
+        return "-2 to 2"
+    if gap_val < 5.0:
+        return "2 to 5"
+    return ">= 5"
+
+
+def _is_blank_text_series(values: pd.Series) -> pd.Series:
+    return values.astype(str).str.strip().str.lower().isin(NULLISH_TEXT_VALUES)
+
+
+def _coalesce_numeric_series(primary: pd.Series, fallback: pd.Series) -> pd.Series:
+    primary_num = pd.to_numeric(primary, errors="coerce")
+    fallback_num = pd.to_numeric(fallback, errors="coerce")
+    return primary_num.where(primary_num.notna(), fallback_num)
+
+
+def _coalesce_text_series(primary: pd.Series, fallback: pd.Series) -> pd.Series:
+    primary_out = primary.copy()
+    missing = primary_out.isna() | _is_blank_text_series(primary_out)
+    if missing.any():
+        primary_out.loc[missing] = fallback.loc[missing]
+    return primary_out
 
 
 def _resolve_column_alias(df: pd.DataFrame, aliases: tuple[str, ...]) -> str | None:
@@ -590,14 +625,46 @@ def build_player_exposure_comparison(
         proj["name_key_loose"] = proj["Name"].map(_norm_loose)
         proj["TeamAbbrev"] = proj["TeamAbbrev"].astype(str).str.strip().str.upper()
         proj["TeamAbbrev"] = proj["TeamAbbrev"].replace({"NAN": "", "NONE": "", "NULL": ""})
-        keep = [
-            c
-            for c in ["name_key", "TeamAbbrev", "projected_ownership", "blended_projection", "our_dk_projection", "vegas_dk_projection"]
-            if c in proj.columns
+        numeric_projection_cols = [
+            "projected_ownership",
+            "ownership_consensus",
+            "ownership_model_raw",
+            "projected_ownership_pre_lineupstarter",
+            "lineupstarter_projected_ownership",
+            "lineupstarter_ownership_delta",
+            "blended_projection",
+            "projected_dk_points",
+            "our_dk_projection",
+            "vegas_dk_projection",
+            "lineupstarter_projected_points",
+            "lineupstarter_projected_minutes",
+            "Salary",
+            "our_minutes_avg",
+            "our_minutes_last7",
+            "our_minutes_std_last7",
+            "final_projection_stddev",
+            "ceiling_projection",
+            "leverage_score",
+            "game_tail_to_ownership",
+            "game_avg_projected_ownership",
+            "vegas_vs_our_delta_pct",
+        ]
+        text_projection_cols = [
+            "ID",
+            "Position",
+            "game_key",
+            "minutes_stability_label",
+            "role_change_label",
+            "role_change_reason",
+        ]
+        keep = ["name_key", "TeamAbbrev"] + [
+            c for c in [*numeric_projection_cols, *text_projection_cols] if c in proj.columns
         ]
         proj_keep = proj[keep].drop_duplicates(["name_key", "TeamAbbrev"])
         expo = expo.merge(proj_keep, on=["name_key", "TeamAbbrev"], how="left")
-        fallback_keep = [c for c in ["name_key", "name_key_loose", "projected_ownership", "blended_projection", "our_dk_projection", "vegas_dk_projection"] if c in proj.columns]
+        fallback_keep = ["name_key", "name_key_loose"] + [
+            c for c in [*numeric_projection_cols, *text_projection_cols] if c in proj.columns
+        ]
         proj_name_keep = proj[fallback_keep].drop_duplicates(["name_key"])
         expo = expo.merge(
             proj_name_keep,
@@ -605,15 +672,19 @@ def build_player_exposure_comparison(
             how="left",
             suffixes=("", "_name_fallback"),
         )
-        for col in ["projected_ownership", "blended_projection", "our_dk_projection", "vegas_dk_projection"]:
+        for col in numeric_projection_cols:
             fb_col = f"{col}_name_fallback"
             if col not in expo.columns:
                 expo[col] = pd.NA
             if fb_col in expo.columns:
-                expo[col] = pd.to_numeric(expo[col], errors="coerce").where(
-                    pd.to_numeric(expo[col], errors="coerce").notna(),
-                    pd.to_numeric(expo[fb_col], errors="coerce"),
-                )
+                expo[col] = _coalesce_numeric_series(expo[col], expo[fb_col])
+                expo = expo.drop(columns=[fb_col], errors="ignore")
+        for col in text_projection_cols:
+            fb_col = f"{col}_name_fallback"
+            if col not in expo.columns:
+                expo[col] = pd.NA
+            if fb_col in expo.columns:
+                expo[col] = _coalesce_text_series(expo[col], expo[fb_col])
                 expo = expo.drop(columns=[fb_col], errors="ignore")
         expo = expo.drop(columns=["name_key_loose_name_fallback"], errors="ignore")
         if "projected_ownership" not in expo.columns:
@@ -692,6 +763,309 @@ def build_player_exposure_comparison(
 
     expo = expo.sort_values("field_ownership_pct", ascending=False).reset_index(drop=True)
     return expo.drop(columns=["name_key", "name_key_loose"])
+
+
+def build_ownership_teacher_review(
+    exposure_df: pd.DataFrame | None,
+    *,
+    top_n: int = 20,
+) -> dict[str, Any]:
+    empty_rows = pd.DataFrame(
+        columns=[
+            "Name",
+            "TeamAbbrev",
+            "ID",
+            "Position",
+            "Salary",
+            "actual_ownership",
+            "field_ownership_pct",
+            "actual_ownership_from_file",
+            "ownership_model_raw",
+            "projected_ownership_pre_lineupstarter",
+            "lineupstarter_projected_ownership",
+            "ownership_consensus",
+            "projected_ownership",
+            "teacher_gap",
+            "consensus_gap_vs_raw",
+            "training_target_raw_correction",
+            "abs_error_raw",
+            "abs_error_teacher",
+            "abs_error_consensus",
+            "teacher_edge_vs_raw",
+            "consensus_edge_vs_raw",
+            "teacher_win_flag",
+            "consensus_win_flag",
+            "salary_bucket",
+            "primary_position",
+            "teacher_gap_bucket",
+            "minutes_stability_label",
+            "role_change_label",
+            "role_change_reason",
+            "blended_projection",
+            "our_dk_projection",
+            "vegas_dk_projection",
+            "final_dk_points",
+            "leverage_score",
+            "game_tail_to_ownership",
+        ]
+    )
+    empty_segments = pd.DataFrame(
+        columns=[
+            "segment_group",
+            "segment",
+            "samples",
+            "teacher_samples",
+            "avg_actual_ownership",
+            "avg_raw_ownership",
+            "avg_teacher_ownership",
+            "avg_consensus_ownership",
+            "avg_teacher_gap",
+            "avg_training_target_raw_correction",
+            "raw_bias",
+            "teacher_bias",
+            "consensus_bias",
+            "raw_mae",
+            "teacher_mae",
+            "consensus_mae",
+            "teacher_mae_delta_vs_raw",
+            "consensus_mae_delta_vs_raw",
+            "teacher_win_pct",
+            "consensus_win_pct",
+        ]
+    )
+    out: dict[str, Any] = {
+        "summary": {
+            "samples": 0,
+            "teacher_samples": 0,
+            "teacher_available_pct": pd.NA,
+            "raw_mae": pd.NA,
+            "teacher_mae": pd.NA,
+            "consensus_mae": pd.NA,
+            "teacher_mae_delta_vs_raw": pd.NA,
+            "consensus_mae_delta_vs_raw": pd.NA,
+            "raw_bias": pd.NA,
+            "teacher_bias": pd.NA,
+            "consensus_bias": pd.NA,
+            "teacher_win_pct": pd.NA,
+            "consensus_win_pct": pd.NA,
+            "teacher_avg_gap": pd.NA,
+            "teacher_gap_corr_to_raw_correction": pd.NA,
+        },
+        "matched_df": empty_rows.copy(),
+        "segments_df": empty_segments.copy(),
+        "top_teacher_help_df": empty_rows.copy(),
+        "top_teacher_hurt_df": empty_rows.copy(),
+    }
+    if exposure_df is None or exposure_df.empty:
+        return out
+
+    work = exposure_df.copy()
+    index = work.index
+
+    actual_from_file = pd.to_numeric(
+        work.get("actual_ownership_from_file", pd.Series([pd.NA] * len(work), index=index)),
+        errors="coerce",
+    )
+    actual_from_field = pd.to_numeric(
+        work.get("field_ownership_pct", pd.Series([pd.NA] * len(work), index=index)),
+        errors="coerce",
+    )
+    actual_ownership = actual_from_file.where(actual_from_file.notna(), actual_from_field)
+
+    raw_ownership = _coalesce_numeric_series(
+        work.get("ownership_model_raw", pd.Series([pd.NA] * len(work), index=index)),
+        work.get("projected_ownership_pre_lineupstarter", pd.Series([pd.NA] * len(work), index=index)),
+    )
+    raw_ownership = _coalesce_numeric_series(
+        raw_ownership,
+        work.get("projected_ownership", pd.Series([pd.NA] * len(work), index=index)),
+    )
+    teacher_ownership = pd.to_numeric(
+        work.get("lineupstarter_projected_ownership", pd.Series([pd.NA] * len(work), index=index)),
+        errors="coerce",
+    )
+    consensus_ownership = _coalesce_numeric_series(
+        work.get("ownership_consensus", pd.Series([pd.NA] * len(work), index=index)),
+        work.get("projected_ownership", pd.Series([pd.NA] * len(work), index=index)),
+    )
+
+    work["actual_ownership"] = actual_ownership
+    work["ownership_model_raw"] = raw_ownership
+    work["lineupstarter_projected_ownership"] = teacher_ownership
+    work["ownership_consensus"] = consensus_ownership
+    work["teacher_gap"] = teacher_ownership - raw_ownership
+    work["consensus_gap_vs_raw"] = consensus_ownership - raw_ownership
+    work["training_target_raw_correction"] = actual_ownership - raw_ownership
+    work["training_target_teacher_correction"] = actual_ownership - teacher_ownership
+    work["training_target_consensus_correction"] = actual_ownership - consensus_ownership
+    work["abs_error_raw"] = pd.to_numeric(work["training_target_raw_correction"], errors="coerce").abs()
+    work["abs_error_teacher"] = pd.to_numeric(work["training_target_teacher_correction"], errors="coerce").abs()
+    work["abs_error_consensus"] = pd.to_numeric(work["training_target_consensus_correction"], errors="coerce").abs()
+    work["teacher_edge_vs_raw"] = work["abs_error_raw"] - work["abs_error_teacher"]
+    work["consensus_edge_vs_raw"] = work["abs_error_raw"] - work["abs_error_consensus"]
+    work["teacher_win_flag"] = (
+        pd.to_numeric(work["abs_error_teacher"], errors="coerce").notna()
+        & pd.to_numeric(work["abs_error_raw"], errors="coerce").notna()
+        & (pd.to_numeric(work["abs_error_teacher"], errors="coerce") < pd.to_numeric(work["abs_error_raw"], errors="coerce"))
+    )
+    work["consensus_win_flag"] = (
+        pd.to_numeric(work["abs_error_consensus"], errors="coerce").notna()
+        & pd.to_numeric(work["abs_error_raw"], errors="coerce").notna()
+        & (pd.to_numeric(work["abs_error_consensus"], errors="coerce") < pd.to_numeric(work["abs_error_raw"], errors="coerce"))
+    )
+    work["teacher_win_numeric"] = pd.to_numeric(work["teacher_win_flag"], errors="coerce").where(teacher_ownership.notna(), pd.NA)
+    work["consensus_win_numeric"] = pd.to_numeric(work["consensus_win_flag"], errors="coerce").where(
+        consensus_ownership.notna(),
+        pd.NA,
+    )
+    work["Salary"] = pd.to_numeric(work.get("Salary", pd.Series([pd.NA] * len(work), index=index)), errors="coerce")
+    work["salary_bucket"] = work["Salary"].map(_salary_bucket_label)
+    work["primary_position"] = work.get("Position", pd.Series([pd.NA] * len(work), index=index)).map(_primary_position_label)
+    work["teacher_gap_bucket"] = work["teacher_gap"].map(_ownership_teacher_gap_bucket_label)
+    work["minutes_stability_label"] = (
+        work.get("minutes_stability_label", pd.Series([pd.NA] * len(work), index=index))
+        .astype(str)
+        .str.strip()
+        .replace({"nan": "Unknown", "none": "Unknown", "null": "Unknown", "": "Unknown"})
+    )
+    work["role_change_label"] = (
+        work.get("role_change_label", pd.Series([pd.NA] * len(work), index=index))
+        .astype(str)
+        .str.strip()
+        .replace({"nan": "Unknown", "none": "Unknown", "null": "Unknown", "": "Unknown"})
+    )
+
+    matched = work.loc[pd.to_numeric(work["actual_ownership"], errors="coerce").notna() & raw_ownership.notna()].copy()
+    if matched.empty:
+        return out
+
+    teacher_mask = pd.to_numeric(matched["lineupstarter_projected_ownership"], errors="coerce").notna()
+    consensus_mask = pd.to_numeric(matched["ownership_consensus"], errors="coerce").notna()
+    sample_count = int(len(matched))
+    teacher_count = int(teacher_mask.sum())
+
+    def _mean_or_na(series: pd.Series) -> float | Any:
+        numeric = pd.to_numeric(series, errors="coerce")
+        return float(numeric.mean()) if numeric.notna().any() else pd.NA
+
+    def _pct_or_na(series: pd.Series) -> float | Any:
+        numeric = pd.to_numeric(series, errors="coerce")
+        return float(numeric.mean() * 100.0) if numeric.notna().any() else pd.NA
+
+    teacher_gap_corr: float | Any = pd.NA
+    teacher_gap_df = matched.loc[
+        pd.to_numeric(matched["teacher_gap"], errors="coerce").notna()
+        & pd.to_numeric(matched["training_target_raw_correction"], errors="coerce").notna(),
+        ["teacher_gap", "training_target_raw_correction"],
+    ]
+    if len(teacher_gap_df) >= 2:
+        corr_mat = teacher_gap_df.corr(numeric_only=True)
+        corr_value = pd.to_numeric(corr_mat.iloc[0, 1], errors="coerce")
+        if pd.notna(corr_value):
+            teacher_gap_corr = float(corr_value)
+
+    out["summary"] = {
+        "samples": sample_count,
+        "teacher_samples": teacher_count,
+        "teacher_available_pct": float(100.0 * teacher_count / float(max(1, sample_count))),
+        "raw_mae": _mean_or_na(matched["abs_error_raw"]),
+        "teacher_mae": _mean_or_na(matched.loc[teacher_mask, "abs_error_teacher"]),
+        "consensus_mae": _mean_or_na(matched.loc[consensus_mask, "abs_error_consensus"]),
+        "teacher_mae_delta_vs_raw": (
+            _mean_or_na(matched.loc[teacher_mask, "abs_error_teacher"]) - _mean_or_na(matched["abs_error_raw"])
+            if teacher_count > 0 and pd.notna(_mean_or_na(matched["abs_error_raw"]))
+            else pd.NA
+        ),
+        "consensus_mae_delta_vs_raw": (
+            _mean_or_na(matched.loc[consensus_mask, "abs_error_consensus"]) - _mean_or_na(matched["abs_error_raw"])
+            if int(consensus_mask.sum()) > 0 and pd.notna(_mean_or_na(matched["abs_error_raw"]))
+            else pd.NA
+        ),
+        "raw_bias": _mean_or_na(matched["training_target_raw_correction"]),
+        "teacher_bias": _mean_or_na(matched.loc[teacher_mask, "training_target_teacher_correction"]),
+        "consensus_bias": _mean_or_na(matched.loc[consensus_mask, "training_target_consensus_correction"]),
+        "teacher_win_pct": _pct_or_na(matched.loc[teacher_mask, "teacher_win_numeric"]),
+        "consensus_win_pct": _pct_or_na(matched.loc[consensus_mask, "consensus_win_numeric"]),
+        "teacher_avg_gap": _mean_or_na(matched.loc[teacher_mask, "teacher_gap"]),
+        "teacher_gap_corr_to_raw_correction": teacher_gap_corr,
+    }
+
+    segment_specs: list[tuple[str, pd.Series, tuple[str, ...] | None]] = [
+        ("teacher_gap_bucket", matched["teacher_gap_bucket"], OWNERSHIP_TEACHER_GAP_ORDER),
+        ("salary_bucket", matched["salary_bucket"], DIAGNOSTIC_SALARY_BUCKET_LABELS),
+        ("primary_position", matched["primary_position"], DIAGNOSTIC_POSITION_ORDER),
+        ("minutes_stability_label", matched["minutes_stability_label"], ("Stable", "Moderate", "Volatile", "Unknown")),
+        ("role_change_label", matched["role_change_label"], ("Rising", "Neutral", "Falling", "Unknown")),
+    ]
+    segment_frames: list[pd.DataFrame] = []
+    for segment_group, segment_series, ordered_values in segment_specs:
+        segment_work = matched.copy()
+        segment_work["segment"] = segment_series.astype(str).str.strip()
+        segment_work["segment"] = segment_work["segment"].replace({"nan": "Unknown", "none": "Unknown", "null": "Unknown", "": "Unknown"})
+        grouped = (
+            segment_work.groupby("segment", as_index=False)
+            .agg(
+                samples=("Name", "count"),
+                teacher_samples=("lineupstarter_projected_ownership", lambda s: int(pd.to_numeric(s, errors="coerce").notna().sum())),
+                avg_actual_ownership=("actual_ownership", "mean"),
+                avg_raw_ownership=("ownership_model_raw", "mean"),
+                avg_teacher_ownership=("lineupstarter_projected_ownership", "mean"),
+                avg_consensus_ownership=("ownership_consensus", "mean"),
+                avg_teacher_gap=("teacher_gap", "mean"),
+                avg_training_target_raw_correction=("training_target_raw_correction", "mean"),
+                raw_bias=("training_target_raw_correction", "mean"),
+                teacher_bias=("training_target_teacher_correction", "mean"),
+                consensus_bias=("training_target_consensus_correction", "mean"),
+                raw_mae=("abs_error_raw", "mean"),
+                teacher_mae=("abs_error_teacher", "mean"),
+                consensus_mae=("abs_error_consensus", "mean"),
+                teacher_win_pct=("teacher_win_numeric", lambda s: float(pd.to_numeric(s, errors="coerce").mean() * 100.0) if pd.to_numeric(s, errors="coerce").notna().any() else pd.NA),
+                consensus_win_pct=("consensus_win_numeric", lambda s: float(pd.to_numeric(s, errors="coerce").mean() * 100.0) if pd.to_numeric(s, errors="coerce").notna().any() else pd.NA),
+            )
+            .reset_index(drop=True)
+        )
+        grouped["segment_group"] = segment_group
+        grouped["teacher_mae_delta_vs_raw"] = pd.to_numeric(grouped["teacher_mae"], errors="coerce") - pd.to_numeric(
+            grouped["raw_mae"], errors="coerce"
+        )
+        grouped["consensus_mae_delta_vs_raw"] = pd.to_numeric(
+            grouped["consensus_mae"], errors="coerce"
+        ) - pd.to_numeric(grouped["raw_mae"], errors="coerce")
+        if ordered_values:
+            grouped["segment"] = pd.Categorical(grouped["segment"], categories=list(ordered_values), ordered=True)
+            grouped = grouped.sort_values("segment", kind="stable")
+        else:
+            grouped = grouped.sort_values(["samples", "segment"], ascending=[False, True], kind="stable")
+        segment_frames.append(grouped[empty_segments.columns])
+    if segment_frames:
+        out["segments_df"] = pd.concat(segment_frames, ignore_index=True)
+
+    keep_cols = [c for c in empty_rows.columns if c in matched.columns]
+    matched_view = matched[keep_cols].copy()
+    matched_view = matched_view.sort_values(
+        ["teacher_edge_vs_raw", "abs_error_raw"],
+        ascending=[False, False],
+        kind="stable",
+    ).reset_index(drop=True)
+    out["matched_df"] = matched_view
+
+    teacher_rows = matched.loc[teacher_mask].copy()
+    if not teacher_rows.empty:
+        teacher_keep = [c for c in empty_rows.columns if c in teacher_rows.columns]
+        out["top_teacher_help_df"] = (
+            teacher_rows[teacher_keep]
+            .sort_values(["teacher_edge_vs_raw", "abs_error_teacher"], ascending=[False, True], kind="stable")
+            .head(max(1, int(top_n)))
+            .reset_index(drop=True)
+        )
+        out["top_teacher_hurt_df"] = (
+            teacher_rows[teacher_keep]
+            .sort_values(["teacher_edge_vs_raw", "abs_error_teacher"], ascending=[True, True], kind="stable")
+            .head(max(1, int(top_n)))
+            .reset_index(drop=True)
+        )
+
+    return out
 
 
 def build_ownership_projection_diagnostics(

@@ -27,6 +27,7 @@ from .cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
     build_ownership_projection_diagnostics,
+    build_ownership_teacher_review,
     build_player_exposure_comparison,
     build_projection_actual_comparison,
     detect_contest_standings_upload,
@@ -2876,6 +2877,7 @@ def build_tournament_review_payload(
         actual_results_df=actual_df,
     )
     own_diag = build_ownership_projection_diagnostics(exposure_df)
+    ownership_teacher_review = build_ownership_teacher_review(exposure_df)
     proj_compare_df = build_projection_actual_comparison(projection_df=proj_df, actual_results_df=actual_df)
 
     projection_summary = {
@@ -2917,6 +2919,7 @@ def build_tournament_review_payload(
         "top10_entries": int(len(top_entry_df)),
         "exposure_rows": int(len(exposure_df)),
         "ownership_samples": int((own_diag.get("summary") or {}).get("samples") or 0),
+        "ownership_teacher_samples": int((ownership_teacher_review.get("summary") or {}).get("samples") or 0),
     }
 
     entry_cols = [
@@ -2966,6 +2969,16 @@ def build_tournament_review_payload(
 
     own_buckets_df = own_diag.get("buckets_df") if isinstance(own_diag, dict) else pd.DataFrame()
     own_misses_df = own_diag.get("top_misses_df") if isinstance(own_diag, dict) else pd.DataFrame()
+    own_teacher_rows_df = ownership_teacher_review.get("matched_df") if isinstance(ownership_teacher_review, dict) else pd.DataFrame()
+    own_teacher_segments_df = (
+        ownership_teacher_review.get("segments_df") if isinstance(ownership_teacher_review, dict) else pd.DataFrame()
+    )
+    own_teacher_help_df = (
+        ownership_teacher_review.get("top_teacher_help_df") if isinstance(ownership_teacher_review, dict) else pd.DataFrame()
+    )
+    own_teacher_hurt_df = (
+        ownership_teacher_review.get("top_teacher_hurt_df") if isinstance(ownership_teacher_review, dict) else pd.DataFrame()
+    )
 
     return {
         "selected_date": game_date.isoformat(),
@@ -2975,10 +2988,17 @@ def build_tournament_review_payload(
         "upload_profile": upload_profile,
         "summary": summary,
         "ownership_summary": own_diag.get("summary") if isinstance(own_diag, dict) else {},
+        "ownership_teacher_summary": (
+            ownership_teacher_review.get("summary") if isinstance(ownership_teacher_review, dict) else {}
+        ),
         "projection_summary": projection_summary,
         "entries_rows": _serialize_records(entries_view_df, limit=entries_limit),
         "exposure_rows": _serialize_records(exposure_view_df, limit=exposure_limit),
         "ownership_buckets": _serialize_records(own_buckets_df),
         "ownership_top_misses": _serialize_records(own_misses_df),
+        "ownership_teacher_rows": _serialize_records(own_teacher_rows_df, limit=exposure_limit),
+        "ownership_teacher_segments": _serialize_records(own_teacher_segments_df),
+        "ownership_teacher_top_help": _serialize_records(own_teacher_help_df),
+        "ownership_teacher_top_hurt": _serialize_records(own_teacher_hurt_df),
         "projection_rows": _serialize_records(proj_compare_df, limit=exposure_limit),
     }

@@ -49,6 +49,7 @@ from college_basketball_dfs.cbb_tail_model import (
 from college_basketball_dfs.cbb_tournament_review import (
     build_entry_actual_points_comparison,
     build_field_entries_and_players,
+    build_ownership_teacher_review,
     build_player_exposure_comparison,
     build_projection_actual_comparison,
     build_projection_adjustment_factors,
@@ -114,6 +115,13 @@ def _resolve_odds_api_key() -> str | None:
 ROLE_FILTER_OPTIONS = ["All", "Guard (G)", "Forward (F)"]
 MINUTES_STABILITY_FILTER_OPTIONS = ["All", "Stable", "Moderate", "Volatile"]
 ROLE_CHANGE_FILTER_OPTIONS = ["All", "Rising", "Neutral", "Falling"]
+OWNERSHIP_TEACHER_SEGMENT_LABELS = {
+    "teacher_gap_bucket": "Teacher Gap Bucket",
+    "salary_bucket": "Salary Bucket",
+    "primary_position": "Primary Position",
+    "minutes_stability_label": "Minutes Stability",
+    "role_change_label": "Role Change",
+}
 COMMON_ODDS_BOOKMAKER_KEYS = [
     "fanduel",
     "draftkings",
@@ -7622,7 +7630,232 @@ with tab_tournament_review:
                         use_cols = [c for c in exp_cols if c in exposure_df.columns]
                         st.dataframe(exposure_df[use_cols], hide_index=True, use_container_width=True)
 
+                    st.subheader("Ownership Teacher Review")
+                    st.caption(
+                        "Compare our raw ownership model against LineupStarter and the final consensus. "
+                        "Use this to learn when the teacher signal truly improves accuracy before blending it in."
+                    )
+                    ownership_teacher_review = build_ownership_teacher_review(exposure_df)
+                    ownership_teacher_summary = ownership_teacher_review.get("summary") or {}
+                    ownership_teacher_rows_df = ownership_teacher_review.get("matched_df")
+                    ownership_teacher_segments_df = ownership_teacher_review.get("segments_df")
+                    ownership_teacher_help_df = ownership_teacher_review.get("top_teacher_help_df")
+                    ownership_teacher_hurt_df = ownership_teacher_review.get("top_teacher_hurt_df")
+                    teacher_samples = int(ownership_teacher_summary.get("teacher_samples") or 0)
+                    review_samples = int(ownership_teacher_summary.get("samples") or 0)
+                    if not isinstance(ownership_teacher_rows_df, pd.DataFrame) or ownership_teacher_rows_df.empty:
+                        st.info("Ownership review dataset unavailable. Load standings plus a projection snapshot with ownership columns.")
+                    else:
+                        or1, or2, or3, or4, or5, or6 = st.columns(6)
+                        or1.metric("Ownership Samples", review_samples)
+                        or2.metric(
+                            "Raw MAE",
+                            (
+                                "n/a"
+                                if pd.isna(pd.to_numeric(ownership_teacher_summary.get("raw_mae"), errors="coerce"))
+                                else f"{float(pd.to_numeric(ownership_teacher_summary.get('raw_mae'), errors='coerce')):.2f}"
+                            ),
+                        )
+                        or3.metric(
+                            "LS MAE",
+                            (
+                                "n/a"
+                                if pd.isna(pd.to_numeric(ownership_teacher_summary.get("teacher_mae"), errors="coerce"))
+                                else f"{float(pd.to_numeric(ownership_teacher_summary.get('teacher_mae'), errors='coerce')):.2f}"
+                            ),
+                        )
+                        or4.metric(
+                            "Consensus MAE",
+                            (
+                                "n/a"
+                                if pd.isna(pd.to_numeric(ownership_teacher_summary.get("consensus_mae"), errors="coerce"))
+                                else f"{float(pd.to_numeric(ownership_teacher_summary.get('consensus_mae'), errors='coerce')):.2f}"
+                            ),
+                        )
+                        or5.metric(
+                            "LS Win Rate",
+                            (
+                                "n/a"
+                                if pd.isna(pd.to_numeric(ownership_teacher_summary.get("teacher_win_pct"), errors="coerce"))
+                                else f"{float(pd.to_numeric(ownership_teacher_summary.get('teacher_win_pct'), errors='coerce')):.1f}%"
+                            ),
+                        )
+                        or6.metric(
+                            "Consensus Win Rate",
+                            (
+                                "n/a"
+                                if pd.isna(pd.to_numeric(ownership_teacher_summary.get("consensus_win_pct"), errors="coerce"))
+                                else f"{float(pd.to_numeric(ownership_teacher_summary.get('consensus_win_pct'), errors='coerce')):.1f}%"
+                            ),
+                        )
+                        teacher_available_pct = pd.to_numeric(
+                            ownership_teacher_summary.get("teacher_available_pct"),
+                            errors="coerce",
+                        )
+                        teacher_gap_corr = pd.to_numeric(
+                            ownership_teacher_summary.get("teacher_gap_corr_to_raw_correction"),
+                            errors="coerce",
+                        )
+                        if teacher_samples <= 0:
+                            st.info(
+                                "No LineupStarter ownership signal was present in this projection snapshot. "
+                                "The dataset still shows raw-vs-actual behavior, but not teacher lift."
+                            )
+                        else:
+                            caption_bits = [f"LS rows: `{teacher_samples}` / `{review_samples}`"]
+                            if pd.notna(teacher_available_pct):
+                                caption_bits.append(f"coverage `{float(teacher_available_pct):.1f}%`")
+                            if pd.notna(teacher_gap_corr):
+                                caption_bits.append(f"teacher-gap corr to our raw correction target `{float(teacher_gap_corr):.2f}`")
+                            st.caption(" | ".join(caption_bits))
+
+                        if isinstance(ownership_teacher_segments_df, pd.DataFrame) and not ownership_teacher_segments_df.empty:
+                            segment_group_keys = ownership_teacher_segments_df["segment_group"].astype(str).dropna().tolist()
+                            segment_group_keys = list(dict.fromkeys(segment_group_keys))
+                            segment_group_key = st.selectbox(
+                                "Ownership Review Segment",
+                                options=segment_group_keys,
+                                index=0,
+                                format_func=lambda value: OWNERSHIP_TEACHER_SEGMENT_LABELS.get(str(value), str(value)),
+                                key="tournament_ownership_teacher_segment_group",
+                                help="Group the ownership review by salary, role, stability, or the LineupStarter-vs-raw gap bucket.",
+                            )
+                            segment_view_df = ownership_teacher_segments_df.loc[
+                                ownership_teacher_segments_df["segment_group"].astype(str) == str(segment_group_key)
+                            ].copy()
+                            segment_cols = [
+                                "segment",
+                                "samples",
+                                "teacher_samples",
+                                "avg_actual_ownership",
+                                "avg_raw_ownership",
+                                "avg_teacher_ownership",
+                                "avg_consensus_ownership",
+                                "avg_teacher_gap",
+                                "avg_training_target_raw_correction",
+                                "raw_mae",
+                                "teacher_mae",
+                                "consensus_mae",
+                                "teacher_mae_delta_vs_raw",
+                                "consensus_mae_delta_vs_raw",
+                                "teacher_win_pct",
+                                "consensus_win_pct",
+                            ]
+                            st.caption("Negative MAE deltas mean the source beat our raw ownership model on that segment.")
+                            st.dataframe(
+                                segment_view_df[[c for c in segment_cols if c in segment_view_df.columns]],
+                                hide_index=True,
+                                use_container_width=True,
+                            )
+
+                        help_tab, hurt_tab, rows_tab = st.tabs(
+                            ["Teacher Helped Most", "Teacher Hurt Most", "Row-Level Dataset"]
+                        )
+                        with help_tab:
+                            if isinstance(ownership_teacher_help_df, pd.DataFrame) and not ownership_teacher_help_df.empty:
+                                help_cols = [
+                                    "Name",
+                                    "TeamAbbrev",
+                                    "Position",
+                                    "Salary",
+                                    "actual_ownership",
+                                    "ownership_model_raw",
+                                    "lineupstarter_projected_ownership",
+                                    "ownership_consensus",
+                                    "teacher_gap",
+                                    "training_target_raw_correction",
+                                    "abs_error_raw",
+                                    "abs_error_teacher",
+                                    "teacher_edge_vs_raw",
+                                    "minutes_stability_label",
+                                    "role_change_label",
+                                ]
+                                st.dataframe(
+                                    ownership_teacher_help_df[[c for c in help_cols if c in ownership_teacher_help_df.columns]],
+                                    hide_index=True,
+                                    use_container_width=True,
+                                )
+                            else:
+                                st.info("No teacher-help rows available.")
+                        with hurt_tab:
+                            if isinstance(ownership_teacher_hurt_df, pd.DataFrame) and not ownership_teacher_hurt_df.empty:
+                                hurt_cols = [
+                                    "Name",
+                                    "TeamAbbrev",
+                                    "Position",
+                                    "Salary",
+                                    "actual_ownership",
+                                    "ownership_model_raw",
+                                    "lineupstarter_projected_ownership",
+                                    "ownership_consensus",
+                                    "teacher_gap",
+                                    "training_target_raw_correction",
+                                    "abs_error_raw",
+                                    "abs_error_teacher",
+                                    "teacher_edge_vs_raw",
+                                    "minutes_stability_label",
+                                    "role_change_label",
+                                ]
+                                st.dataframe(
+                                    ownership_teacher_hurt_df[[c for c in hurt_cols if c in ownership_teacher_hurt_df.columns]],
+                                    hide_index=True,
+                                    use_container_width=True,
+                                )
+                            else:
+                                st.info("No teacher-hurt rows available.")
+                        with rows_tab:
+                            row_cols = [
+                                "Name",
+                                "TeamAbbrev",
+                                "Position",
+                                "Salary",
+                                "actual_ownership",
+                                "field_ownership_pct",
+                                "actual_ownership_from_file",
+                                "ownership_model_raw",
+                                "projected_ownership_pre_lineupstarter",
+                                "lineupstarter_projected_ownership",
+                                "ownership_consensus",
+                                "projected_ownership",
+                                "teacher_gap",
+                                "consensus_gap_vs_raw",
+                                "training_target_raw_correction",
+                                "abs_error_raw",
+                                "abs_error_teacher",
+                                "abs_error_consensus",
+                                "teacher_edge_vs_raw",
+                                "consensus_edge_vs_raw",
+                                "minutes_stability_label",
+                                "role_change_label",
+                                "role_change_reason",
+                                "final_dk_points",
+                                "blended_projection",
+                                "our_dk_projection",
+                                "vegas_dk_projection",
+                            ]
+                            st.dataframe(
+                                ownership_teacher_rows_df[[c for c in row_cols if c in ownership_teacher_rows_df.columns]],
+                                hide_index=True,
+                                use_container_width=True,
+                            )
+                            st.download_button(
+                                "Download Ownership Review Dataset CSV",
+                                data=ownership_teacher_rows_df.to_csv(index=False),
+                                file_name=f"ownership_teacher_review_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                                mime="text/csv",
+                                key="download_ownership_teacher_review_csv",
+                            )
+                            if isinstance(ownership_teacher_segments_df, pd.DataFrame) and not ownership_teacher_segments_df.empty:
+                                st.download_button(
+                                    "Download Ownership Review Segments CSV",
+                                    data=ownership_teacher_segments_df.to_csv(index=False),
+                                    file_name=f"ownership_teacher_segments_{tr_date.isoformat()}_{tr_contest_id}.csv",
+                                    mime="text/csv",
+                                    key="download_ownership_teacher_segments_csv",
+                                )
+
                     st.subheader("Projection vs Actual (Tournament Slate)")
+                    adjust_df = pd.DataFrame()
                     proj_compare_df = build_projection_actual_comparison(
                         projection_df=projections_df,
                         actual_results_df=actual_probe_df,
@@ -7983,6 +8216,12 @@ with tab_tournament_review:
                     st.session_state["cbb_tr_entries_df"] = entries_df.copy()
                     st.session_state["cbb_tr_expanded_df"] = expanded_df.copy()
                     st.session_state["cbb_tr_exposure_df"] = exposure_df.copy()
+                    st.session_state["cbb_tr_ownership_teacher_df"] = ownership_teacher_rows_df.copy()
+                    st.session_state["cbb_tr_ownership_teacher_segments_df"] = (
+                        ownership_teacher_segments_df.copy()
+                        if isinstance(ownership_teacher_segments_df, pd.DataFrame)
+                        else pd.DataFrame()
+                    )
                     st.session_state["cbb_tr_projection_compare_df"] = proj_compare_df.copy()
                     st.session_state["cbb_tr_adjust_df"] = adjust_df.copy()
 
