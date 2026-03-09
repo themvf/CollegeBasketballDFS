@@ -26,6 +26,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     normalize_injuries_frame,
     ownership_salary_bucket_key,
     projection_salary_bucket_key,
+    recommend_contest_profile_settings,
     remove_injured_players,
 )
 
@@ -782,6 +783,66 @@ def test_rerank_lineup_portfolio_respects_final_exposure_caps() -> None:
     assert len(reranked) == 2
     exposure_one = sum(1 for lineup in reranked if "1" in lineup["player_ids"])
     assert exposure_one == 1
+
+
+def test_recommend_contest_profile_settings_tightens_short_slate_single_entry() -> None:
+    short_pool = pd.DataFrame(
+        {
+            "game_key": ["AAA@BBB", "AAA@BBB", "CCC@DDD", "CCC@DDD", "EEE@FFF", "EEE@FFF"],
+        }
+    )
+
+    settings = recommend_contest_profile_settings(
+        short_pool,
+        contest_type="Large GPP",
+        field_size=412,
+        entry_limit="Single Entry",
+    )
+
+    assert bool(settings["short_slate"]) is True
+    assert int(settings["slate_game_count"]) == 3
+    assert str(settings["entry_limit"]) == "single_entry"
+    assert int(settings["spike_max_pair_overlap"]) >= 6
+    assert float(settings["low_own_bucket_exposure_pct"]) <= 18.0
+    assert float(settings["low_own_bucket_min_projection"]) >= 20.0
+    assert float(settings["ceiling_boost_lineup_pct"]) > 0.0
+
+
+def test_recommend_contest_profile_settings_opens_up_large_field_twenty_max() -> None:
+    large_pool = pd.DataFrame(
+        {
+            "game_key": [
+                "AAA@BBB",
+                "AAA@BBB",
+                "CCC@DDD",
+                "CCC@DDD",
+                "EEE@FFF",
+                "EEE@FFF",
+                "GGG@HHH",
+                "GGG@HHH",
+                "III@JJJ",
+                "III@JJJ",
+                "KKK@LLL",
+                "KKK@LLL",
+            ],
+        }
+    )
+
+    settings = recommend_contest_profile_settings(
+        large_pool,
+        contest_type="Large GPP",
+        field_size=12850,
+        entry_limit="20-Max",
+    )
+
+    assert bool(settings["short_slate"]) is False
+    assert int(settings["slate_game_count"]) == 6
+    assert str(settings["entry_limit"]) == "20_max"
+    assert int(settings["spike_max_pair_overlap"]) <= 3
+    assert float(settings["low_own_bucket_exposure_pct"]) >= 35.0
+    assert float(settings["low_own_bucket_max_projected_ownership"]) <= 9.0
+    assert float(settings["ceiling_boost_lineup_pct"]) >= 35.0
+    assert float(settings["ceiling_boost_stack_bonus"]) >= 2.8
 
 
 def test_generate_lineups_respects_locks_and_excludes() -> None:

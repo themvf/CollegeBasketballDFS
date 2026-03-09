@@ -39,6 +39,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     normalize_injuries_frame,
     projection_role_bucket_key,
     projection_salary_bucket_key,
+    recommend_contest_profile_settings,
     remove_injured_players,
 )
 from college_basketball_dfs.cbb_tail_model import (
@@ -5587,6 +5588,44 @@ with tab_lineups:
         ),
     )
     run_mode_key = "all" if run_mode_label == "All Versions" else "single"
+    cp1, cp2, cp3, cp4 = st.columns(4)
+    contest_profile_mode = cp1.selectbox(
+        "Contest Profile",
+        options=["Auto", "Manual"],
+        index=0,
+        help=(
+            "Auto uses slate game count plus contest field size and entry limit to tune "
+            "overlap, low-owned forcing, and ceiling-archetype settings."
+        ),
+    )
+    auto_contest_profile_enabled = contest_profile_mode == "Auto"
+    contest_field_size = int(
+        cp2.number_input(
+            "Field Size",
+            min_value=2,
+            max_value=500000,
+            value=5000,
+            step=1,
+            help="Approximate contest entrants.",
+        )
+    )
+    contest_entry_limit_label = cp3.selectbox(
+        "Entry Limit",
+        options=["Single Entry", "3-Max", "10-Max", "20-Max", "150-Max+"],
+        index=3,
+        help="Maximum entries each user can submit in the contest.",
+    )
+    contest_entry_limit_key = {
+        "Single Entry": "single_entry",
+        "3-Max": "3_max",
+        "10-Max": "10_max",
+        "20-Max": "20_max",
+        "150-Max+": "150_max",
+    }.get(contest_entry_limit_label, "single_entry")
+    if auto_contest_profile_enabled:
+        cp4.caption("Auto profile waits for the loaded slate, then applies contest-aware settings.")
+    else:
+        cp4.caption("Manual profile uses the controls below exactly as shown.")
 
     c5, c6, c7 = st.columns(3)
     if run_mode_key == "single":
@@ -5876,78 +5915,92 @@ with tab_lineups:
             disabled=not apply_ownership_guardrails,
         )
     )
-    lo1, lo2, lo3, lo4 = st.columns(4)
-    low_own_bucket_exposure_pct = float(
-        lo1.slider(
-            "Low-Own Bucket Exposure %",
-            min_value=0,
-            max_value=80,
-            value=24,
-            step=1,
-            help="Portion of lineups that must include at least one low-owned upside candidate.",
+    if auto_contest_profile_enabled:
+        low_own_bucket_exposure_pct = 24.0
+        low_own_bucket_min_per_lineup = 1
+        low_own_bucket_max_projected_ownership = 14.0
+        low_own_bucket_min_projection = 20.0
+        ceiling_boost_lineup_pct = 25.0
+        ceiling_boost_stack_bonus = 2.2
+        ceiling_boost_salary_left_target = 120
+        st.caption(
+            "Auto contest profile will set low-own bucket, ceiling-archetype, and overlap settings "
+            "after the slate player pool is loaded."
         )
-    )
-    low_own_bucket_min_per_lineup = int(
-        lo2.slider(
-            "Low-Own Min Players",
-            min_value=0,
-            max_value=3,
-            value=1,
-            step=1,
-            disabled=low_own_bucket_exposure_pct <= 0.0,
+        cb1, cb2, cb3, cb4 = st.columns(4)
+    else:
+        lo1, lo2, lo3, lo4 = st.columns(4)
+        low_own_bucket_exposure_pct = float(
+            lo1.slider(
+                "Low-Own Bucket Exposure %",
+                min_value=0,
+                max_value=80,
+                value=24,
+                step=1,
+                help="Portion of lineups that must include at least one low-owned upside candidate.",
+            )
         )
-    )
-    low_own_bucket_max_projected_ownership = float(
-        lo3.slider(
-            "Low-Own Max Projected Own %",
-            min_value=3,
-            max_value=20,
-            value=14,
-            step=1,
-            disabled=low_own_bucket_exposure_pct <= 0.0,
+        low_own_bucket_min_per_lineup = int(
+            lo2.slider(
+                "Low-Own Min Players",
+                min_value=0,
+                max_value=3,
+                value=1,
+                step=1,
+                disabled=low_own_bucket_exposure_pct <= 0.0,
+            )
         )
-    )
-    low_own_bucket_min_projection = float(
-        lo4.slider(
-            "Low-Own Min Projection",
-            min_value=10,
-            max_value=40,
-            value=20,
-            step=1,
-            disabled=low_own_bucket_exposure_pct <= 0.0,
+        low_own_bucket_max_projected_ownership = float(
+            lo3.slider(
+                "Low-Own Max Projected Own %",
+                min_value=3,
+                max_value=20,
+                value=14,
+                step=1,
+                disabled=low_own_bucket_exposure_pct <= 0.0,
+            )
         )
-    )
-    cb1, cb2, cb3, cb4 = st.columns(4)
-    ceiling_boost_lineup_pct = float(
-        cb1.slider(
-            "Ceiling Archetype Lineups %",
-            min_value=0,
-            max_value=80,
-            value=25,
-            step=1,
-            help="Allocates a subset of lineups to more aggressive top-end construction scoring.",
+        low_own_bucket_min_projection = float(
+            lo4.slider(
+                "Low-Own Min Projection",
+                min_value=10,
+                max_value=40,
+                value=20,
+                step=1,
+                disabled=low_own_bucket_exposure_pct <= 0.0,
+            )
         )
-    )
-    ceiling_boost_stack_bonus = float(
-        cb2.slider(
-            "Ceiling Stack Bonus",
-            min_value=0.0,
-            max_value=6.0,
-            value=2.2,
-            step=0.1,
-            disabled=ceiling_boost_lineup_pct <= 0.0,
+        cb1, cb2, cb3, cb4 = st.columns(4)
+        ceiling_boost_lineup_pct = float(
+            cb1.slider(
+                "Ceiling Archetype Lineups %",
+                min_value=0,
+                max_value=80,
+                value=25,
+                step=1,
+                help="Allocates a subset of lineups to more aggressive top-end construction scoring.",
+            )
         )
-    )
-    ceiling_boost_salary_left_target = int(
-        cb3.slider(
-            "Ceiling Salary Left Target",
-            min_value=0,
-            max_value=500,
-            value=120,
-            step=10,
-            disabled=ceiling_boost_lineup_pct <= 0.0,
+        ceiling_boost_stack_bonus = float(
+            cb2.slider(
+                "Ceiling Stack Bonus",
+                min_value=0.0,
+                max_value=6.0,
+                value=2.2,
+                step=0.1,
+                disabled=ceiling_boost_lineup_pct <= 0.0,
+            )
         )
-    )
+        ceiling_boost_salary_left_target = int(
+            cb3.slider(
+                "Ceiling Salary Left Target",
+                min_value=0,
+                max_value=500,
+                value=120,
+                step=10,
+                disabled=ceiling_boost_lineup_pct <= 0.0,
+            )
+        )
     promote_phantom_constructions = bool(
         cb4.checkbox(
             "Promote Top Phantom Constructions",
@@ -5969,19 +6022,22 @@ with tab_lineups:
     effective_max_salary_left = min(max_salary_left, 50) if strict_salary_utilization else max_salary_left
     spike_max_pair_overlap = 4
     if run_mode_key == "all" or lineup_strategy == "spike":
-        spike_max_pair_overlap = int(
-            st.slider(
-                "Spike Max Shared Players (A vs B)",
-                min_value=0,
-                max_value=8,
-                value=4,
-                step=1,
-                help=(
-                    "Within each A/B pair, lineup B can share at most this many players with lineup A "
-                    "(locks can force overlap)."
-                ),
+        if auto_contest_profile_enabled:
+            st.caption("Auto contest profile will set spike overlap after the slate is loaded.")
+        else:
+            spike_max_pair_overlap = int(
+                st.slider(
+                    "Spike Max Shared Players (A vs B)",
+                    min_value=0,
+                    max_value=8,
+                    value=4,
+                    step=1,
+                    help=(
+                        "Within each A/B pair, lineup B can share at most this many players with lineup A "
+                        "(locks can force overlap)."
+                    ),
+                )
             )
-        )
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
     else:
@@ -6020,6 +6076,61 @@ with tab_lineups:
                 st.warning("No players available after injury filtering. Check `Injuries` tab or slate date.")
             else:
                 pool_sorted = pool_df.sort_values("projected_dk_points", ascending=False).copy()
+                effective_spike_max_pair_overlap = int(spike_max_pair_overlap)
+                effective_low_own_bucket_exposure_pct = float(low_own_bucket_exposure_pct)
+                effective_low_own_bucket_min_per_lineup = int(low_own_bucket_min_per_lineup)
+                effective_low_own_bucket_max_projected_ownership = float(low_own_bucket_max_projected_ownership)
+                effective_low_own_bucket_min_projection = float(low_own_bucket_min_projection)
+                effective_ceiling_boost_lineup_pct = float(ceiling_boost_lineup_pct)
+                effective_ceiling_boost_stack_bonus = float(ceiling_boost_stack_bonus)
+                effective_ceiling_boost_salary_left_target = int(ceiling_boost_salary_left_target)
+                auto_contest_profile_meta: dict[str, Any] = {}
+                if auto_contest_profile_enabled:
+                    auto_contest_profile_meta = recommend_contest_profile_settings(
+                        pool_sorted,
+                        contest_type=contest_type,
+                        field_size=contest_field_size,
+                        entry_limit=contest_entry_limit_key,
+                    )
+                    effective_spike_max_pair_overlap = int(auto_contest_profile_meta.get("spike_max_pair_overlap") or effective_spike_max_pair_overlap)
+                    effective_low_own_bucket_exposure_pct = float(
+                        auto_contest_profile_meta.get("low_own_bucket_exposure_pct") or effective_low_own_bucket_exposure_pct
+                    )
+                    effective_low_own_bucket_min_per_lineup = int(
+                        auto_contest_profile_meta.get("low_own_bucket_min_per_lineup") or effective_low_own_bucket_min_per_lineup
+                    )
+                    effective_low_own_bucket_max_projected_ownership = float(
+                        auto_contest_profile_meta.get("low_own_bucket_max_projected_ownership") or effective_low_own_bucket_max_projected_ownership
+                    )
+                    effective_low_own_bucket_min_projection = float(
+                        auto_contest_profile_meta.get("low_own_bucket_min_projection") or effective_low_own_bucket_min_projection
+                    )
+                    effective_ceiling_boost_lineup_pct = float(
+                        auto_contest_profile_meta.get("ceiling_boost_lineup_pct") or effective_ceiling_boost_lineup_pct
+                    )
+                    effective_ceiling_boost_stack_bonus = float(
+                        auto_contest_profile_meta.get("ceiling_boost_stack_bonus") or effective_ceiling_boost_stack_bonus
+                    )
+                    effective_ceiling_boost_salary_left_target = int(
+                        auto_contest_profile_meta.get("ceiling_boost_salary_left_target") or effective_ceiling_boost_salary_left_target
+                    )
+                    ap1, ap2, ap3, ap4 = st.columns(4)
+                    ap1.metric("Auto Profile", str(auto_contest_profile_meta.get("profile_label") or "Auto"))
+                    ap2.metric("Slate Games", int(auto_contest_profile_meta.get("slate_game_count") or 0))
+                    ap3.metric(
+                        "Low-Own / Ceiling",
+                        f"{effective_low_own_bucket_exposure_pct:.0f}% / {effective_ceiling_boost_lineup_pct:.0f}%",
+                    )
+                    ap4.metric("Spike Overlap", int(effective_spike_max_pair_overlap))
+                    st.caption(
+                        "Auto contest profile applied: "
+                        f"field_size={int(auto_contest_profile_meta.get('field_size') or contest_field_size):,}, "
+                        f"entry_limit={contest_entry_limit_label}, "
+                        f"low_own_max_own={effective_low_own_bucket_max_projected_ownership:.0f}%, "
+                        f"low_own_min_projection={effective_low_own_bucket_min_projection:.0f}, "
+                        f"ceiling_stack_bonus={effective_ceiling_boost_stack_bonus:.1f}, "
+                        f"ceiling_salary_left_target={effective_ceiling_boost_salary_left_target}."
+                    )
                 player_labels = [
                     f"{row['Name']} ({row['TeamAbbrev']}) [{row['ID']}]"
                     for _, row in pool_sorted.iterrows()
@@ -6271,7 +6382,7 @@ with tab_lineups:
                                 "lineup_strategy": "standard",
                                 "include_tail_signals": False,
                                 "model_profile": "legacy_baseline",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             },
                             {
                                 "version_key": "spike_v1_legacy",
@@ -6279,7 +6390,7 @@ with tab_lineups:
                                 "lineup_strategy": "spike",
                                 "include_tail_signals": False,
                                 "model_profile": "legacy_spike_pairs",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             },
                             {
                                 "version_key": "spike_v2_tail",
@@ -6287,7 +6398,7 @@ with tab_lineups:
                                 "lineup_strategy": "spike",
                                 "include_tail_signals": True,
                                 "model_profile": "tail_spike_pairs",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             },
                             {
                                 "version_key": "cluster_v1_experimental",
@@ -6295,7 +6406,7 @@ with tab_lineups:
                                 "lineup_strategy": "cluster",
                                 "include_tail_signals": False,
                                 "model_profile": "cluster_seed_mutation_v1",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                 "cluster_target_count": 15,
                                 "cluster_variants_per_cluster": 10,
                             },
@@ -6305,7 +6416,7 @@ with tab_lineups:
                                 "lineup_strategy": "standard",
                                 "include_tail_signals": True,
                                 "model_profile": "standout_capture_v1",
-                                "spike_max_pair_overlap": spike_max_pair_overlap,
+                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             },
                         ]
                     else:
@@ -6317,7 +6428,7 @@ with tab_lineups:
                                     "lineup_strategy": "spike",
                                     "include_tail_signals": True,
                                     "model_profile": "tail_spike_pairs",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                 }
                             ]
                         elif selected_model_key == "cluster_v1_experimental":
@@ -6328,7 +6439,7 @@ with tab_lineups:
                                     "lineup_strategy": "cluster",
                                     "include_tail_signals": False,
                                     "model_profile": "cluster_seed_mutation_v1",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                     "cluster_target_count": 15,
                                     "cluster_variants_per_cluster": 10,
                                 }
@@ -6341,7 +6452,7 @@ with tab_lineups:
                                     "lineup_strategy": "spike",
                                     "include_tail_signals": False,
                                     "model_profile": "legacy_spike_pairs",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                 }
                             ]
                         elif selected_model_key == "standout_v1_capture":
@@ -6352,7 +6463,7 @@ with tab_lineups:
                                     "lineup_strategy": "standard",
                                     "include_tail_signals": True,
                                     "model_profile": "standout_capture_v1",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                 }
                             ]
                         else:
@@ -6363,7 +6474,7 @@ with tab_lineups:
                                     "lineup_strategy": "standard",
                                     "include_tail_signals": False,
                                     "model_profile": "legacy_baseline",
-                                    "spike_max_pair_overlap": spike_max_pair_overlap,
+                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                 }
                             ]
 
@@ -6452,17 +6563,17 @@ with tab_lineups:
                             uncertainty_weight=uncertainty_weight,
                             high_risk_extra_shrink=high_risk_extra_shrink,
                             dnp_risk_threshold=dnp_risk_threshold,
-                            low_own_bucket_exposure_pct=low_own_bucket_exposure_pct,
-                            low_own_bucket_min_per_lineup=low_own_bucket_min_per_lineup,
-                            low_own_bucket_max_projected_ownership=low_own_bucket_max_projected_ownership,
-                            low_own_bucket_min_projection=low_own_bucket_min_projection,
+                            low_own_bucket_exposure_pct=effective_low_own_bucket_exposure_pct,
+                            low_own_bucket_min_per_lineup=effective_low_own_bucket_min_per_lineup,
+                            low_own_bucket_max_projected_ownership=effective_low_own_bucket_max_projected_ownership,
+                            low_own_bucket_min_projection=effective_low_own_bucket_min_projection,
                             low_own_bucket_min_tail_score=55.0,
                             low_own_bucket_objective_bonus=1.3,
                             preferred_game_keys=list(game_agent_bias_meta.get("applied_game_keys") or []),
                             preferred_game_bonus=0.6,
-                            ceiling_boost_lineup_pct=ceiling_boost_lineup_pct,
-                            ceiling_boost_stack_bonus=ceiling_boost_stack_bonus,
-                            ceiling_boost_salary_left_target=ceiling_boost_salary_left_target,
+                            ceiling_boost_lineup_pct=effective_ceiling_boost_lineup_pct,
+                            ceiling_boost_stack_bonus=effective_ceiling_boost_stack_bonus,
+                            ceiling_boost_salary_left_target=effective_ceiling_boost_salary_left_target,
                             objective_score_adjustments=objective_score_adjustments,
                             salary_left_target=salary_left_target,
                             random_seed=lineup_seed + version_idx,
@@ -6497,13 +6608,18 @@ with tab_lineups:
                             "selected_model_key": selected_model_key,
                             "lineup_count": lineup_count,
                             "contest_type": contest_type,
+                            "contest_profile_mode": contest_profile_mode.lower(),
+                            "contest_field_size": contest_field_size,
+                            "contest_entry_limit": contest_entry_limit_key,
+                            "contest_entry_limit_label": contest_entry_limit_label,
+                            "auto_contest_profile_meta": auto_contest_profile_meta,
                             "lineup_seed": lineup_seed,
                             "max_salary_left": effective_max_salary_left,
                             "requested_max_salary_left": max_salary_left,
                             "strict_salary_utilization": strict_salary_utilization,
                             "salary_left_target": salary_left_target,
                             "global_max_exposure_pct": global_max_exposure_pct,
-                            "spike_max_pair_overlap": spike_max_pair_overlap,
+                            "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             "cluster_target_count": 15,
                             "cluster_variants_per_cluster": 10,
                             "projection_scale": projection_scale,
@@ -6517,13 +6633,13 @@ with tab_lineups:
                             "uncertainty_weight": uncertainty_weight,
                             "high_risk_extra_shrink": high_risk_extra_shrink,
                             "dnp_risk_threshold": dnp_risk_threshold,
-                            "low_own_bucket_exposure_pct": low_own_bucket_exposure_pct,
-                            "low_own_bucket_min_per_lineup": low_own_bucket_min_per_lineup,
-                            "low_own_bucket_max_projected_ownership": low_own_bucket_max_projected_ownership,
-                            "low_own_bucket_min_projection": low_own_bucket_min_projection,
-                            "ceiling_boost_lineup_pct": ceiling_boost_lineup_pct,
-                            "ceiling_boost_stack_bonus": ceiling_boost_stack_bonus,
-                            "ceiling_boost_salary_left_target": ceiling_boost_salary_left_target,
+                            "low_own_bucket_exposure_pct": effective_low_own_bucket_exposure_pct,
+                            "low_own_bucket_min_per_lineup": effective_low_own_bucket_min_per_lineup,
+                            "low_own_bucket_max_projected_ownership": effective_low_own_bucket_max_projected_ownership,
+                            "low_own_bucket_min_projection": effective_low_own_bucket_min_projection,
+                            "ceiling_boost_lineup_pct": effective_ceiling_boost_lineup_pct,
+                            "ceiling_boost_stack_bonus": effective_ceiling_boost_stack_bonus,
+                            "ceiling_boost_salary_left_target": effective_ceiling_boost_salary_left_target,
                             "auto_projection_calibration": auto_projection_calibration,
                             "calibration_lookback_days": calibration_lookback_days,
                             "calibration_meta": calibration_meta,

@@ -1760,6 +1760,173 @@ def recommended_focus_stack_settings(
     }
 
 
+def _entry_limit_key(value: Any) -> str:
+    raw = str(value or "").strip().lower()
+    if raw in {"single", "single entry", "single_entry", "se", "1", "1-max", "1 max"}:
+        return "single_entry"
+    if raw in {"3", "3-max", "3 max", "3_max"}:
+        return "3_max"
+    if raw in {"10", "10-max", "10 max", "10_max", "10 entry", "10-entry"}:
+        return "10_max"
+    if raw in {"20", "20-max", "20 max", "20_max", "20 entry", "20-entry"}:
+        return "20_max"
+    if raw in {"150", "150-max", "150 max", "150_max", "mme", "150+"}:
+        return "150_max"
+    return "single_entry"
+
+
+def recommend_contest_profile_settings(
+    pool_df: pd.DataFrame,
+    contest_type: str,
+    field_size: int | None = None,
+    entry_limit: str | None = None,
+) -> dict[str, Any]:
+    game_keys = {
+        str(x or "").strip().upper()
+        for x in pool_df.get("game_key", pd.Series(dtype=str)).tolist()
+        if str(x or "").strip()
+    }
+    slate_game_count = max(1, len(game_keys))
+    short_slate = slate_game_count <= 4
+    contest_norm = str(contest_type or "").strip().lower()
+    field_size_value = max(2, int(_safe_num(field_size, 5000)))
+    entry_key = _entry_limit_key(entry_limit)
+
+    if field_size_value <= 500:
+        field_bucket = "small_field"
+    elif field_size_value <= 2500:
+        field_bucket = "mid_field"
+    elif field_size_value <= 10000:
+        field_bucket = "large_field"
+    else:
+        field_bucket = "mega_field"
+
+    if contest_norm == "cash":
+        overlap_cap = 6
+        low_own_exposure = 0.0
+        low_own_cap = 12.0
+        low_own_min_projection = 24.0
+        ceiling_lineup_pct = 0.0
+        ceiling_stack_bonus = 0.0
+        ceiling_salary_left_target = 80
+    elif contest_norm == "small gpp":
+        overlap_cap = 5
+        low_own_exposure = 18.0
+        low_own_cap = 12.0
+        low_own_min_projection = 20.0
+        ceiling_lineup_pct = 20.0
+        ceiling_stack_bonus = 1.8
+        ceiling_salary_left_target = 100
+    else:
+        overlap_cap = 4
+        low_own_exposure = 28.0
+        low_own_cap = 10.0
+        low_own_min_projection = 18.0
+        ceiling_lineup_pct = 30.0
+        ceiling_stack_bonus = 2.4
+        ceiling_salary_left_target = 120
+
+    if field_bucket == "small_field":
+        overlap_cap += 1
+        low_own_exposure -= 8.0
+        low_own_cap += 2.0
+        low_own_min_projection += 2.0
+        ceiling_lineup_pct -= 6.0
+        ceiling_stack_bonus -= 0.5
+        ceiling_salary_left_target -= 20
+    elif field_bucket == "large_field":
+        low_own_exposure += 4.0
+        low_own_cap -= 1.0
+        low_own_min_projection -= 1.0
+        ceiling_lineup_pct += 3.0
+        ceiling_stack_bonus += 0.2
+        ceiling_salary_left_target += 10
+    elif field_bucket == "mega_field":
+        overlap_cap -= 1
+        low_own_exposure += 7.0
+        low_own_cap -= 1.0
+        low_own_min_projection -= 2.0
+        ceiling_lineup_pct += 5.0
+        ceiling_stack_bonus += 0.4
+        ceiling_salary_left_target += 20
+
+    if entry_key == "single_entry":
+        overlap_cap += 1
+        low_own_exposure -= 7.0
+        low_own_cap += 2.0
+        low_own_min_projection += 2.0
+        ceiling_lineup_pct -= 5.0
+        ceiling_stack_bonus -= 0.4
+    elif entry_key == "3_max":
+        overlap_cap += 1
+        low_own_exposure -= 4.0
+        low_own_cap += 1.0
+        low_own_min_projection += 1.0
+        ceiling_lineup_pct -= 2.0
+        ceiling_stack_bonus -= 0.2
+    elif entry_key == "20_max":
+        overlap_cap -= 1
+        low_own_exposure += 3.0
+        low_own_cap -= 1.0
+        low_own_min_projection -= 1.0
+        ceiling_lineup_pct += 2.0
+        ceiling_stack_bonus += 0.2
+    elif entry_key == "150_max":
+        overlap_cap -= 1
+        low_own_exposure += 6.0
+        low_own_cap -= 1.0
+        low_own_min_projection -= 1.0
+        ceiling_lineup_pct += 4.0
+        ceiling_stack_bonus += 0.4
+
+    if short_slate:
+        overlap_cap += 1
+        low_own_exposure *= 0.70
+        low_own_cap += 1.0
+        low_own_min_projection += 2.0
+        ceiling_lineup_pct -= 3.0
+        ceiling_stack_bonus -= 0.2
+        ceiling_salary_left_target -= 10
+
+    low_own_exposure = max(0.0, min(60.0, round(low_own_exposure, 1)))
+    low_own_cap = max(7.0, min(16.0, round(low_own_cap, 1)))
+    low_own_min_projection = max(14.0, min(28.0, round(low_own_min_projection, 1)))
+    ceiling_lineup_pct = max(0.0, min(60.0, round(ceiling_lineup_pct, 1)))
+    ceiling_stack_bonus = max(0.0, min(4.0, round(ceiling_stack_bonus, 2)))
+    ceiling_salary_left_target = max(40, min(200, int(round(ceiling_salary_left_target / 10.0) * 10)))
+    overlap_cap = max(3, min(7, int(overlap_cap)))
+    low_own_min_players = 0 if low_own_exposure <= 0.0 else 1
+
+    if contest_norm == "cash":
+        profile_label = "Cash Conservative"
+    elif short_slate and entry_key in {"single_entry", "3_max"}:
+        profile_label = "Short Slate Core"
+    elif field_bucket in {"large_field", "mega_field"} and entry_key in {"20_max", "150_max"}:
+        profile_label = "Large-Field Ceiling"
+    elif entry_key in {"single_entry", "3_max"}:
+        profile_label = "Small-Field Balanced"
+    else:
+        profile_label = "Balanced GPP Auto"
+
+    return {
+        "profile_label": profile_label,
+        "contest_type": str(contest_type or ""),
+        "field_size": int(field_size_value),
+        "field_size_bucket": field_bucket,
+        "entry_limit": entry_key,
+        "slate_game_count": int(slate_game_count),
+        "short_slate": bool(short_slate),
+        "spike_max_pair_overlap": int(overlap_cap),
+        "low_own_bucket_exposure_pct": float(low_own_exposure),
+        "low_own_bucket_min_per_lineup": int(low_own_min_players),
+        "low_own_bucket_max_projected_ownership": float(low_own_cap),
+        "low_own_bucket_min_projection": float(low_own_min_projection),
+        "ceiling_boost_lineup_pct": float(ceiling_lineup_pct),
+        "ceiling_boost_stack_bonus": float(ceiling_stack_bonus),
+        "ceiling_boost_salary_left_target": int(ceiling_salary_left_target),
+    }
+
+
 def build_player_pool(
     slate_df: pd.DataFrame,
     props_df: pd.DataFrame | None,
