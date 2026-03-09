@@ -3428,10 +3428,12 @@ def render_slate_supplement_tab(
     save_key = f"save_slate_supplement_{slot_index}"
     delete_key = f"delete_slate_supplement_{slot_index}"
     confirm_delete_key = f"confirm_delete_slate_supplement_{slot_index}"
+    confirm_delete_nonce_key = f"{confirm_delete_key}_nonce"
     context_key = f"slate_supplement_{slot_index}_context"
     current_context = f"{selected_date.isoformat()}::{_slate_key_from_label(selected_slate_key)}"
     previous_context = str(st.session_state.get(context_key) or "")
     context_changed = previous_context != current_context
+    confirm_delete_nonce = int(st.session_state.get(confirm_delete_nonce_key, 0) or 0)
 
     saved_df = pd.DataFrame()
     saved_type = ""
@@ -3450,7 +3452,8 @@ def render_slate_supplement_tab(
     if context_changed:
         st.session_state[context_key] = current_context
         st.session_state[type_key] = _supplement_type_label(saved_type) if saved_type else "RotoWire"
-        st.session_state[confirm_delete_key] = False
+        confirm_delete_nonce += 1
+        st.session_state[confirm_delete_nonce_key] = confirm_delete_nonce
         st.session_state.pop(summary_key, None)
         st.session_state[upload_nonce_key] = int(st.session_state.get(upload_nonce_key, 0) or 0) + 1
     elif type_key not in st.session_state:
@@ -3469,6 +3472,7 @@ def render_slate_supplement_tab(
     upload_key = (
         f"{upload_key_prefix}_{selected_date.isoformat()}_{_slate_key_from_label(selected_slate_key)}_{supplement_type}_{upload_nonce}"
     )
+    confirm_delete_widget_key = f"{confirm_delete_key}_{confirm_delete_nonce}"
 
     status_cols = st.columns(4)
     status_cols[0].metric("Slot", f"#{slot_index}")
@@ -3602,8 +3606,10 @@ def render_slate_supplement_tab(
     else:
         st.caption(f"Choose a CSV to preview how this slot will be parsed as `{selected_parser_label}`.")
 
-    if saved_df.empty and bool(st.session_state.get(confirm_delete_key)):
-        st.session_state[confirm_delete_key] = False
+    if saved_df.empty and bool(st.session_state.get(confirm_delete_widget_key)):
+        confirm_delete_nonce += 1
+        st.session_state[confirm_delete_nonce_key] = confirm_delete_nonce
+        confirm_delete_widget_key = f"{confirm_delete_key}_{confirm_delete_nonce}"
 
     save_col, delete_col = st.columns(2)
     save_clicked = save_col.button(
@@ -3620,7 +3626,7 @@ def render_slate_supplement_tab(
     confirm_delete = st.checkbox(
         "Confirm delete for this supplement slot",
         value=False,
-        key=confirm_delete_key,
+        key=confirm_delete_widget_key,
         disabled=saved_df.empty,
     )
 
@@ -3694,7 +3700,7 @@ def render_slate_supplement_tab(
                         "coverage": coverage_summary,
                     }
                     st.session_state[upload_nonce_key] = upload_nonce + 1
-                    st.session_state[confirm_delete_key] = False
+                    st.session_state[confirm_delete_nonce_key] = confirm_delete_nonce + 1
                     st.success(f"Saved Slate Supplement #{slot_index} to `{blob_name}`.")
                     st.rerun()
 
@@ -3719,7 +3725,7 @@ def render_slate_supplement_tab(
             load_slate_supplement_frame_for_date.clear()
             st.session_state.pop(summary_key, None)
             st.session_state[upload_nonce_key] = upload_nonce + 1
-            st.session_state[confirm_delete_key] = False
+            st.session_state[confirm_delete_nonce_key] = confirm_delete_nonce + 1
             if deleted:
                 st.success(f"Deleted Slate Supplement #{slot_index} from `{blob_name}`.")
             else:
