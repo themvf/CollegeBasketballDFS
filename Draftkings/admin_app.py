@@ -5014,11 +5014,6 @@ with tab_injuries:
                 service_account_json_b64=cred_json_b64,
             )
 
-            c1, c2, c3 = st.columns(3)
-            c1.metric("Feed Rows", int(len(feed_df)))
-            c2.metric("Manual Rows", int(len(manual_df)))
-            c3.metric("Effective Rows", int(len(effective_df)))
-
             st.subheader("Injury Feed Upload (CSV Replace)")
             st.caption(
                 "Upload your latest injury report CSV for the selected date. "
@@ -5029,6 +5024,34 @@ with tab_injuries:
                 type=["csv"],
                 key="injuries_feed_upload",
             )
+            feed_upload_preview_df = pd.DataFrame()
+            feed_upload_error = ""
+            if feed_upload is not None:
+                try:
+                    preview_csv_text = feed_upload.getvalue().decode("utf-8-sig")
+                    preview_raw_feed = pd.read_csv(io.StringIO(preview_csv_text))
+                    feed_upload_preview_df = normalize_injuries_frame(preview_raw_feed)
+                    if feed_upload_preview_df.empty:
+                        feed_upload_error = (
+                            "Selected injury feed CSV parsed successfully but produced 0 normalized rows. "
+                            "Include player, team, and status columns."
+                        )
+                        st.error(feed_upload_error)
+                    else:
+                        status_counts = (
+                            feed_upload_preview_df["status"].astype(str).value_counts(dropna=False).to_dict()
+                        )
+                        status_summary = ", ".join(
+                            f"{int(rows)} {str(status or 'unknown')}" for status, rows in status_counts.items()
+                        )
+                        st.info(
+                            f"Selected `{feed_upload.name}`. Parsed {len(feed_upload_preview_df)} rows "
+                            f"({status_summary}). Click `Replace Feed CSV` to save it for "
+                            f"`{injury_feed_date.isoformat()}`."
+                        )
+                except Exception as exc:
+                    feed_upload_error = f"Could not parse selected injury feed CSV: {exc}"
+                    st.error(feed_upload_error)
             uf1, uf2, uf3 = st.columns(3)
             replace_feed_clicked = uf1.button("Replace Feed CSV", key="replace_injury_feed_csv")
             clear_feed_clicked = uf2.button("Clear Feed CSV", key="clear_injury_feed_csv")
@@ -5045,13 +5068,14 @@ with tab_injuries:
                 if replace_feed_clicked:
                     if feed_upload is None:
                         st.error("Choose an injury feed CSV file first.")
+                    elif feed_upload_error:
+                        st.error(feed_upload_error)
+                    elif feed_upload_preview_df.empty:
+                        st.error("Selected injury feed CSV produced 0 normalized rows. Nothing was saved.")
                     else:
-                        csv_text = feed_upload.getvalue().decode("utf-8-sig")
-                        raw_feed = pd.read_csv(io.StringIO(csv_text))
-                        normalized_feed = normalize_injuries_frame(raw_feed)
                         blob_name = _write_injuries_feed_csv(
                             store,
-                            normalized_feed.to_csv(index=False),
+                            feed_upload_preview_df.to_csv(index=False),
                             selected_date=injury_feed_date,
                         )
                         load_injuries_feed_frame.clear()
@@ -5059,7 +5083,7 @@ with tab_injuries:
                         load_injuries_frame.clear()
                         st.success(
                             f"Replaced feed injuries for `{injury_feed_date.isoformat()}` in `{blob_name}` "
-                            f"with {len(normalized_feed)} rows."
+                            f"with {len(feed_upload_preview_df)} rows."
                         )
                 if clear_feed_clicked:
                     deleted, blob_name = _delete_injuries_feed_csv(store, selected_date=injury_feed_date)
@@ -5121,6 +5145,11 @@ with tab_injuries:
                     service_account_json=cred_json,
                     service_account_json_b64=cred_json_b64,
                 )
+
+            c1, c2, c3 = st.columns(3)
+            c1.metric("Feed Rows", int(len(feed_df)))
+            c2.metric("Manual Rows", int(len(manual_df)))
+            c3.metric("Effective Rows", int(len(effective_df)))
 
             if feed_df.empty:
                 st.caption("No feed injury CSV loaded yet.")
