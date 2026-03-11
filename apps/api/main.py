@@ -18,6 +18,7 @@ from college_basketball_dfs.cbb_api_service import (
     build_vegas_game_lines_payload,
     build_vegas_market_context_payload,
     import_contest_standings_csv,
+    import_injuries_feed_csv,
     import_dk_slate_overrides,
     import_injuries_manual_csv,
     import_projection_ownership_csv,
@@ -246,6 +247,29 @@ async def injuries_manual_upload(
         raise HTTPException(status_code=400, detail="file payload was empty")
     try:
         return import_injuries_manual_csv(
+            csv_bytes=payload,
+            selected_date=selected_date,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.post("/v1/injuries/feed/upload")
+async def injuries_feed_upload(
+    file: UploadFile = File(..., description="Date-scoped injuries feed CSV"),
+    selected_date: date = Query(..., description="Slate date in YYYY-MM-DD"),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    if not file.filename or not file.filename.lower().endswith(".csv"):
+        raise HTTPException(status_code=400, detail="file must be a CSV")
+    payload = await file.read()
+    if not payload:
+        raise HTTPException(status_code=400, detail="file payload was empty")
+    try:
+        return import_injuries_feed_csv(
             csv_bytes=payload,
             selected_date=selected_date,
             bucket_name=bucket_name,

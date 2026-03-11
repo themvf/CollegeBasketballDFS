@@ -2595,6 +2595,41 @@ def import_injuries_manual_csv(
     }
 
 
+def import_injuries_feed_csv(
+    *,
+    csv_bytes: bytes,
+    selected_date: date | str,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    game_date = _to_iso_date(selected_date)
+    _, frame = _decode_csv_payload(csv_bytes)
+    normalized = normalize_injuries_frame(frame)
+    if normalized.empty:
+        raise ValueError("Could not parse injuries rows. Include player, team, and status columns.")
+
+    store = _build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    blob_name = store.write_injuries_feed_csv(normalized.to_csv(index=False), game_date=game_date)
+    return {
+        "selected_date": game_date.isoformat(),
+        "bucket_name": store.bucket_name,
+        "rows_saved": int(len(normalized)),
+        "blob_name": blob_name,
+        "status_counts": _serialize_records(
+            normalized.groupby("status", as_index=False).agg(rows=("player_name", "count")).sort_values(
+                ["rows", "status"], ascending=[False, True], kind="stable"
+            )
+        ),
+    }
+
+
 def import_projection_ownership_csv(
     *,
     csv_bytes: bytes,

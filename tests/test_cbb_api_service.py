@@ -8,6 +8,7 @@ import pandas as pd
 from college_basketball_dfs.cbb_api_service import (
     filter_unresolved_resolution_rows,
     import_dk_slate_overrides,
+    import_injuries_feed_csv,
     import_lineupstarter_projection_csv,
     load_cached_dk_slate_frame,
     load_manual_overrides,
@@ -632,6 +633,43 @@ def test_normalize_lineupstarter_upload_frame_matches_resolved_slate_by_name_and
     assert row["lineupstarter_match_status"] == "matched"
     assert round(float(row["lineupstarter_projected_points"]), 2) == 34.5
     assert round(float(row["lineupstarter_projected_ownership"]), 2) == 18.4
+
+
+def test_import_injuries_feed_csv_writes_date_scoped_normalized_rows(monkeypatch) -> None:
+    class _FakeStore:
+        bucket_name = "test-bucket"
+
+        def __init__(self) -> None:
+            self.saved_csv = ""
+
+        def write_injuries_feed_csv(self, csv_text: str, game_date=None) -> str:
+            self.saved_csv = csv_text
+            assert str(game_date) == "2026-03-11"
+            return "cbb/injuries/feed/2026-03-11_injuries_feed.csv"
+
+    fake_store = _FakeStore()
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._build_api_store",
+        lambda **_: fake_store,
+    )
+
+    result = import_injuries_feed_csv(
+        csv_bytes=(
+            b"Player,Team,Pos,Injury,Status,Est. Return\n"
+            b"Michael Wolf,Xavier,G,Undisclosed,Out,Subscribers Only\n"
+            b"Zaon Collins,Fresno State,G,Calf,Game Time Decision,Subscribers Only\n"
+        ),
+        selected_date="2026-03-11",
+        bucket_name="test-bucket",
+    )
+
+    assert result["blob_name"] == "cbb/injuries/feed/2026-03-11_injuries_feed.csv"
+    assert int(result["rows_saved"]) == 2
+    saved = pd.read_csv(io.StringIO(fake_store.saved_csv))
+    assert saved["player_name"].tolist() == ["Michael Wolf", "Zaon Collins"]
+    assert saved["team"].tolist() == ["XAVIER", "FRESNO STATE"]
+    assert saved["status"].tolist() == ["out", "questionable"]
+    assert saved["active"].astype(bool).tolist() == [True, True]
 
 
 def test_import_lineupstarter_projection_csv_writes_normalized_rows(monkeypatch) -> None:

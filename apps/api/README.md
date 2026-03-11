@@ -22,6 +22,7 @@ uvicorn main:app --reload --port 8000
 - `GET /v1/vegas/prop-data`
 - `GET /v1/ops/cache-coverage`
 - `GET /v1/injuries/review`
+- `POST /v1/injuries/feed/upload`
 - `POST /v1/injuries/manual/upload`
 - `GET /v1/reviews/projection`
 - `POST /v1/reviews/projection/ownership/upload`

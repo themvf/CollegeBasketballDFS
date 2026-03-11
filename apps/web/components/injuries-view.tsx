@@ -16,6 +16,18 @@ type InjuryRow = {
   updated_at?: string;
 };
 
+type UploadStatusCount = {
+  status?: string;
+  rows?: number;
+};
+
+type UploadResponse = {
+  rows_saved?: number;
+  blob_name?: string;
+  status_counts?: UploadStatusCount[];
+  detail?: string;
+};
+
 function asRows(input: unknown): InjuryRow[] {
   if (!Array.isArray(input)) return [];
   return input as InjuryRow[];
@@ -26,14 +38,33 @@ function numberValue(value: unknown): string {
   return Number.isFinite(num) ? String(Math.round(num)) : "0";
 }
 
+function parseUploadResponse(text: string): UploadResponse | null {
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text) as UploadResponse;
+  } catch {
+    return null;
+  }
+}
+
+function formatStatusCounts(statusCounts: UploadStatusCount[] | undefined): string {
+  if (!Array.isArray(statusCounts) || statusCounts.length === 0) return "";
+  return statusCounts
+    .map((row) => `${numberValue(row.rows)} ${String(row.status ?? "unknown").trim() || "unknown"}`)
+    .join(", ");
+}
+
 export default function InjuriesView({ selectedDate }: InjuriesViewProps) {
   const apiBase = useMemo(() => getApiBaseUrl(), []);
   const [payload, setPayload] = useState<InjuriesReviewResponse | null>(null);
   const [loading, setLoading] = useState<boolean>(true);
   const [error, setError] = useState<string>("");
-  const [uploadFile, setUploadFile] = useState<File | null>(null);
-  const [uploading, setUploading] = useState<boolean>(false);
-  const [message, setMessage] = useState<string>("");
+  const [feedUploadFile, setFeedUploadFile] = useState<File | null>(null);
+  const [manualUploadFile, setManualUploadFile] = useState<File | null>(null);
+  const [feedUploading, setFeedUploading] = useState<boolean>(false);
+  const [manualUploading, setManualUploading] = useState<boolean>(false);
+  const [feedMessage, setFeedMessage] = useState<string>("");
+  const [manualMessage, setManualMessage] = useState<string>("");
 
   const effectiveRows = asRows(payload?.effective_rows);
   const feedRows = asRows(payload?.feed_rows);
@@ -60,36 +91,53 @@ export default function InjuriesView({ selectedDate }: InjuriesViewProps) {
     load();
   }, [selectedDate]);
 
-  const uploadManualCsv = async () => {
+  const uploadCsv = async (
+    mode: "feed" | "manual",
+    uploadFile: File | null,
+    setUploadingState: (value: boolean) => void,
+    setMessageState: (value: string) => void,
+    clearFile: () => void,
+  ) => {
     if (!uploadFile) {
-      setMessage("Choose a CSV file first.");
+      setMessageState("Choose a CSV file first.");
       return;
     }
-    setUploading(true);
-    setMessage("");
+    setUploadingState(true);
+    setMessageState("");
     try {
       const formData = new FormData();
       formData.append("file", uploadFile);
       const response = await fetch(
-        `${apiBase}/v1/injuries/manual/upload?selected_date=${encodeURIComponent(selectedDate)}`,
+        `${apiBase}/v1/injuries/${mode}/upload?selected_date=${encodeURIComponent(selectedDate)}`,
         {
           method: "POST",
           body: formData,
         },
       );
       const text = await response.text();
+      const payload = parseUploadResponse(text);
       if (!response.ok) {
-        throw new Error(text || `Upload failed (${response.status})`);
+        throw new Error(String(payload?.detail || text || `Upload failed (${response.status})`));
       }
-      setMessage("Manual injuries CSV uploaded.");
-      setUploadFile(null);
+      const rowsSaved = numberValue(payload?.rows_saved);
+      const statusSummary = formatStatusCounts(payload?.status_counts);
+      const uploadLabel = mode === "feed" ? "Feed" : "Manual";
+      const detailText = statusSummary ? ` (${statusSummary})` : "";
+      setMessageState(`${uploadLabel} upload saved ${rowsSaved} rows for ${selectedDate}${detailText}.`);
+      clearFile();
       await load();
     } catch (err) {
-      setMessage(err instanceof Error ? err.message : String(err));
+      setMessageState(err instanceof Error ? err.message : String(err));
     } finally {
-      setUploading(false);
+      setUploadingState(false);
     }
   };
+
+  const uploadFeedCsv = async () =>
+    uploadCsv("feed", feedUploadFile, setFeedUploading, setFeedMessage, () => setFeedUploadFile(null));
+
+  const uploadManualCsv = async () =>
+    uploadCsv("manual", manualUploadFile, setManualUploading, setManualMessage, () => setManualUploadFile(null));
 
   return (
     <main className="page">
@@ -131,25 +179,50 @@ export default function InjuriesView({ selectedDate }: InjuriesViewProps) {
         </article>
 
         <article className="panel">
-          <h2>Manual Overrides</h2>
-          <p className="meta">Upload `injuries_manual.csv` format to override feed statuses.</p>
-          <label className="field">
-            <span>Manual Injuries CSV</span>
-            <input
-              type="file"
-              accept=".csv"
-              onChange={(event) => setUploadFile(event.target.files?.[0] ?? null)}
-            />
-          </label>
-          <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
-            <button className="action-btn" disabled={uploading} onClick={uploadManualCsv}>
-              {uploading ? "Uploading..." : "Upload Manual CSV"}
-            </button>
-            <button className="ghost-btn" disabled={loading} onClick={load}>
-              Refresh
-            </button>
+          <h2>Uploads</h2>
+          <p className="meta">Use feed upload for daily injury reports and manual upload only for explicit overrides.</p>
+
+          <div style={{ marginTop: 12 }}>
+            <h3 style={{ margin: 0, fontSize: "1rem" }}>Daily Feed</h3>
+            <p className="meta">Writes the selected date to the date-scoped injuries feed snapshot.</p>
+            <label className="field">
+              <span>Feed Injury CSV</span>
+              <input
+                type="file"
+                accept=".csv"
+                onChange={(event) => setFeedUploadFile(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+              <button className="action-btn" disabled={feedUploading} onClick={uploadFeedCsv}>
+                {feedUploading ? "Uploading..." : "Upload Feed CSV"}
+              </button>
+            </div>
+            {feedMessage ? <p className="meta" style={{ marginTop: 10 }}>{feedMessage}</p> : null}
           </div>
-          {message ? <p className="meta" style={{ marginTop: 10 }}>{message}</p> : null}
+
+          <div style={{ marginTop: 18 }}>
+            <h3 style={{ margin: 0, fontSize: "1rem" }}>Manual Overrides</h3>
+            <p className="meta">Upload `injuries_manual.csv` format to create global overrides on top of the feed.</p>
+            <label className="field">
+              <span>Manual Injuries CSV</span>
+              <input
+                type="file"
+                accept=".csv"
+                onChange={(event) => setManualUploadFile(event.target.files?.[0] ?? null)}
+              />
+            </label>
+            <div style={{ marginTop: 10, display: "flex", gap: 10 }}>
+              <button className="action-btn" disabled={manualUploading} onClick={uploadManualCsv}>
+                {manualUploading ? "Uploading..." : "Upload Manual CSV"}
+              </button>
+              <button className="ghost-btn" disabled={loading} onClick={load}>
+                Refresh
+              </button>
+            </div>
+            {manualMessage ? <p className="meta" style={{ marginTop: 10 }}>{manualMessage}</p> : null}
+          </div>
+
           {error ? <p className="error-text">{error}</p> : null}
         </article>
       </section>
