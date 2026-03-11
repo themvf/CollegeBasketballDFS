@@ -15,12 +15,23 @@ SALARY_CAP = 50000
 ROSTER_SIZE = 8
 MIN_G = 3
 MIN_F = 3
+LOCKED_PROJECTION_RECENT_FORM_GAMES = 5
+LOCKED_PROJECTION_RECENT_POINTS_WEIGHT = 0.35
 
 INJURY_STATUSES_REMOVE_DEFAULT = ("out", "doubtful")
 PROJECTION_SALARY_BUCKETS = ("lt4500", "4500_6999", "7000_9999", "gte10000")
 PROJECTION_ROLE_BUCKETS = ("guard", "forward", "center", "other")
 OWNERSHIP_SALARY_BUCKETS = ("lt5500", "5500_7499", "gte7500")
 NAME_SUFFIX_TOKENS = {"jr", "sr", "ii", "iii", "iv", "v", "vi"}
+
+
+def locked_projection_recency_settings() -> dict[str, float | int]:
+    recent_points_weight = float(LOCKED_PROJECTION_RECENT_POINTS_WEIGHT)
+    return {
+        "recent_form_games": int(LOCKED_PROJECTION_RECENT_FORM_GAMES),
+        "recent_points_weight": recent_points_weight,
+        "recent_points_weight_pct": int(round(recent_points_weight * 100.0)),
+    }
 
 
 def _normalize_text(value: Any) -> str:
@@ -1935,8 +1946,8 @@ def build_player_pool(
     rotowire_df: pd.DataFrame | None = None,
     bookmaker_filter: str | None = None,
     odds_games_df: pd.DataFrame | None = None,
-    recent_form_games: int = 7,
-    recent_points_weight: float = 0.0,
+    recent_form_games: int = LOCKED_PROJECTION_RECENT_FORM_GAMES,
+    recent_points_weight: float = LOCKED_PROJECTION_RECENT_POINTS_WEIGHT,
     lineupstarter_df: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     if slate_df.empty:

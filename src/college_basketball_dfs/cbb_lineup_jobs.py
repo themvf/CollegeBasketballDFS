@@ -28,6 +28,7 @@ from .cbb_dk_optimizer import (
     generate_lineups,
     lineups_slots_frame,
     lineups_summary_frame,
+    locked_projection_recency_settings,
     remove_injured_players,
 )
 from .cbb_tail_model import fit_total_tail_model, score_odds_games_for_tail
@@ -402,6 +403,7 @@ def run_lineup_job_request(
     gcp_project = (str(request.get("gcp_project") or "").strip() or None)
     service_account_json = (str(request.get("service_account_json") or "").strip() or None)
     service_account_json_b64 = (str(request.get("service_account_json_b64") or "").strip() or None)
+    projection_recency = locked_projection_recency_settings()
 
     progress(5, "Loading active slate context")
     active_context = resolve_active_slate_context(
@@ -494,8 +496,8 @@ def run_lineup_job_request(
         rotowire_df=rotowire_df,
         bookmaker_filter=bookmaker_filter,
         odds_games_df=odds_scored_df,
-        recent_form_games=int(request.get("recent_form_games") or 7),
-        recent_points_weight=float(request.get("recent_points_weight") or 0.0),
+        recent_form_games=int(projection_recency["recent_form_games"]),
+        recent_points_weight=float(projection_recency["recent_points_weight"]),
         lineupstarter_df=lineupstarter_df,
     )
     if pool_df.empty:
@@ -590,6 +592,7 @@ def run_lineup_job_request(
                 "odds_tail_rows": int(len(odds_scored_df)),
                 "pool_rows": int(len(pool_df)),
                 "model": model_cfg,
+                "projection_recency": projection_recency,
                 "lineups_generated": len(annotated_lineups),
                 "warnings_count": len(warnings),
             },
@@ -616,5 +619,6 @@ def run_lineup_job_request(
         "odds_rows": int(len(odds_df)),
         "odds_tail_rows": int(len(odds_scored_df)),
         "model": model_cfg,
+        "projection_recency": projection_recency,
         "runtime_controls": controls,
     }

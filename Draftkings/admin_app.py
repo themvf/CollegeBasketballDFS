@@ -36,6 +36,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     generate_lineups,
     lineups_slots_frame,
     lineups_summary_frame,
+    locked_projection_recency_settings,
     normalize_injuries_frame,
     projection_role_bucket_key,
     projection_salary_bucket_key,
@@ -3201,9 +3202,8 @@ def build_optimizer_pool_for_date(
     gcp_project: str | None,
     service_account_json: str | None,
     service_account_json_b64: str | None,
-    recent_form_games: int = 7,
-    recent_points_weight: float = 0.0,
 ) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, dict[str, Any]]:
+    projection_recency = locked_projection_recency_settings()
     slate_bundle = load_active_slate_context(
         selected_date=slate_date,
         slate_key=_slate_key_from_label(slate_key),
@@ -3331,6 +3331,7 @@ def build_optimizer_pool_for_date(
         if not lineupstarter_df.empty
         else 0
     )
+    slate_bundle["projection_recency"] = dict(projection_recency)
 
     filtered_slate, removed_injured = remove_injured_players(slate_df, injuries_df)
     season_history_df = load_season_player_history_frame(
@@ -3371,8 +3372,8 @@ def build_optimizer_pool_for_date(
         rotowire_df=rotowire_df,
         bookmaker_filter=(bookmaker or None),
         odds_games_df=odds_scored_df,
-        recent_form_games=int(max(1, recent_form_games)),
-        recent_points_weight=float(max(0.0, min(1.0, recent_points_weight))),
+        recent_form_games=int(projection_recency["recent_form_games"]),
+        recent_points_weight=float(projection_recency["recent_points_weight"]),
         lineupstarter_df=lineupstarter_df,
     )
     slate_bundle["rotowire_projection_matched_players"] = (
@@ -5251,6 +5252,7 @@ with tab_injuries:
 with tab_slate_vegas:
     st.subheader("Slate + Vegas Player Pool")
     st.caption("Lineup Generator uses the `blended_projection` (Projected DK Points) from this table.")
+    slate_projection_recency = locked_projection_recency_settings()
     slate_vegas_date = st.date_input("DK/Optimizer Slate Date", value=game_selected_date, key="slate_vegas_date")
     vegas_bookmaker = st.text_input(
         "Vegas Bookmaker Source",
@@ -5258,30 +5260,11 @@ with tab_slate_vegas:
         key="slate_vegas_bookmaker",
         help="Use the same bookmaker used for odds/props imports (example: fanduel).",
     )
-    sv1, sv2 = st.columns(2)
-    slate_recent_form_games = int(
-        sv1.slider(
-            "Pool Recent Form Games",
-            min_value=3,
-            max_value=12,
-            value=5,
-            step=1,
-            key="slate_vegas_recent_form_games",
-            help="Rolling game window used for recent minutes/points signals in the player pool.",
-        )
+    st.caption(
+        "Projection recency is locked for model integrity: "
+        f"`{int(slate_projection_recency['recent_form_games'])}` games and "
+        f"`{int(slate_projection_recency['recent_points_weight_pct'])}%` recent-points weight."
     )
-    slate_recent_points_weight_pct = float(
-        sv2.slider(
-            "Pool Recent Points Weight %",
-            min_value=0,
-            max_value=100,
-            value=35,
-            step=1,
-            key="slate_vegas_recent_points_weight_pct",
-            help="Blends season points with recent-form points in pool projections.",
-        )
-    )
-    slate_recent_points_weight = slate_recent_points_weight_pct / 100.0
     refresh_pool_clicked = st.button("Refresh Slate + Vegas", key="refresh_slate_vegas_pool")
     if refresh_pool_clicked:
         load_dk_slate_frame_for_date.clear()
@@ -5306,8 +5289,6 @@ with tab_slate_vegas:
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
-                recent_form_games=slate_recent_form_games,
-                recent_points_weight=slate_recent_points_weight,
             )
             slate_coverage = dict(slate_context.get("coverage") or {})
             active_ready = bool(slate_context.get("active_ready"))
@@ -5340,7 +5321,7 @@ with tab_slate_vegas:
                 st.caption(
                     f"Season stats rows used: `{len(season_history_df):,}` | "
                     f"Average projected minutes: `{avg_mins:.1f}` | "
-                    f"Average recent minutes ({slate_recent_form_games}g): `{avg_mins_recent:.1f}`"
+                    f"Average recent minutes ({int(slate_projection_recency['recent_form_games'])}g): `{avg_mins_recent:.1f}`"
                 )
                 if active_source == "legacy_dk_fallback":
                     st.warning(
@@ -5675,6 +5656,7 @@ with tab_slate_vegas:
 
 with tab_lineups:
     st.subheader("DK Lineup Generator")
+    lineup_projection_recency = locked_projection_recency_settings()
     if "auto_save_runs_to_gcs" not in st.session_state:
         st.session_state["auto_save_runs_to_gcs"] = True
     if "save_phantom_outputs_to_gcs" not in st.session_state:
@@ -5689,34 +5671,11 @@ with tab_lineups:
         value=(default_bookmakers_filter.strip() or "fanduel"),
         key="lineup_bookmaker_source",
     )
-    rf1, rf2 = st.columns(2)
-    recent_form_games = int(
-        rf1.slider(
-            "Recent Form Games",
-            min_value=3,
-            max_value=12,
-            value=int(st.session_state.get("slate_vegas_recent_form_games", 5)),
-            step=1,
-            help=(
-                "Rolling game window used for recency signals. "
-                "Smaller windows react faster to role/minutes changes."
-            ),
-        )
+    st.caption(
+        "Projection recency is locked for lineup generation: "
+        f"`{int(lineup_projection_recency['recent_form_games'])}` games and "
+        f"`{int(lineup_projection_recency['recent_points_weight_pct'])}%` recent-points weight."
     )
-    recent_points_weight_pct = float(
-        rf2.slider(
-            "Recent Points Weight %",
-            min_value=0,
-            max_value=100,
-            value=int(st.session_state.get("slate_vegas_recent_points_weight_pct", 30)),
-            step=1,
-            help=(
-                "Blends season points with recent-form points before DK scoring. "
-                "0 = season-only, 100 = recent-only."
-            ),
-        )
-    )
-    recent_points_weight = recent_points_weight_pct / 100.0
     c1, c2, c3, c4 = st.columns(4)
     lineup_count = int(c1.slider("Lineups", min_value=1, max_value=150, value=20, step=1))
     contest_type = c2.selectbox("Contest Type", options=["Cash", "Small GPP", "Large GPP"], index=2)
@@ -6193,8 +6152,6 @@ with tab_lineups:
                 gcp_project=gcp_project or None,
                 service_account_json=cred_json,
                 service_account_json_b64=cred_json_b64,
-                recent_form_games=recent_form_games,
-                recent_points_weight=recent_points_weight,
             )
 
             slate_coverage = dict(slate_context.get("coverage") or {})
@@ -6798,9 +6755,10 @@ with tab_lineups:
                             "game_agent_bias_strength_pct": game_agent_bias_strength_pct,
                             "game_agent_focus_games": game_agent_focus_games,
                             "game_agent_bias_meta": game_agent_bias_meta,
-                            "recent_form_games": recent_form_games,
-                            "recent_points_weight": recent_points_weight,
-                            "recent_points_weight_pct": recent_points_weight_pct,
+                            "recent_form_games": int(lineup_projection_recency["recent_form_games"]),
+                            "recent_points_weight": float(lineup_projection_recency["recent_points_weight"]),
+                            "recent_points_weight_pct": int(lineup_projection_recency["recent_points_weight_pct"]),
+                            "projection_recency_locked": True,
                             "promote_phantom_constructions": promote_phantom_constructions,
                             "phantom_promotion_lookback_days": phantom_promotion_lookback_days,
                             "phantom_promotion_meta": phantom_promotion_meta,

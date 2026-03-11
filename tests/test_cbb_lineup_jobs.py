@@ -4,6 +4,7 @@ import pandas as pd
 import pytest
 
 from college_basketball_dfs import cbb_lineup_jobs
+from college_basketball_dfs.cbb_dk_optimizer import locked_projection_recency_settings
 from college_basketball_dfs.cbb_lineup_jobs import (
     _annotate_lineups_with_version_metadata,
     _contest_is_gpp,
@@ -115,6 +116,8 @@ def test_run_lineup_job_request_blocks_when_no_active_slate_source_exists(monkey
 
 
 def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) -> None:
+    projection_recency = locked_projection_recency_settings()
+
     def _fake_resolve_active_slate_context(**_: object) -> dict[str, object]:
         return {
             "slate": {
@@ -185,6 +188,8 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
         seen["props_rows"] = int(len(props_df))
         seen["odds_tail_rows"] = int(len(odds_games_df))
         seen["bookmaker_filter"] = str(kwargs.get("bookmaker_filter") or "")
+        seen["recent_form_games"] = int(kwargs.get("recent_form_games") or 0)
+        seen["recent_points_weight"] = float(kwargs.get("recent_points_weight") or 0.0)
         return pd.DataFrame(
             [
                 {
@@ -279,7 +284,11 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
     monkeypatch.setattr(cbb_lineup_jobs, "build_dk_upload_csv", lambda _: "G,G,G,F,F,F,UTIL,UTIL\n")
 
     result = run_lineup_job_request(
-        request={"selected_date": "2026-03-05"},
+        request={
+            "selected_date": "2026-03-05",
+            "recent_form_games": 12,
+            "recent_points_weight": 0.9,
+        },
         progress=lambda pct, message: None,
         write_artifact=lambda name, content, content_type: None,
     )
@@ -291,8 +300,11 @@ def test_run_lineup_job_request_loads_saved_lineupstarter_priors(monkeypatch) ->
     assert seen["props_rows"] == 1
     assert seen["odds_tail_rows"] == 1
     assert seen["bookmaker_filter"] == "fanduel"
+    assert seen["recent_form_games"] == int(projection_recency["recent_form_games"])
+    assert seen["recent_points_weight"] == float(projection_recency["recent_points_weight"])
     assert bool(result["lineupstarter_loaded"]) is True
     assert result["active_source"] == "legacy_dk_fallback"
     assert int(result["season_history_rows"]) == 1
     assert int(result["props_rows"]) == 1
     assert int(result["odds_tail_rows"]) == 1
+    assert result["projection_recency"] == projection_recency
