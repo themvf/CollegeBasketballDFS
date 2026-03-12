@@ -1010,6 +1010,23 @@ def test_generate_lineups_spike_mode_runs_without_pair_metadata() -> None:
     assert all("pair_id" not in lineup and "pair_role" not in lineup for lineup in lineups)
 
 
+def test_generate_lineups_cluster_mode_runs() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=4,
+        contest_type="Large GPP",
+        lineup_strategy="cluster",
+        include_tail_signals=True,
+        random_seed=13,
+    )
+
+    assert warnings == []
+    assert len(lineups) == 4
+    assert all(str(l.get("lineup_strategy")) == "cluster" for l in lineups)
+    assert all(str(l.get("mutation_type") or "").strip() for l in lineups)
+
+
 def test_generate_lineups_objective_adjustments_increase_target_exposure() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
     target_id = "2006"

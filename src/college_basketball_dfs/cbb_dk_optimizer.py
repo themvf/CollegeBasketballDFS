@@ -3967,7 +3967,16 @@ def _is_feasible_partial(
 ) -> bool:
     g_count = sum(1 for p in selected if p["PositionBase"] == "G")
     f_count = sum(1 for p in selected if p["PositionBase"] == "F")
-    if len(selected) > cap:
+    return _is_feasible_partial_counts(g_count, f_count, cap, remaining_player_count_after_pick)
+
+
+def _is_feasible_partial_counts(
+    g_count: int,
+    f_count: int,
+    cap: int,
+    remaining_player_count_after_pick: int,
+) -> bool:
+    if (g_count + f_count) > cap:
         return False
     if g_count > cap - MIN_F:
         return False
@@ -3985,13 +3994,25 @@ def _lineup_valid(players: list[dict[str, Any]]) -> bool:
         return False
     g_count = sum(1 for p in players if p["PositionBase"] == "G")
     f_count = sum(1 for p in players if p["PositionBase"] == "F")
+    salary = sum(int(p["Salary"]) for p in players)
+    games = {str(p.get("game_key") or "") for p in players if str(p.get("game_key") or "")}
+    return _lineup_valid_counts(len(players), g_count, f_count, salary, len(games))
+
+
+def _lineup_valid_counts(
+    player_count: int,
+    g_count: int,
+    f_count: int,
+    salary: int,
+    distinct_game_count: int,
+) -> bool:
+    if player_count != ROSTER_SIZE:
+        return False
     if g_count < MIN_G or f_count < MIN_F:
         return False
-    salary = sum(int(p["Salary"]) for p in players)
     if salary > SALARY_CAP:
         return False
-    games = {str(p.get("game_key") or "") for p in players if str(p.get("game_key") or "")}
-    if len(games) < 2:
+    if distinct_game_count < 2:
         return False
     return True
 
@@ -4039,15 +4060,26 @@ def _preferred_game_stack_size(players: list[dict[str, Any]], preferred_games: s
         for p in players
         if str(p.get("game_key") or "").strip().upper() in preferred_games
     )
-    return int(max(counts.values(), default=0))
+    return _preferred_game_stack_size_from_counts(counts)
 
 
 def _preferred_game_stack_total(players: list[dict[str, Any]], preferred_games: set[str]) -> int:
     if not players or not preferred_games:
         return 0
-    return int(
-        sum(1 for p in players if str(p.get("game_key") or "").strip().upper() in preferred_games)
+    counts: Counter[str] = Counter(
+        str(p.get("game_key") or "").strip().upper()
+        for p in players
+        if str(p.get("game_key") or "").strip().upper() in preferred_games
     )
+    return _preferred_game_stack_total_from_counts(counts)
+
+
+def _preferred_game_stack_size_from_counts(counts: Counter[str]) -> int:
+    return int(max(counts.values(), default=0))
+
+
+def _preferred_game_stack_total_from_counts(counts: Counter[str]) -> int:
+    return int(sum(int(count) for count in counts.values()))
 
 
 def _can_still_hit_preferred_stack(
@@ -4066,9 +4098,29 @@ def _can_still_hit_preferred_stack(
         if str(p.get("game_key") or "").strip().upper() in preferred_games
     )
     normalized_candidate = str(candidate_game_key or "").strip().upper()
-    if normalized_candidate in preferred_games:
-        counts[normalized_candidate] += 1
+    return _can_still_hit_preferred_stack_from_counts(
+        counts,
+        normalized_candidate,
+        preferred_games,
+        required,
+        remaining_player_count_after_pick,
+    )
+
+
+def _can_still_hit_preferred_stack_from_counts(
+    counts: Counter[str],
+    candidate_game_key: str,
+    preferred_games: set[str],
+    required_count: int,
+    remaining_player_count_after_pick: int,
+) -> bool:
+    required = max(0, int(required_count))
+    if required <= 0 or not preferred_games:
+        return True
     current_best = max(counts.values(), default=0)
+    normalized_candidate = str(candidate_game_key or "").strip().upper()
+    if normalized_candidate in preferred_games:
+        current_best = max(current_best, int(counts.get(normalized_candidate, 0)) + 1)
     possible_best = current_best + max(0, int(remaining_player_count_after_pick))
     return bool(possible_best >= required)
 
@@ -4114,6 +4166,31 @@ def _distributed_lineup_indices(
         if remaining:
             selected.update(rng.sample(remaining, k=min(len(remaining), target - len(selected))))
     return selected
+
+
+def _prepare_generation_players(players: list[dict[str, Any]]) -> None:
+    for player in players:
+        player_id = str(player.get("ID") or "")
+        projected_points = _safe_num(player.get("projected_dk_points"), 0.0)
+        player["_player_id"] = player_id
+        player["_salary_int"] = max(0, int(_safe_int(player.get("Salary")) or 0))
+        player["_objective_score_float"] = max(0.01, _safe_num(player.get("objective_score"), 0.0))
+        player["_projected_points_float"] = projected_points
+        player["_ceiling_projection_float"] = _safe_num(
+            player.get("ceiling_projection"),
+            projected_points * 1.18,
+        )
+        player["_projected_ownership_float"] = _safe_num(player.get("projected_ownership"), 0.0)
+        player["_ceiling_signal_score_float"] = _safe_num(player.get("ceiling_signal_score"), 0.0)
+        player["_game_key_norm"] = str(player.get("game_key") or "").strip().upper()
+        player["_team_abbrev_norm"] = str(player.get("TeamAbbrev") or "").strip().upper()
+        position_base = str(player.get("PositionBase") or "").strip().upper()
+        player["_is_guard"] = position_base == "G"
+        player["_is_forward"] = position_base == "F"
+        player["_game_total_line_float"] = _safe_float(player.get("game_total_line"))
+        player["_game_spread_line_float"] = _safe_float(player.get("game_spread_line"))
+        player["_game_tail_score_float"] = _safe_float(player.get("game_tail_score"))
+        player["_game_volatility_score_float"] = _safe_float(player.get("game_volatility_score"))
 
 
 def _portfolio_candidate_count(
@@ -4327,31 +4404,42 @@ def _rerank_lineup_portfolio(
     for lineup in candidates:
         lineup["_portfolio_base_score"] = _base_score(lineup)
 
-    candidates.sort(
-        key=lambda lineup: (
-            float(lineup.get("_portfolio_base_score") or 0.0),
-            float(_safe_num(lineup.get("projected_points"), 0.0)),
-            -float(_safe_num(lineup.get("unsupported_false_chalk_count"), 0.0)),
+    candidate_rows = [
+        {
+            "lineup": lineup,
+            "player_ids": [str(x) for x in (lineup.get("player_ids") or []) if str(x).strip()],
+        }
+        for lineup in candidates
+    ]
+    for row in candidate_rows:
+        row["player_id_set"] = set(row["player_ids"])
+
+    candidate_rows.sort(
+        key=lambda row: (
+            float(row["lineup"].get("_portfolio_base_score") or 0.0),
+            float(_safe_num(row["lineup"].get("projected_points"), 0.0)),
+            -float(_safe_num(row["lineup"].get("unsupported_false_chalk_count"), 0.0)),
         ),
         reverse=True,
     )
 
-    selected: list[dict[str, Any]] = []
+    selected_rows: list[dict[str, Any]] = []
     exposure_counts: dict[str, int] = {}
     selected_preferred = 0
     selected_low_own = 0
     selected_ceiling_boost = 0
 
-    while candidates and len(selected) < requested:
-        remaining_slots = requested - len(selected)
+    while candidate_rows and len(selected_rows) < requested:
+        remaining_slots = requested - len(selected_rows)
         preferred_needed = max(0, int(preferred_target_count) - selected_preferred)
         low_own_needed = max(0, int(low_own_target_count) - selected_low_own)
         ceiling_boost_needed = max(0, int(ceiling_boost_target_count) - selected_ceiling_boost)
         best_idx = None
         best_score = -10**12
 
-        for idx, lineup in enumerate(candidates):
-            lineup_ids = [str(x) for x in (lineup.get("player_ids") or []) if str(x).strip()]
+        for idx, row in enumerate(candidate_rows):
+            lineup = row["lineup"]
+            lineup_ids = row["player_ids"]
             if any(exposure_counts.get(pid, 0) >= int(cap_counts.get(pid, requested)) for pid in lineup_ids):
                 continue
             if preferred_needed >= remaining_slots and not bool(lineup.get("preferred_game_stack_met")):
@@ -4362,10 +4450,15 @@ def _rerank_lineup_portfolio(
                 continue
 
             overlap_penalty = 0.0
-            if selected:
+            if selected_rows:
                 overlap_penalty = max(
                     0.0,
-                    float(max(_lineup_overlap_count(lineup, prior) for prior in selected) - overlap_cap),
+                    float(
+                        max(
+                            len(row["player_id_set"] & selected_row["player_id_set"])
+                            for selected_row in selected_rows
+                        ) - overlap_cap
+                    ),
                 ) * 2.4
             exposure_penalty = 0.0
             for pid in lineup_ids:
@@ -4389,22 +4482,24 @@ def _rerank_lineup_portfolio(
         if best_idx is None:
             break
 
-        chosen = candidates.pop(best_idx)
-        for pid in [str(x) for x in (chosen.get("player_ids") or []) if str(x).strip()]:
+        chosen = candidate_rows.pop(best_idx)
+        lineup = chosen["lineup"]
+        for pid in chosen["player_ids"]:
             exposure_counts[pid] = exposure_counts.get(pid, 0) + 1
-        if bool(chosen.get("preferred_game_stack_met")):
+        if bool(lineup.get("preferred_game_stack_met")):
             selected_preferred += 1
-        if _safe_num(chosen.get("low_own_upside_count"), 0.0) > 0.0:
+        if _safe_num(lineup.get("low_own_upside_count"), 0.0) > 0.0:
             selected_low_own += 1
-        if bool(chosen.get("ceiling_boost_active")):
+        if bool(lineup.get("ceiling_boost_active")):
             selected_ceiling_boost += 1
-        selected.append(chosen)
+        selected_rows.append(chosen)
 
-    for idx, lineup in enumerate(selected[:requested], start=1):
+    selected = [row["lineup"] for row in selected_rows[:requested]]
+    for idx, lineup in enumerate(selected, start=1):
         lineup["lineup_number"] = idx
         lineup["portfolio_rerank_score"] = round(float(lineup.get("_portfolio_base_score") or _base_score(lineup)), 4)
         lineup.pop("_portfolio_base_score", None)
-    return selected[:requested]
+    return selected
 
 
 def _lineup_stack_signature(players: list[dict[str, Any]]) -> str:
@@ -4869,7 +4964,8 @@ def generate_lineups(
         return [], ["A player cannot be both locked and excluded."]
 
     players = scored.to_dict(orient="records")
-    by_id = {str(p["ID"]): p for p in players}
+    _prepare_generation_players(players)
+    by_id = {str(p["_player_id"]): p for p in players}
     missing_locks = [pid for pid in locked_set if pid not in by_id]
     if missing_locks:
         return [], [f"Locked players not found in pool: {', '.join(missing_locks)}"]
@@ -4879,7 +4975,7 @@ def generate_lineups(
         return [], ["Too many locked players for roster size."]
     if unsupported_false_chalk_cap is not None:
         locked_unsupported_false_chalk = sum(
-            1 for p in lock_players if str(p.get("ID")) in unsupported_false_chalk_ids
+            1 for p in lock_players if str(p.get("_player_id")) in unsupported_false_chalk_ids
         )
         if locked_unsupported_false_chalk > unsupported_false_chalk_cap:
             return [], [
@@ -4887,13 +4983,20 @@ def generate_lineups(
                 f"({locked_unsupported_false_chalk} > {unsupported_false_chalk_cap})."
             ]
 
-    lock_salary = sum(int(p["Salary"]) for p in lock_players)
+    lock_salary = sum(int(p["_salary_int"]) for p in lock_players)
     if lock_salary > SALARY_CAP:
         return [], ["Locked players exceed salary cap."]
     max_salary_any = int(scored["Salary"].max())
     if lock_salary + ((ROSTER_SIZE - len(lock_players)) * max_salary_any) < min_salary_used:
         return [], ["Locked players make minimum-salary-used constraint impossible."]
-    if not _is_feasible_partial(lock_players, ROSTER_SIZE, ROSTER_SIZE - len(lock_players)):
+    lock_guard_count = sum(1 for p in lock_players if bool(p.get("_is_guard")))
+    lock_forward_count = sum(1 for p in lock_players if bool(p.get("_is_forward")))
+    if not _is_feasible_partial_counts(
+        lock_guard_count,
+        lock_forward_count,
+        ROSTER_SIZE,
+        ROSTER_SIZE - len(lock_players),
+    ):
         return [], ["Locked players make roster constraints impossible."]
 
     global_pct = max(0.0, min(100.0, float(global_max_exposure_pct)))
@@ -4941,7 +5044,7 @@ def generate_lineups(
             f"{int(round(float(uncertainty_cap_meta['high_cap_pct'])))}%)."
         )
 
-    exposure_counts: dict[str, int] = {str(p["ID"]): 0 for p in players}
+    exposure_counts: dict[str, int] = {str(p["_player_id"]): 0 for p in players}
     rng = random.Random(random_seed)
     lineups: list[dict[str, Any]] = []
 
@@ -5068,6 +5171,36 @@ def generate_lineups(
     ]
     model_profile_value = str(model_profile or "legacy_baseline")
     strategy_norm = str(lineup_strategy or "standard").strip().lower()
+    lock_player_ids = {str(p["_player_id"]) for p in lock_players}
+    lock_low_own_count = sum(1 for p in lock_players if str(p["_player_id"]) in low_own_candidate_ids)
+    lock_unsupported_false_chalk_count = sum(
+        1 for p in lock_players if str(p["_player_id"]) in unsupported_false_chalk_ids
+    )
+    lock_game_counts: Counter[str] = Counter(
+        str(p["_game_key_norm"]) for p in lock_players if str(p["_game_key_norm"])
+    )
+    lock_preferred_counts: Counter[str] = Counter(
+        {game_key: int(count) for game_key, count in lock_game_counts.items() if game_key in preferred_games}
+    )
+    lock_objective_sum = float(sum(float(p["_objective_score_float"]) for p in lock_players))
+    lock_projected_points_sum = float(sum(float(p["_projected_points_float"]) for p in lock_players))
+    lock_ceiling_sum = float(sum(float(p["_ceiling_projection_float"]) for p in lock_players))
+    lock_ownership_sum = float(sum(float(p["_projected_ownership_float"]) for p in lock_players))
+    lock_ceiling_signal_sum = float(sum(float(p["_ceiling_signal_score_float"]) for p in lock_players))
+    lock_tail_score_sum = float(
+        sum(
+            float(p["_game_tail_score_float"])
+            for p in lock_players
+            if p.get("_game_tail_score_float") is not None and not math.isnan(float(p["_game_tail_score_float"]))
+        )
+    )
+    lock_volatility_sum = float(
+        sum(
+            float(p["_game_volatility_score_float"])
+            for p in lock_players
+            if p.get("_game_volatility_score_float") is not None and not math.isnan(float(p["_game_volatility_score_float"]))
+        )
+    )
     spike_mode = strategy_norm in {"spike", "lineup spike", "spike pairs", "lineup_spike", "lineup_spike_pairs"}
     cluster_mode = strategy_norm in {
         "cluster",
@@ -5113,6 +5246,7 @@ def generate_lineups(
             contest_type=contest_type,
         )
 
+    lineup_id_sets: list[set[str]] = []
     for lineup_idx in range(candidate_num_lineups):
         require_low_own = (
             lineup_idx in low_own_required_indices
@@ -5132,16 +5266,26 @@ def generate_lineups(
             status = f"Generating lineup {display_idx} of {requested_num_lineups}..."
             progress_callback(min(lineup_idx, requested_num_lineups), requested_num_lineups, status)
         best_lineup: list[dict[str, Any]] | None = None
+        best_lineup_metrics: dict[str, Any] | None = None
         best_score = -10**12
 
         for _ in range(max_attempts_per_lineup):
-            selected = [dict(x) for x in lock_players]
-            selected_ids = {str(p["ID"]) for p in selected}
-            salary = sum(int(p["Salary"]) for p in selected)
-            current_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_candidate_ids)
-            current_unsupported_false_chalk_count = sum(
-                1 for p in selected if str(p.get("ID")) in unsupported_false_chalk_ids
-            )
+            selected = list(lock_players)
+            selected_ids = set(lock_player_ids)
+            salary = lock_salary
+            current_low_own_count = lock_low_own_count
+            current_unsupported_false_chalk_count = lock_unsupported_false_chalk_count
+            selected_guard_count = lock_guard_count
+            selected_forward_count = lock_forward_count
+            selected_objective_sum = lock_objective_sum
+            selected_projected_points_sum = lock_projected_points_sum
+            selected_ceiling_sum = lock_ceiling_sum
+            selected_ownership_sum = lock_ownership_sum
+            selected_ceiling_signal_sum = lock_ceiling_signal_sum
+            selected_game_counts: Counter[str] = Counter(lock_game_counts)
+            selected_preferred_counts: Counter[str] = Counter(lock_preferred_counts)
+            selected_tail_sum = lock_tail_score_sum
+            selected_volatility_sum = lock_volatility_sum
 
             while len(selected) < ROSTER_SIZE:
                 remaining_slots = ROSTER_SIZE - len(selected)
@@ -5149,12 +5293,12 @@ def generate_lineups(
                 weights: list[float] = []
 
                 for p in players:
-                    pid = str(p["ID"])
+                    pid = str(p["_player_id"])
                     if pid in selected_ids:
                         continue
                     if exposure_counts[pid] >= cap_counts.get(pid, candidate_num_lineups):
                         continue
-                    next_salary = salary + int(p["Salary"])
+                    next_salary = salary + int(p["_salary_int"])
                     if next_salary > SALARY_CAP:
                         continue
                     rem_after_pick = remaining_slots - 1
@@ -5163,120 +5307,139 @@ def generate_lineups(
                     if next_salary + (rem_after_pick * max_salary_any) < min_salary_used:
                         continue
                     if require_low_own:
-                        is_low_own_pick = pid in low_own_candidate_ids
-                        projected_low_own = current_low_own_count + (1 if is_low_own_pick else 0)
+                        projected_low_own = current_low_own_count + (1 if pid in low_own_candidate_ids else 0)
                         min_needed_after_pick = max(0, low_own_min_required - projected_low_own)
                         if min_needed_after_pick > rem_after_pick:
                             continue
                     if unsupported_false_chalk_cap is not None:
-                        is_unsupported_false_chalk_pick = pid in unsupported_false_chalk_ids
-                        projected_unsupported_false_chalk = (
-                            current_unsupported_false_chalk_count + (1 if is_unsupported_false_chalk_pick else 0)
+                        projected_unsupported_false_chalk = current_unsupported_false_chalk_count + (
+                            1 if pid in unsupported_false_chalk_ids else 0
                         )
                         if projected_unsupported_false_chalk > unsupported_false_chalk_cap:
                             continue
-                    pick_game_key = str(p.get("game_key") or "").strip().upper()
-                    if require_preferred_stack and not _can_still_hit_preferred_stack(
-                        selected,
+                    pick_game_key = str(p["_game_key_norm"])
+                    if require_preferred_stack and not _can_still_hit_preferred_stack_from_counts(
+                        selected_preferred_counts,
                         pick_game_key,
                         preferred_games,
                         preferred_game_stack_min_players_value,
                         rem_after_pick,
                     ):
                         continue
-
-                    partial = selected + [p]
-                    if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
+                    next_guard_count = selected_guard_count + (1 if bool(p.get("_is_guard")) else 0)
+                    next_forward_count = selected_forward_count + (1 if bool(p.get("_is_forward")) else 0)
+                    if not _is_feasible_partial_counts(
+                        next_guard_count,
+                        next_forward_count,
+                        ROSTER_SIZE,
+                        rem_after_pick,
+                    ):
                         continue
 
                     candidates.append(p)
-                    base_weight = max(0.01, float(p.get("objective_score", 0.0)))
-                    weights.append(base_weight * rng.uniform(0.85, 1.15))
+                    weights.append(float(p["_objective_score_float"]) * rng.uniform(0.85, 1.15))
 
                 if not candidates:
                     selected = []
                     break
 
                 pick = rng.choices(candidates, weights=weights, k=1)[0]
+                pick_id = str(pick["_player_id"])
                 selected.append(pick)
-                selected_ids.add(str(pick["ID"]))
-                salary += int(pick["Salary"])
-                if str(pick.get("ID")) in low_own_candidate_ids:
+                selected_ids.add(pick_id)
+                salary += int(pick["_salary_int"])
+                selected_guard_count += 1 if bool(pick.get("_is_guard")) else 0
+                selected_forward_count += 1 if bool(pick.get("_is_forward")) else 0
+                selected_objective_sum += float(pick["_objective_score_float"])
+                selected_projected_points_sum += float(pick["_projected_points_float"])
+                selected_ceiling_sum += float(pick["_ceiling_projection_float"])
+                selected_ownership_sum += float(pick["_projected_ownership_float"])
+                selected_ceiling_signal_sum += float(pick["_ceiling_signal_score_float"])
+                pick_game_key = str(pick["_game_key_norm"])
+                if pick_game_key:
+                    selected_game_counts[pick_game_key] += 1
+                    if pick_game_key in preferred_games:
+                        selected_preferred_counts[pick_game_key] += 1
+                if pick_id in low_own_candidate_ids:
                     current_low_own_count += 1
-                if str(pick.get("ID")) in unsupported_false_chalk_ids:
+                if pick_id in unsupported_false_chalk_ids:
                     current_unsupported_false_chalk_count += 1
+                if include_tail_signals:
+                    pick_tail = pick.get("_game_tail_score_float")
+                    if pick_tail is not None and not math.isnan(float(pick_tail)):
+                        selected_tail_sum += float(pick_tail)
+                    pick_volatility = pick.get("_game_volatility_score_float")
+                    if pick_volatility is not None and not math.isnan(float(pick_volatility)):
+                        selected_volatility_sum += float(pick_volatility)
 
             if not selected:
                 continue
-            if not _lineup_valid(selected):
-                continue
-            final_salary = int(sum(int(p["Salary"]) for p in selected))
-            if final_salary < min_salary_used:
-                continue
-            current_ids = {str(p["ID"]) for p in selected}
-            lineup_low_own_count = sum(1 for pid in current_ids if pid in low_own_candidate_ids)
-            if require_low_own and lineup_low_own_count < low_own_min_required:
-                continue
-            lineup_unsupported_false_chalk_count = sum(1 for pid in current_ids if pid in unsupported_false_chalk_ids)
-            if (
-                unsupported_false_chalk_cap is not None
-                and lineup_unsupported_false_chalk_count > unsupported_false_chalk_cap
+            if not _lineup_valid_counts(
+                len(selected),
+                selected_guard_count,
+                selected_forward_count,
+                salary,
+                len(selected_game_counts),
             ):
                 continue
-            preferred_stack_size = _preferred_game_stack_size(selected, preferred_games)
+            if salary < min_salary_used:
+                continue
+            if require_low_own and current_low_own_count < low_own_min_required:
+                continue
+            if (
+                unsupported_false_chalk_cap is not None
+                and current_unsupported_false_chalk_count > unsupported_false_chalk_cap
+            ):
+                continue
+            preferred_stack_size = _preferred_game_stack_size_from_counts(selected_preferred_counts)
             if require_preferred_stack and preferred_stack_size < preferred_game_stack_min_players_value:
                 continue
 
-            selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
-            game_counts = _lineup_game_counts(selected)
-            salary_left = SALARY_CAP - final_salary
+            selected_score = selected_objective_sum
+            game_counts = selected_game_counts
+            salary_left = SALARY_CAP - salary
             if active_salary_target is not None:
                 selected_score -= abs(float(salary_left - active_salary_target)) / salary_penalty_divisor
+            preferred_count = float(_preferred_game_stack_total_from_counts(selected_preferred_counts))
             if preferred_games and preferred_game_bonus_value > 0.0:
-                preferred_count = float(
-                    sum(cnt for game_key, cnt in game_counts.items() if str(game_key or "").strip().upper() in preferred_games)
-                )
                 selected_score += preferred_game_bonus_value * preferred_count
             if ceiling_boost_active and ceiling_boost_stack_bonus > 0.0:
                 selected_score += float(ceiling_boost_stack_bonus) * _stack_bonus_from_counts(game_counts)
-            selected_ceiling = float(
-                sum(
-                    _safe_num(
-                        p.get("ceiling_projection"),
-                        _safe_num(p.get("projected_dk_points"), 0.0) * 1.18,
-                    )
-                    for p in selected
-                )
-            )
-            selected_ceiling_signal = (
-                sum(_safe_num(p.get("ceiling_signal_score"), 0.0) for p in selected) / max(1, len(selected))
-            )
+            selected_ceiling = float(selected_ceiling_sum)
+            selected_ceiling_signal = float(selected_ceiling_signal_sum) / max(1, len(selected))
             if ceiling_boost_active:
-                selected_score += (0.12 * max(0.0, selected_ceiling - sum(_safe_num(p.get("projected_dk_points")) for p in selected)))
+                selected_score += (0.12 * max(0.0, selected_ceiling - float(selected_projected_points_sum)))
                 selected_score += 1.8 * selected_ceiling_signal
             if spike_mode:
-                def _safe_metric_num(value: Any) -> float:
-                    num = _safe_float(value)
-                    if num is None or math.isnan(num):
-                        return 0.0
-                    return float(num)
-
                 selected_score += 1.25 * _stack_bonus_from_counts(game_counts)
                 if include_tail_signals:
-                    avg_tail = sum(_safe_metric_num(p.get("game_tail_score")) for p in selected) / max(1, len(selected))
-                    avg_vol = sum(_safe_metric_num(p.get("game_volatility_score")) for p in selected) / max(1, len(selected))
+                    avg_tail = float(selected_tail_sum) / max(1, len(selected))
+                    avg_vol = float(selected_volatility_sum) / max(1, len(selected))
                     selected_score += (0.20 * avg_tail) + (0.02 * avg_vol)
 
-            if lineups:
-                max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)
+            if lineup_id_sets:
+                max_overlap = max(len(selected_ids & prior_ids) for prior_ids in lineup_id_sets)
                 overlap_cap = spike_overlap_cap if spike_mode else 6
                 selected_score -= max(0, max_overlap - overlap_cap) * 2.0
 
             if selected_score > best_score:
                 best_score = selected_score
                 best_lineup = [{k: p.get(k) for k in player_cols} for p in selected]
+                best_lineup_metrics = {
+                    "player_ids": [str(p["_player_id"]) for p in selected],
+                    "salary": int(salary),
+                    "salary_left": int(salary_left),
+                    "projected_points": float(selected_projected_points_sum),
+                    "ceiling_projection": float(selected_ceiling),
+                    "ceiling_signal_mean": float(selected_ceiling_signal),
+                    "projected_ownership_sum": float(selected_ownership_sum),
+                    "low_own_upside_count": int(current_low_own_count),
+                    "preferred_game_player_count": int(preferred_count),
+                    "preferred_game_stack_size": int(preferred_stack_size),
+                    "unsupported_false_chalk_count": int(current_unsupported_false_chalk_count),
+                }
 
-        if best_lineup is None:
+        if best_lineup is None or best_lineup_metrics is None:
             warnings.append(
                 f"Stopped early at lineup {lineup_idx + 1}: could not satisfy constraints/exposure with current pool."
             )
@@ -5288,58 +5451,39 @@ def generate_lineups(
                 )
             break
 
-        for p in best_lineup:
-            exposure_counts[str(p["ID"])] += 1
+        for pid in list(best_lineup_metrics["player_ids"]):
+            exposure_counts[str(pid)] += 1
 
-        lineup_salary = int(sum(int(p["Salary"]) for p in best_lineup))
-        lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
-        lineup_ceiling = float(
-            sum(
-                _safe_num(
-                    p.get("ceiling_projection"),
-                    _safe_num(p.get("projected_dk_points"), 0.0) * 1.18,
-                )
-                for p in best_lineup
-            )
-        )
-        lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
-        lineup_ceiling_signal = (
-            sum(_safe_num(p.get("ceiling_signal_score"), 0.0) for p in best_lineup) / max(1, len(best_lineup))
-        )
         expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
-        preferred_game_player_count = _preferred_game_stack_total(best_lineup, preferred_games)
-        preferred_game_stack_size = _preferred_game_stack_size(best_lineup, preferred_games)
-        unsupported_false_chalk_count = int(
-            sum(1 for p in best_lineup if str(p.get("ID")) in unsupported_false_chalk_ids)
-        )
-
         lineups.append(
             {
                 "lineup_number": len(lineups) + 1,
                 "players": best_lineup,
-                "player_ids": [str(p["ID"]) for p in best_lineup],
-                "salary": lineup_salary,
-                "salary_left": SALARY_CAP - lineup_salary,
-                "projected_points": round(lineup_proj, 2),
-                "ceiling_projection": round(lineup_ceiling, 2),
-                "ceiling_signal_mean": round(float(lineup_ceiling_signal), 4),
-                "projected_ownership_sum": round(lineup_own, 2),
+                "player_ids": list(best_lineup_metrics["player_ids"]),
+                "salary": int(best_lineup_metrics["salary"]),
+                "salary_left": int(best_lineup_metrics["salary_left"]),
+                "projected_points": round(float(best_lineup_metrics["projected_points"]), 2),
+                "ceiling_projection": round(float(best_lineup_metrics["ceiling_projection"]), 2),
+                "ceiling_signal_mean": round(float(best_lineup_metrics["ceiling_signal_mean"]), 4),
+                "projected_ownership_sum": round(float(best_lineup_metrics["projected_ownership_sum"]), 2),
                 "expected_minutes_sum": expected_minutes_sum,
                 "avg_minutes_last3": avg_minutes_last3,
                 "lineup_strategy": "spike" if spike_mode else "standard",
                 "model_profile": model_profile_value,
                 "stack_signature": _lineup_stack_signature(best_lineup),
-                "salary_texture_bucket": _salary_texture_bucket(SALARY_CAP - lineup_salary),
-                "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_candidate_ids)),
-                "preferred_game_player_count": int(preferred_game_player_count),
-                "preferred_game_stack_size": int(preferred_game_stack_size),
+                "salary_texture_bucket": _salary_texture_bucket(int(best_lineup_metrics["salary_left"])),
+                "low_own_upside_count": int(best_lineup_metrics["low_own_upside_count"]),
+                "preferred_game_player_count": int(best_lineup_metrics["preferred_game_player_count"]),
+                "preferred_game_stack_size": int(best_lineup_metrics["preferred_game_stack_size"]),
                 "preferred_game_stack_met": bool(
-                    preferred_game_stack_min_players_value > 0 and preferred_game_stack_size >= preferred_game_stack_min_players_value
+                    preferred_game_stack_min_players_value > 0
+                    and int(best_lineup_metrics["preferred_game_stack_size"]) >= preferred_game_stack_min_players_value
                 ),
-                "unsupported_false_chalk_count": unsupported_false_chalk_count,
+                "unsupported_false_chalk_count": int(best_lineup_metrics["unsupported_false_chalk_count"]),
                 "ceiling_boost_active": bool(ceiling_boost_active),
             }
         )
+        lineup_id_sets.append(set(str(pid) for pid in best_lineup_metrics["player_ids"]))
 
         if progress_callback is not None:
                 progress_callback(
@@ -5458,6 +5602,23 @@ def _generate_lineups_cluster_mode(
     base_spread = float(spread_baseline.median()) if not spread_baseline.empty else 8.0
     base_own = float(own_baseline.median()) if not own_baseline.empty else 14.0
     base_tail = float(tail_baseline.median()) if not tail_baseline.empty else 50.0
+    lock_player_ids = {str(p["_player_id"]) for p in lock_players}
+    lock_salary = sum(int(p["_salary_int"]) for p in lock_players)
+    lock_guard_count = sum(1 for p in lock_players if bool(p.get("_is_guard")))
+    lock_forward_count = sum(1 for p in lock_players if bool(p.get("_is_forward")))
+    lock_low_own_count = sum(1 for p in lock_players if str(p["_player_id"]) in low_own_ids)
+    lock_unsupported_false_chalk_count = sum(
+        1 for p in lock_players if str(p["_player_id"]) in unsupported_false_chalk_ids_set
+    )
+    lock_game_counts: Counter[str] = Counter(
+        str(p["_game_key_norm"]) for p in lock_players if str(p["_game_key_norm"])
+    )
+    lock_objective_sum = float(sum(float(p["_objective_score_float"]) for p in lock_players))
+    lock_projected_points_sum = float(sum(float(p["_projected_points_float"]) for p in lock_players))
+    lock_ceiling_sum = float(sum(float(p["_ceiling_projection_float"]) for p in lock_players))
+    lock_ownership_sum = float(sum(float(p["_projected_ownership_float"]) for p in lock_players))
+    lock_ceiling_signal_sum = float(sum(float(p["_ceiling_signal_score_float"]) for p in lock_players))
+    lineup_id_sets: list[set[str]] = []
 
     cluster_specs = _build_cluster_specs(
         players=players,
@@ -5477,8 +5638,17 @@ def _generate_lineups_cluster_mode(
             continue
 
         cluster_lineups: list[dict[str, Any]] = []
+        cluster_lineup_id_sets: list[set[str]] = []
         seed_player_ids: set[str] = set()
         seed_lineup_id: int | None = None
+        lock_preferred_counts: Counter[str] = Counter(
+            {game_key: int(count) for game_key, count in lock_game_counts.items() if game_key in preferred_games}
+        )
+        lock_anchor_teams = {
+            str(p["_team_abbrev_norm"])
+            for p in lock_players
+            if anchor_game_key and str(p["_game_key_norm"]) == anchor_game_key and str(p["_team_abbrev_norm"])
+        }
 
         for variant_idx in range(target_lineups):
             lineup_global_idx = int(len(lineups))
@@ -5515,35 +5685,44 @@ def _generate_lineups_cluster_mode(
                 )
 
             best_lineup: list[dict[str, Any]] | None = None
+            best_lineup_metrics: dict[str, Any] | None = None
             best_score = -10**12
 
             for _ in range(max_attempts_per_lineup):
-                selected = [dict(x) for x in lock_players]
-                selected_ids = {str(p["ID"]) for p in selected}
-                salary = sum(int(p["Salary"]) for p in selected)
-                current_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_ids)
-                current_unsupported_false_chalk_count = sum(
-                    1 for p in selected if str(p.get("ID")) in unsupported_false_chalk_ids_set
-                )
+                selected = list(lock_players)
+                selected_ids = set(lock_player_ids)
+                salary = lock_salary
+                current_low_own_count = lock_low_own_count
+                current_unsupported_false_chalk_count = lock_unsupported_false_chalk_count
+                selected_guard_count = lock_guard_count
+                selected_forward_count = lock_forward_count
+                selected_objective_sum = lock_objective_sum
+                selected_projected_points_sum = lock_projected_points_sum
+                selected_ceiling_sum = lock_ceiling_sum
+                selected_ownership_sum = lock_ownership_sum
+                selected_ceiling_signal_sum = lock_ceiling_signal_sum
+                selected_game_counts: Counter[str] = Counter(lock_game_counts)
+                selected_preferred_counts: Counter[str] = Counter(lock_preferred_counts)
+                selected_anchor_teams = set(lock_anchor_teams)
 
                 while len(selected) < ROSTER_SIZE:
                     remaining_slots = ROSTER_SIZE - len(selected)
                     candidates: list[dict[str, Any]] = []
                     weights: list[float] = []
                     current_anchor_count = (
-                        sum(1 for p in selected if str(p.get("game_key") or "").strip().upper() == anchor_game_key)
+                        int(selected_game_counts.get(anchor_game_key, 0))
                         if anchor_game_key
                         else 0
                     )
 
                     for p in players:
-                        pid = str(p["ID"])
+                        pid = str(p["_player_id"])
                         if pid in selected_ids:
                             continue
                         if exposure_counts.get(pid, 0) >= cap_counts.get(pid, num_lineups):
                             continue
 
-                        next_salary = salary + int(p["Salary"])
+                        next_salary = salary + int(p["_salary_int"])
                         if next_salary > SALARY_CAP:
                             continue
                         rem_after_pick = remaining_slots - 1
@@ -5552,7 +5731,7 @@ def _generate_lineups_cluster_mode(
                         if next_salary + (rem_after_pick * max_salary_any) < min_salary_used:
                             continue
 
-                        pick_game_key = str(p.get("game_key") or "").strip().upper()
+                        pick_game_key = str(p["_game_key_norm"])
                         if anchor_game_key and required_anchor_count > 0:
                             is_anchor_pick = pick_game_key == anchor_game_key
                             projected_anchor = current_anchor_count + (1 if is_anchor_pick else 0)
@@ -5571,8 +5750,8 @@ def _generate_lineups_cluster_mode(
                             )
                             if projected_unsupported_false_chalk > unsupported_false_chalk_cap:
                                 continue
-                        if require_preferred_stack and not _can_still_hit_preferred_stack(
-                            selected,
+                        if require_preferred_stack and not _can_still_hit_preferred_stack_from_counts(
+                            selected_preferred_counts,
                             pick_game_key,
                             preferred_games,
                             preferred_stack_min,
@@ -5580,11 +5759,17 @@ def _generate_lineups_cluster_mode(
                         ):
                             continue
 
-                        partial = selected + [p]
-                        if not _is_feasible_partial(partial, ROSTER_SIZE, rem_after_pick):
+                        next_guard_count = selected_guard_count + (1 if bool(p.get("_is_guard")) else 0)
+                        next_forward_count = selected_forward_count + (1 if bool(p.get("_is_forward")) else 0)
+                        if not _is_feasible_partial_counts(
+                            next_guard_count,
+                            next_forward_count,
+                            ROSTER_SIZE,
+                            rem_after_pick,
+                        ):
                             continue
 
-                        base_weight = max(0.01, float(p.get("objective_score", 0.0)))
+                        base_weight = float(p["_objective_score_float"])
                         weight_mult = 1.0
                         if anchor_game_key:
                             if pick_game_key == anchor_game_key:
@@ -5592,10 +5777,25 @@ def _generate_lineups_cluster_mode(
                             elif pick_game_key:
                                 weight_mult *= 0.94
 
-                        total_line = _safe_num(p.get("game_total_line"), base_total)
-                        spread_abs = abs(_safe_num(p.get("game_spread_line"), base_spread))
-                        own_pct = _safe_num(p.get("projected_ownership"), base_own)
-                        tail_score = _safe_num(p.get("game_tail_score"), base_tail)
+                        total_line_raw = p.get("_game_total_line_float")
+                        total_line = (
+                            base_total
+                            if total_line_raw is None or math.isnan(float(total_line_raw))
+                            else float(total_line_raw)
+                        )
+                        spread_raw = p.get("_game_spread_line_float")
+                        spread_abs = (
+                            abs(base_spread)
+                            if spread_raw is None or math.isnan(float(spread_raw))
+                            else abs(float(spread_raw))
+                        )
+                        own_pct = float(p["_projected_ownership_float"]) if p.get("_projected_ownership_float") is not None else base_own
+                        tail_raw = p.get("_game_tail_score_float")
+                        tail_score = (
+                            base_tail
+                            if tail_raw is None or math.isnan(float(tail_raw))
+                            else float(tail_raw)
+                        )
 
                         if cluster_script == "high_total":
                             weight_mult *= 1.0 + max(0.0, (total_line - base_total) / 180.0)
@@ -5616,91 +5816,89 @@ def _generate_lineups_cluster_mode(
                         break
 
                     pick = rng.choices(candidates, weights=weights, k=1)[0]
+                    pick_id = str(pick["_player_id"])
                     selected.append(pick)
-                    selected_ids.add(str(pick["ID"]))
-                    salary += int(pick["Salary"])
-                    if str(pick.get("ID")) in low_own_ids:
+                    selected_ids.add(pick_id)
+                    salary += int(pick["_salary_int"])
+                    selected_guard_count += 1 if bool(pick.get("_is_guard")) else 0
+                    selected_forward_count += 1 if bool(pick.get("_is_forward")) else 0
+                    selected_objective_sum += float(pick["_objective_score_float"])
+                    selected_projected_points_sum += float(pick["_projected_points_float"])
+                    selected_ceiling_sum += float(pick["_ceiling_projection_float"])
+                    selected_ownership_sum += float(pick["_projected_ownership_float"])
+                    selected_ceiling_signal_sum += float(pick["_ceiling_signal_score_float"])
+                    pick_game_key = str(pick["_game_key_norm"])
+                    if pick_game_key:
+                        selected_game_counts[pick_game_key] += 1
+                        if pick_game_key in preferred_games:
+                            selected_preferred_counts[pick_game_key] += 1
+                        if pick_game_key == anchor_game_key and str(pick["_team_abbrev_norm"]):
+                            selected_anchor_teams.add(str(pick["_team_abbrev_norm"]))
+                    if pick_id in low_own_ids:
                         current_low_own_count += 1
-                    if str(pick.get("ID")) in unsupported_false_chalk_ids_set:
+                    if pick_id in unsupported_false_chalk_ids_set:
                         current_unsupported_false_chalk_count += 1
 
                 if not selected:
                     continue
-                if not _lineup_valid(selected):
+                if not _lineup_valid_counts(
+                    len(selected),
+                    selected_guard_count,
+                    selected_forward_count,
+                    salary,
+                    len(selected_game_counts),
+                ):
                     continue
-                final_salary = int(sum(int(p["Salary"]) for p in selected))
-                if final_salary < min_salary_used:
+                if salary < min_salary_used:
                     continue
 
-                game_counts = _lineup_game_counts(selected)
+                game_counts = selected_game_counts
                 anchor_count = int(game_counts.get(anchor_game_key, 0)) if anchor_game_key else 0
                 if anchor_game_key and anchor_count < required_anchor_count:
                     continue
-                lineup_low_own_count = sum(1 for p in selected if str(p.get("ID")) in low_own_ids)
-                if require_low_own and lineup_low_own_count < low_own_required:
+                if require_low_own and current_low_own_count < low_own_required:
                     continue
-                lineup_unsupported_false_chalk_count = sum(
-                    1 for p in selected if str(p.get("ID")) in unsupported_false_chalk_ids_set
-                )
                 if (
                     unsupported_false_chalk_cap is not None
-                    and lineup_unsupported_false_chalk_count > unsupported_false_chalk_cap
+                    and current_unsupported_false_chalk_count > unsupported_false_chalk_cap
                 ):
                     continue
-                preferred_stack_size = _preferred_game_stack_size(selected, preferred_games)
+                preferred_stack_size = _preferred_game_stack_size_from_counts(selected_preferred_counts)
                 if require_preferred_stack and preferred_stack_size < preferred_stack_min:
                     continue
 
-                lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in selected))
-                selected_score = sum(float(p.get("objective_score", 0.0)) for p in selected)
+                lineup_own = float(selected_ownership_sum)
+                selected_score = float(selected_objective_sum)
                 selected_score += 1.10 * _stack_bonus_from_counts(game_counts)
-                salary_left = SALARY_CAP - final_salary
+                salary_left = SALARY_CAP - salary
                 if active_salary_target is not None:
                     selected_score -= abs(float(salary_left - active_salary_target)) / salary_penalty_divisor
                 if anchor_game_key:
                     selected_score += 1.8 * float(anchor_count)
+                preferred_count = float(_preferred_game_stack_total_from_counts(selected_preferred_counts))
                 if preferred_games and preferred_bonus > 0.0:
-                    preferred_count = float(
-                        sum(cnt for game_key, cnt in game_counts.items() if str(game_key or "").strip().upper() in preferred_games)
-                    )
                     selected_score += preferred_bonus * preferred_count
                 if ceiling_boost_active and ceiling_stack_bonus > 0.0:
                     selected_score += ceiling_stack_bonus * _stack_bonus_from_counts(game_counts)
-                selected_ceiling = float(
-                    sum(
-                        _safe_num(
-                            p.get("ceiling_projection"),
-                            _safe_num(p.get("projected_dk_points"), 0.0) * 1.18,
-                        )
-                        for p in selected
-                    )
-                )
-                selected_ceiling_signal = (
-                    sum(_safe_num(p.get("ceiling_signal_score"), 0.0) for p in selected) / max(1, len(selected))
-                )
+                selected_ceiling = float(selected_ceiling_sum)
+                selected_ceiling_signal = float(selected_ceiling_signal_sum) / max(1, len(selected))
                 if ceiling_boost_active:
-                    selected_score += (0.12 * max(0.0, selected_ceiling - sum(_safe_num(p.get("projected_dk_points")) for p in selected)))
+                    selected_score += (0.12 * max(0.0, selected_ceiling - float(selected_projected_points_sum)))
                     selected_score += 1.8 * selected_ceiling_signal
 
-                current_ids = {str(p["ID"]) for p in selected}
-                if lineups:
-                    max_overlap = max(len(current_ids & set(l["player_ids"])) for l in lineups)
+                if lineup_id_sets:
+                    max_overlap = max(len(selected_ids & prior_ids) for prior_ids in lineup_id_sets)
                     selected_score -= max(0, max_overlap - 5) * 2.5
-                if cluster_lineups:
-                    max_cluster_overlap = max(len(current_ids & set(l["player_ids"])) for l in cluster_lineups)
+                if cluster_lineup_id_sets:
+                    max_cluster_overlap = max(len(selected_ids & prior_ids) for prior_ids in cluster_lineup_id_sets)
                     selected_score -= max(0, max_cluster_overlap - 6) * 1.4
 
                 if mutation_type == "same_role_swap" and seed_player_ids:
-                    overlap_seed = len(current_ids & seed_player_ids)
+                    overlap_seed = len(selected_ids & seed_player_ids)
                     selected_score -= max(0, overlap_seed - 5) * 1.6
                     selected_score += max(0.0, 3.0 - abs(float(overlap_seed) - 4.0))
                 elif mutation_type == "bring_back_rotation" and anchor_game_key:
-                    anchor_teams = {
-                        str(p.get("TeamAbbrev") or "").strip().upper()
-                        for p in selected
-                        if str(p.get("game_key") or "").strip().upper() == anchor_game_key
-                    }
-                    if len(anchor_teams) >= 2:
+                    if len(selected_anchor_teams) >= 2:
                         selected_score += 2.8
                     else:
                         selected_score -= 2.0
@@ -5722,62 +5920,55 @@ def _generate_lineups_cluster_mode(
                         ]
                         selected_score += (sum(value_minutes) / max(1.0, float(len(value_minutes)))) / 25.0
                 elif mutation_type == "salary_texture_shift":
-                    salary_left = SALARY_CAP - final_salary
+                    salary_left = SALARY_CAP - salary
                     target_salary_left = [100, 300, 500, 700, 900][variant_idx % 5]
                     selected_score -= abs(float(salary_left - target_salary_left)) / 95.0
 
                 if selected_score > best_score:
                     best_score = selected_score
                     best_lineup = [{k: p.get(k) for k in player_cols} for p in selected]
+                    best_lineup_metrics = {
+                        "player_ids": [str(p["_player_id"]) for p in selected],
+                        "salary": int(salary),
+                        "salary_left": int(salary_left),
+                        "projected_points": float(selected_projected_points_sum),
+                        "ceiling_projection": float(selected_ceiling),
+                        "ceiling_signal_mean": float(selected_ceiling_signal),
+                        "projected_ownership_sum": float(lineup_own),
+                        "low_own_upside_count": int(current_low_own_count),
+                        "preferred_game_player_count": int(preferred_count),
+                        "preferred_game_stack_size": int(preferred_stack_size),
+                        "unsupported_false_chalk_count": int(current_unsupported_false_chalk_count),
+                    }
 
-            if best_lineup is None:
+            if best_lineup is None or best_lineup_metrics is None:
                 warnings.append(
                     f"Cluster {cluster_id} ({cluster_script}) stopped early at variant {variant_idx + 1}."
                 )
                 break
 
-            for p in best_lineup:
-                exposure_counts[str(p["ID"])] = exposure_counts.get(str(p["ID"]), 0) + 1
+            for pid in list(best_lineup_metrics["player_ids"]):
+                exposure_counts[str(pid)] = exposure_counts.get(str(pid), 0) + 1
 
-            lineup_salary = int(sum(int(p["Salary"]) for p in best_lineup))
-            lineup_proj = float(sum(float(p.get("projected_dk_points") or 0.0) for p in best_lineup))
-            lineup_ceiling = float(
-                sum(
-                    _safe_num(
-                        p.get("ceiling_projection"),
-                        _safe_num(p.get("projected_dk_points"), 0.0) * 1.18,
-                    )
-                    for p in best_lineup
-                )
-            )
-            lineup_own = float(sum(float(p.get("projected_ownership") or 0.0) for p in best_lineup))
-            lineup_ceiling_signal = (
-                sum(_safe_num(p.get("ceiling_signal_score"), 0.0) for p in best_lineup) / max(1, len(best_lineup))
-            )
             expected_minutes_sum, avg_minutes_last3 = _lineup_minutes_metrics(best_lineup)
-            preferred_game_player_count = _preferred_game_stack_total(best_lineup, preferred_games)
-            preferred_game_stack_size = _preferred_game_stack_size(best_lineup, preferred_games)
-            unsupported_false_chalk_count = int(
-                sum(1 for p in best_lineup if str(p.get("ID")) in unsupported_false_chalk_ids_set)
-            )
             lineup_number = len(lineups) + 1
             if seed_lineup_id is None:
                 seed_lineup_id = lineup_number
                 mutation_label = "seed"
-                seed_player_ids = {str(p["ID"]) for p in best_lineup}
+                seed_player_ids = set(str(pid) for pid in best_lineup_metrics["player_ids"])
             else:
                 mutation_label = mutation_type
 
             lineup_payload = {
                 "lineup_number": lineup_number,
                 "players": best_lineup,
-                "player_ids": [str(p["ID"]) for p in best_lineup],
-                "salary": lineup_salary,
-                "salary_left": SALARY_CAP - lineup_salary,
-                "projected_points": round(lineup_proj, 2),
-                "ceiling_projection": round(lineup_ceiling, 2),
-                "ceiling_signal_mean": round(float(lineup_ceiling_signal), 4),
-                "projected_ownership_sum": round(lineup_own, 2),
+                "player_ids": list(best_lineup_metrics["player_ids"]),
+                "salary": int(best_lineup_metrics["salary"]),
+                "salary_left": int(best_lineup_metrics["salary_left"]),
+                "projected_points": round(float(best_lineup_metrics["projected_points"]), 2),
+                "ceiling_projection": round(float(best_lineup_metrics["ceiling_projection"]), 2),
+                "ceiling_signal_mean": round(float(best_lineup_metrics["ceiling_signal_mean"]), 4),
+                "projected_ownership_sum": round(float(best_lineup_metrics["projected_ownership_sum"]), 2),
                 "expected_minutes_sum": expected_minutes_sum,
                 "avg_minutes_last3": avg_minutes_last3,
                 "lineup_strategy": "cluster",
@@ -5788,16 +5979,21 @@ def _generate_lineups_cluster_mode(
                 "seed_lineup_id": seed_lineup_id,
                 "mutation_type": mutation_label,
                 "stack_signature": _lineup_stack_signature(best_lineup),
-                "salary_texture_bucket": _salary_texture_bucket(SALARY_CAP - lineup_salary),
-                "low_own_upside_count": int(sum(1 for p in best_lineup if str(p.get("ID")) in low_own_ids)),
-                "preferred_game_player_count": int(preferred_game_player_count),
-                "preferred_game_stack_size": int(preferred_game_stack_size),
-                "preferred_game_stack_met": bool(preferred_stack_min > 0 and preferred_game_stack_size >= preferred_stack_min),
-                "unsupported_false_chalk_count": unsupported_false_chalk_count,
+                "salary_texture_bucket": _salary_texture_bucket(int(best_lineup_metrics["salary_left"])),
+                "low_own_upside_count": int(best_lineup_metrics["low_own_upside_count"]),
+                "preferred_game_player_count": int(best_lineup_metrics["preferred_game_player_count"]),
+                "preferred_game_stack_size": int(best_lineup_metrics["preferred_game_stack_size"]),
+                "preferred_game_stack_met": bool(
+                    preferred_stack_min > 0
+                    and int(best_lineup_metrics["preferred_game_stack_size"]) >= preferred_stack_min
+                ),
+                "unsupported_false_chalk_count": int(best_lineup_metrics["unsupported_false_chalk_count"]),
                 "ceiling_boost_active": bool(ceiling_boost_active),
             }
             lineups.append(lineup_payload)
             cluster_lineups.append(lineup_payload)
+            lineup_id_sets.append(set(str(pid) for pid in best_lineup_metrics["player_ids"]))
+            cluster_lineup_id_sets.append(set(str(pid) for pid in best_lineup_metrics["player_ids"]))
 
             if progress_callback is not None:
                 progress_callback(
