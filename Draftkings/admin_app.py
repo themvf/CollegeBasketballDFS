@@ -156,6 +156,7 @@ PROJECTION_ROLE_BUCKET_LABELS = {
     "other": "Other",
 }
 SLATE_PRESET_OPTIONS = ["Main", "Afternoon", "Full Day", "Night", "Custom"]
+LOCAL_LINEUP_RUNS_ROOT = ROOT / "data" / "local_lineup_runs"
 
 
 def _csv_values(text: str | None) -> list[str]:
@@ -179,6 +180,11 @@ def _safe_float_value(value: object, default: float = 0.0) -> float:
 
 def _safe_int_value(value: object, default: int = 0) -> int:
     return int(_safe_float_value(value, float(default)))
+
+
+def _safe_path_segment(value: object, default: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(value or "").strip())
+    return safe or default
 
 
 def _default_roster_position(value: object) -> str:
@@ -1636,6 +1642,110 @@ def _json_safe(value: Any) -> Any:
     return str(value)
 
 
+def _local_lineup_run_dir(
+    slate_date: date,
+    run_id: str,
+    slate_key: str | None = None,
+) -> Path:
+    safe_date = slate_date.isoformat()
+    safe_slate = _slate_key_from_label(slate_key, default="main")
+    safe_run = _safe_path_segment(run_id, "run")
+    return LOCAL_LINEUP_RUNS_ROOT / safe_date / safe_slate / safe_run
+
+
+def persist_local_lineup_run_bundle(
+    slate_date: date,
+    bundle: dict[str, Any],
+    slate_key: str | None = None,
+    slate_label: str | None = None,
+) -> dict[str, Any]:
+    run_id = str(bundle.get("run_id") or _new_lineup_run_id())
+    generated_at_utc = str(bundle.get("generated_at_utc") or datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ"))
+    settings = _json_safe(bundle.get("settings") or {})
+    resolved_slate_key = _slate_key_from_label(
+        slate_key or bundle.get("slate_key") or bundle.get("slate_label"),
+        default="main",
+    )
+    resolved_slate_label = _normalize_slate_label(
+        slate_label or bundle.get("slate_label") or resolved_slate_key.replace("_", " ").title(),
+        default="Main",
+    )
+    run_dir = _local_lineup_run_dir(slate_date, run_id, resolved_slate_key)
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    versions = bundle.get("versions") or {}
+    version_entries: list[dict[str, Any]] = []
+    for version_key, version_data in versions.items():
+        version_name = str(version_key)
+        lineups = version_data.get("lineups") or []
+        warnings = [str(x) for x in (version_data.get("warnings") or [])]
+        upload_csv = str(version_data.get("upload_csv") or "")
+        slots_df = lineups_slots_frame(lineups)
+        if slots_df.empty:
+            slots_df = lineups_summary_frame(lineups)
+        lineups_csv = slots_df.to_csv(index=False)
+        payload = {
+            "run_id": run_id,
+            "slate_date": slate_date.isoformat(),
+            "slate_key": resolved_slate_key,
+            "slate_label": resolved_slate_label,
+            "generated_at_utc": generated_at_utc,
+            "run_mode": str(bundle.get("run_mode") or "single"),
+            "version_key": version_name,
+            "version_label": str(version_data.get("version_label") or version_name),
+            "lineup_strategy": str(version_data.get("lineup_strategy") or ""),
+            "model_profile": str(version_data.get("model_profile") or ""),
+            "include_tail_signals": bool(version_data.get("include_tail_signals", False)),
+            "warnings": warnings,
+            "settings": settings,
+            "lineups": _json_safe(lineups),
+            "dk_upload_csv": upload_csv,
+        }
+        version_dir = run_dir / _safe_path_segment(version_name, "version")
+        version_dir.mkdir(parents=True, exist_ok=True)
+        json_path = version_dir / "lineups.json"
+        csv_path = version_dir / "lineups.csv"
+        upload_path = version_dir / "dk_upload.csv"
+        json_path.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        csv_path.write_text(lineups_csv, encoding="utf-8")
+        upload_path.write_text(upload_csv, encoding="utf-8")
+        version_entries.append(
+            {
+                "version_key": version_name,
+                "version_label": str(version_data.get("version_label") or version_name),
+                "lineup_strategy": str(version_data.get("lineup_strategy") or ""),
+                "model_profile": str(version_data.get("model_profile") or ""),
+                "include_tail_signals": bool(version_data.get("include_tail_signals", False)),
+                "lineup_count_generated": int(len(lineups)),
+                "warning_count": int(len(warnings)),
+                "json_path": str(json_path),
+                "csv_path": str(csv_path),
+                "dk_upload_path": str(upload_path),
+            }
+        )
+
+    manifest = {
+        "run_id": run_id,
+        "slate_date": slate_date.isoformat(),
+        "slate_key": resolved_slate_key,
+        "slate_label": resolved_slate_label,
+        "generated_at_utc": generated_at_utc,
+        "run_mode": str(bundle.get("run_mode") or "single"),
+        "settings": settings,
+        "versions": version_entries,
+    }
+    manifest_path = run_dir / "manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+    return {
+        "run_id": run_id,
+        "slate_key": resolved_slate_key,
+        "slate_label": resolved_slate_label,
+        "manifest_path": str(manifest_path),
+        "version_count": len(version_entries),
+        "manifest": manifest,
+    }
+
+
 def persist_lineup_run_bundle(
     store: CbbGcsStore,
     slate_date: date,
@@ -1788,6 +1898,81 @@ def load_saved_lineup_run_manifests(
                 if manifest_slate_key != _slate_key_from_label(selected_slate_key):
                     continue
             manifests.append(payload)
+    manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
+    return manifests
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_local_lineup_run_manifests(
+    selected_date: date,
+    selected_slate_key: str | None,
+) -> list[dict[str, Any]]:
+    slate_dir = LOCAL_LINEUP_RUNS_ROOT / selected_date.isoformat() / _slate_key_from_label(selected_slate_key, default="main")
+    if not slate_dir.exists():
+        return []
+    manifests: list[dict[str, Any]] = []
+    for manifest_path in sorted(slate_dir.glob("*/manifest.json"), reverse=True):
+        try:
+            payload = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        payload["_storage_source"] = "local"
+        payload["_manifest_path"] = str(manifest_path)
+        manifests.append(payload)
+    manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
+    return manifests
+
+
+def load_all_saved_lineup_run_manifests(
+    bucket_name: str,
+    selected_date: date,
+    selected_slate_key: str | None,
+    gcp_project: str | None,
+    service_account_json: str | None,
+    service_account_json_b64: str | None,
+) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for manifest in load_local_lineup_run_manifests(selected_date, selected_slate_key):
+        entry = dict(manifest)
+        entry["_storage_source"] = "local"
+        run_key = (
+            str(entry.get("run_id") or "").strip(),
+            _slate_key_from_label(entry.get("slate_key") or entry.get("slate_label"), default="main"),
+        )
+        seen_keys.add(run_key)
+        manifests.append(entry)
+
+    for manifest in load_saved_lineup_run_manifests(
+        bucket_name=bucket_name,
+        selected_date=selected_date,
+        selected_slate_key=selected_slate_key,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    ):
+        entry = dict(manifest)
+        entry["_storage_source"] = "gcs"
+        run_key = (
+            str(entry.get("run_id") or "").strip(),
+            _slate_key_from_label(entry.get("slate_key") or entry.get("slate_label"), default="main"),
+        )
+        if run_key in seen_keys:
+            manifests = [
+                existing
+                for existing in manifests
+                if (
+                    str(existing.get("run_id") or "").strip(),
+                    _slate_key_from_label(existing.get("slate_key") or existing.get("slate_label"), default="main"),
+                )
+                != run_key
+            ]
+        seen_keys.add(run_key)
+        manifests.append(entry)
+
     manifests.sort(key=lambda x: str(x.get("generated_at_utc") or ""), reverse=True)
     return manifests
 
@@ -2366,6 +2551,26 @@ def load_saved_lineup_version_payload(
         payload = store.read_lineup_version_json(selected_date, run_id, version_key, selected_slate_key)
     except TypeError:
         payload = store.read_lineup_version_json(selected_date, run_id, version_key)
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+@st.cache_data(ttl=300, show_spinner=False)
+def load_local_lineup_version_payload(
+    selected_date: date,
+    run_id: str,
+    version_key: str,
+    selected_slate_key: str | None,
+) -> dict[str, Any] | None:
+    version_dir = _local_lineup_run_dir(selected_date, run_id, selected_slate_key) / _safe_path_segment(version_key, "version")
+    payload_path = version_dir / "lineups.json"
+    if not payload_path.exists():
+        return None
+    try:
+        payload = json.loads(payload_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
     if not isinstance(payload, dict):
         return None
     return payload
@@ -6772,27 +6977,48 @@ with tab_lineups:
                     st.session_state["cbb_generated_run_bundle"] = run_bundle
                     first_version_key = next(iter(generated_versions.keys()), "")
                     st.session_state["cbb_active_version_key"] = first_version_key
-
+                    local_saved_meta = persist_local_lineup_run_bundle(
+                        lineup_slate_date,
+                        run_bundle,
+                        slate_key=lineup_slate_key,
+                        slate_label=lineup_slate_label,
+                    )
+                    st.session_state["cbb_generated_run_manifest"] = local_saved_meta.get("manifest")
+                    load_local_lineup_run_manifests.clear()
+                    load_local_lineup_version_payload.clear()
                     if auto_save_runs_to_gcs:
-                        client = build_storage_client(
-                            service_account_json=cred_json,
-                            service_account_json_b64=cred_json_b64,
-                            project=gcp_project or None,
-                        )
-                        store = CbbGcsStore(bucket_name=bucket_name, client=client)
-                        saved_meta = persist_lineup_run_bundle(
-                            store,
-                            lineup_slate_date,
-                            run_bundle,
-                            slate_key=lineup_slate_key,
-                            slate_label=lineup_slate_label,
-                        )
-                        st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
-                        load_saved_lineup_run_manifests.clear()
-                        load_saved_lineup_version_payload.clear()
-                        st.success(
-                            f"Saved run `{saved_meta.get('run_id')}` with {saved_meta.get('version_count')} version(s) "
-                            f"to `{saved_meta.get('manifest_blob')}`."
+                        try:
+                            client = build_storage_client(
+                                service_account_json=cred_json,
+                                service_account_json_b64=cred_json_b64,
+                                project=gcp_project or None,
+                            )
+                            store = CbbGcsStore(bucket_name=bucket_name, client=client)
+                            saved_meta = persist_lineup_run_bundle(
+                                store,
+                                lineup_slate_date,
+                                run_bundle,
+                                slate_key=lineup_slate_key,
+                                slate_label=lineup_slate_label,
+                            )
+                            st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
+                            load_saved_lineup_run_manifests.clear()
+                            load_saved_lineup_version_payload.clear()
+                            st.success(
+                                f"Saved run `{saved_meta.get('run_id')}` to GCS and local backup. "
+                                f"GCS manifest: `{saved_meta.get('manifest_blob')}` | "
+                                f"Local manifest: `{local_saved_meta.get('manifest_path')}`."
+                            )
+                        except Exception as save_exc:
+                            st.warning(
+                                "GCS auto-save failed, but a local backup was saved and will appear in Saved Lineup Runs. "
+                                f"Local manifest: `{local_saved_meta.get('manifest_path')}` | "
+                                f"Error: `{save_exc}`"
+                            )
+                    else:
+                        st.info(
+                            "Generated lineups were saved to local backup only. "
+                            f"Local manifest: `{local_saved_meta.get('manifest_path')}`"
                         )
 
                 run_bundle = st.session_state.get("cbb_generated_run_bundle") or {}
@@ -7072,7 +7298,7 @@ with tab_lineups:
                         )
 
                 st.markdown("---")
-                st.subheader("Saved Lineup Runs (GCS)")
+                st.subheader("Saved Lineup Runs (GCS + Local Backup)")
                 rr1, rr2, rr3 = st.columns(3)
                 refresh_saved_runs_clicked = rr1.button("Refresh Saved Runs", key="refresh_saved_runs")
                 auto_save_runs_to_gcs = rr2.checkbox(
@@ -7084,7 +7310,9 @@ with tab_lineups:
                 if refresh_saved_runs_clicked:
                     load_saved_lineup_run_dates.clear()
                     load_saved_lineup_run_manifests.clear()
+                    load_local_lineup_run_manifests.clear()
                     load_saved_lineup_version_payload.clear()
+                    load_local_lineup_version_payload.clear()
                 if save_current_run_clicked:
                     current_run_bundle = st.session_state.get("cbb_generated_run_bundle") or {}
                     current_versions = current_run_bundle.get("versions") or {}
@@ -7133,7 +7361,9 @@ with tab_lineups:
                             st.session_state["cbb_generated_run_manifest"] = saved_meta.get("manifest")
                             load_saved_lineup_run_dates.clear()
                             load_saved_lineup_run_manifests.clear()
+                            load_local_lineup_run_manifests.clear()
                             load_saved_lineup_version_payload.clear()
+                            load_local_lineup_version_payload.clear()
                             st.success(
                                 f"Saved current run `{saved_meta.get('run_id')}` "
                                 f"to `{saved_meta.get('manifest_blob')}`."
@@ -7149,7 +7379,7 @@ with tab_lineups:
                 run_id_filter = sr2.text_input("Filter Run ID (optional)", key="saved_run_id_filter")
 
                 merged_manifests: list[dict[str, Any]] = []
-                manifests_for_date = load_saved_lineup_run_manifests(
+                manifests_for_date = load_all_saved_lineup_run_manifests(
                     bucket_name=bucket_name,
                     selected_date=lineup_slate_date,
                     selected_slate_key=lineup_slate_key,
@@ -7178,10 +7408,11 @@ with tab_lineups:
                         run_id = str(manifest.get("run_id") or "")
                         generated_at = str(manifest.get("generated_at_utc") or "")
                         run_mode = str(manifest.get("run_mode") or "single")
+                        storage_source = str(manifest.get("_storage_source") or "gcs").upper()
                         manifest_slate_label = _normalize_slate_label(
                             manifest.get("slate_label") or manifest.get("slate_key")
                         )
-                        label = f"{generated_at} | {run_id} | {run_mode} | {manifest_slate_label}"
+                        label = f"{generated_at} | {run_id} | {run_mode} | {manifest_slate_label} | {storage_source}"
                         run_options.append(label)
                         run_option_map[label] = manifest
 
@@ -7222,16 +7453,32 @@ with tab_lineups:
                                 ),
                                 key="saved_run_version_picker",
                             )
-                            saved_payload = load_saved_lineup_version_payload(
-                                bucket_name=bucket_name,
-                                selected_date=selected_manifest_date,
-                                run_id=str(selected_manifest.get("run_id") or ""),
-                                version_key=selected_saved_version,
-                                selected_slate_key=selected_manifest_slate_key,
-                                gcp_project=gcp_project or None,
-                                service_account_json=cred_json,
-                                service_account_json_b64=cred_json_b64,
-                            )
+                            selected_run_id_value = str(selected_manifest.get("run_id") or "")
+                            if str(selected_manifest.get("_storage_source") or "gcs") == "local":
+                                saved_payload = load_local_lineup_version_payload(
+                                    selected_date=selected_manifest_date,
+                                    run_id=selected_run_id_value,
+                                    version_key=selected_saved_version,
+                                    selected_slate_key=selected_manifest_slate_key,
+                                )
+                            else:
+                                saved_payload = load_saved_lineup_version_payload(
+                                    bucket_name=bucket_name,
+                                    selected_date=selected_manifest_date,
+                                    run_id=selected_run_id_value,
+                                    version_key=selected_saved_version,
+                                    selected_slate_key=selected_manifest_slate_key,
+                                    gcp_project=gcp_project or None,
+                                    service_account_json=cred_json,
+                                    service_account_json_b64=cred_json_b64,
+                                )
+                                if not isinstance(saved_payload, dict):
+                                    saved_payload = load_local_lineup_version_payload(
+                                        selected_date=selected_manifest_date,
+                                        run_id=selected_run_id_value,
+                                        version_key=selected_saved_version,
+                                        selected_slate_key=selected_manifest_slate_key,
+                                    )
                             if isinstance(saved_payload, dict):
                                 saved_lineups = saved_payload.get("lineups") or []
                                 saved_warnings = [str(x) for x in (saved_payload.get("warnings") or [])]
@@ -8481,13 +8728,15 @@ with tab_tournament_review:
             )
             if phantom_refresh:
                 load_saved_lineup_run_manifests.clear()
+                load_local_lineup_run_manifests.clear()
                 load_saved_lineup_version_payload.clear()
+                load_local_lineup_version_payload.clear()
                 load_actual_results_frame_for_date.clear()
                 load_saved_phantom_review_outputs.clear()
                 st.session_state.pop("cbb_phantom_source_lineups", None)
                 st.session_state.pop("cbb_phantom_source_meta", None)
 
-            phantom_manifests = load_saved_lineup_run_manifests(
+            phantom_manifests = load_all_saved_lineup_run_manifests(
                 bucket_name=bucket_name,
                 selected_date=tr_date,
                 selected_slate_key=shared_slate_key,
@@ -8506,7 +8755,8 @@ with tab_tournament_review:
                     generated_at = str(manifest.get("generated_at_utc") or "")
                     run_mode = str(manifest.get("run_mode") or "single")
                     run_slate = _normalize_slate_label(manifest.get("slate_label") or manifest.get("slate_key"))
-                    label = f"{generated_at} | {run_id} | {run_mode} | {run_slate}"
+                    storage_source = str(manifest.get("_storage_source") or "gcs").upper()
+                    label = f"{generated_at} | {run_id} | {run_mode} | {run_slate} | {storage_source}"
                     run_options.append(label)
                     run_option_map[label] = manifest
 
@@ -8615,16 +8865,31 @@ with tab_tournament_review:
                                 phantom_source_lineups: list[dict[str, Any]] = []
                                 skipped_versions: list[str] = []
                                 for version_key in selected_versions:
-                                    payload = load_saved_lineup_version_payload(
-                                        bucket_name=bucket_name,
-                                        selected_date=tr_date,
-                                        run_id=selected_run_id,
-                                        version_key=version_key,
-                                        selected_slate_key=selected_manifest_slate_key,
-                                        gcp_project=gcp_project or None,
-                                        service_account_json=cred_json,
-                                        service_account_json_b64=cred_json_b64,
-                                    )
+                                    if str(selected_manifest.get("_storage_source") or "gcs") == "local":
+                                        payload = load_local_lineup_version_payload(
+                                            selected_date=tr_date,
+                                            run_id=selected_run_id,
+                                            version_key=version_key,
+                                            selected_slate_key=selected_manifest_slate_key,
+                                        )
+                                    else:
+                                        payload = load_saved_lineup_version_payload(
+                                            bucket_name=bucket_name,
+                                            selected_date=tr_date,
+                                            run_id=selected_run_id,
+                                            version_key=version_key,
+                                            selected_slate_key=selected_manifest_slate_key,
+                                            gcp_project=gcp_project or None,
+                                            service_account_json=cred_json,
+                                            service_account_json_b64=cred_json_b64,
+                                        )
+                                        if not isinstance(payload, dict):
+                                            payload = load_local_lineup_version_payload(
+                                                selected_date=tr_date,
+                                                run_id=selected_run_id,
+                                                version_key=version_key,
+                                                selected_slate_key=selected_manifest_slate_key,
+                                            )
                                     if not isinstance(payload, dict):
                                         skipped_versions.append(version_key)
                                         continue
