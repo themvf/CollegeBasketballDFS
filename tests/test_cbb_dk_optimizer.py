@@ -25,6 +25,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     normalize_projected_ownership_total,
     normalize_injuries_frame,
     ownership_salary_bucket_key,
+    prepare_generation_pool,
     projection_salary_bucket_key,
     recommend_contest_profile_settings,
     remove_injured_players,
@@ -1025,6 +1026,74 @@ def test_generate_lineups_cluster_mode_runs() -> None:
     assert len(lineups) == 4
     assert all(str(l.get("lineup_strategy")) == "cluster" for l in lineups)
     assert all(str(l.get("mutation_type") or "").strip() for l in lineups)
+
+
+def test_generate_lineups_accepts_reused_prepared_pool() -> None:
+    pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel")
+    prepared_pool = prepare_generation_pool(
+        pool,
+        contest_type="Large GPP",
+        projection_scale=1.0,
+        apply_ownership_guardrails=True,
+        ownership_guardrail_projected_threshold=8.0,
+        ownership_guardrail_surge_threshold=78.0,
+        ownership_guardrail_projection_rank_threshold=0.60,
+        ownership_guardrail_floor_base=8.0,
+        ownership_guardrail_floor_cap=22.0,
+        apply_uncertainty_shrink=True,
+        uncertainty_weight=0.12,
+        high_risk_extra_shrink=0.08,
+        dnp_risk_threshold=0.32,
+    )
+
+    baseline_lineups, baseline_warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=4,
+        contest_type="Large GPP",
+        lineup_strategy="spike",
+        include_tail_signals=True,
+        apply_ownership_guardrails=True,
+        ownership_guardrail_projected_threshold=8.0,
+        ownership_guardrail_surge_threshold=78.0,
+        ownership_guardrail_floor_base=8.0,
+        ownership_guardrail_floor_cap=22.0,
+        apply_uncertainty_shrink=True,
+        uncertainty_weight=0.12,
+        high_risk_extra_shrink=0.08,
+        dnp_risk_threshold=0.32,
+        random_seed=13,
+    )
+    reused_lineups, reused_warnings = generate_lineups(
+        pool_df=pool,
+        prepared_pool_df=prepared_pool,
+        num_lineups=4,
+        contest_type="Large GPP",
+        lineup_strategy="spike",
+        include_tail_signals=True,
+        apply_ownership_guardrails=True,
+        ownership_guardrail_projected_threshold=8.0,
+        ownership_guardrail_surge_threshold=78.0,
+        ownership_guardrail_floor_base=8.0,
+        ownership_guardrail_floor_cap=22.0,
+        apply_uncertainty_shrink=True,
+        uncertainty_weight=0.12,
+        high_risk_extra_shrink=0.08,
+        dnp_risk_threshold=0.32,
+        random_seed=13,
+    )
+
+    assert reused_warnings == baseline_warnings
+    assert [lineup["player_ids"] for lineup in reused_lineups] == [lineup["player_ids"] for lineup in baseline_lineups]
+    assert [int(lineup["salary"]) for lineup in reused_lineups] == [int(lineup["salary"]) for lineup in baseline_lineups]
+    assert [float(lineup["projected_points"]) for lineup in reused_lineups] == [
+        float(lineup["projected_points"]) for lineup in baseline_lineups
+    ]
+    assert [float(lineup["ceiling_projection"]) for lineup in reused_lineups] == [
+        float(lineup["ceiling_projection"]) for lineup in baseline_lineups
+    ]
+    assert [float(lineup["projected_ownership_sum"]) for lineup in reused_lineups] == [
+        float(lineup["projected_ownership_sum"]) for lineup in baseline_lineups
+    ]
 
 
 def test_generate_lineups_objective_adjustments_increase_target_exposure() -> None:

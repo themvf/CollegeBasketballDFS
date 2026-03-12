@@ -38,6 +38,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     lineups_summary_frame,
     locked_projection_recency_settings,
     normalize_injuries_frame,
+    prepare_generation_pool,
     projection_role_bucket_key,
     projection_salary_bucket_key,
     recommend_contest_profile_settings,
@@ -6825,6 +6826,26 @@ with tab_lineups:
                         )
 
                     total_units = max(1, int(sum(int(cfg.get("lineup_count") or 0) for cfg in version_plan)))
+                    prepared_pool_for_versions: pd.DataFrame | None = None
+                    if run_mode_key == "all" and len(version_plan) > 1:
+                        prepared_pool_for_versions = prepare_generation_pool(
+                            pool_sorted,
+                            contest_type=contest_type,
+                            projection_scale=projection_scale,
+                            projection_salary_bucket_scales=projection_salary_bucket_scales,
+                            projection_role_bucket_scales=projection_role_bucket_scales,
+                            apply_ownership_guardrails=apply_ownership_guardrails,
+                            ownership_guardrail_projected_threshold=ownership_guardrail_proj_threshold,
+                            ownership_guardrail_surge_threshold=ownership_guardrail_surge_threshold,
+                            ownership_guardrail_projection_rank_threshold=0.60,
+                            ownership_guardrail_floor_base=ownership_guardrail_proj_threshold,
+                            ownership_guardrail_floor_cap=ownership_guardrail_floor_cap,
+                            apply_uncertainty_shrink=apply_uncertainty_shrink,
+                            uncertainty_weight=uncertainty_weight,
+                            high_risk_extra_shrink=high_risk_extra_shrink,
+                            dnp_risk_threshold=dnp_risk_threshold,
+                        )
+                        st.caption("Shared lineup pool prep reused across all versions to reduce repeated model startup time.")
                     generated_versions: dict[str, Any] = {}
 
                     for version_idx, version_cfg in enumerate(version_plan):
@@ -6884,6 +6905,7 @@ with tab_lineups:
                             random_seed=lineup_seed + version_idx,
                             model_profile=str(version_cfg.get("model_profile") or "legacy_baseline"),
                             progress_callback=_lineup_progress,
+                            prepared_pool_df=prepared_pool_for_versions,
                         )
                         generated_versions[str(version_cfg["version_key"])] = {
                             "version_key": str(version_cfg["version_key"]),

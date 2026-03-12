@@ -4524,6 +4524,61 @@ def _cluster_mutation_type(variant_idx: int) -> str:
     return mutations[(variant_idx - 1) % len(mutations)]
 
 
+def prepare_generation_pool(
+    pool_df: pd.DataFrame,
+    *,
+    contest_type: str,
+    projection_scale: float = 1.0,
+    projection_salary_bucket_scales: dict[str, float] | None = None,
+    projection_role_bucket_scales: dict[str, float] | None = None,
+    apply_ownership_guardrails: bool = False,
+    ownership_guardrail_projected_threshold: float = 10.0,
+    ownership_guardrail_surge_threshold: float = 72.0,
+    ownership_guardrail_projection_rank_threshold: float = 0.60,
+    ownership_guardrail_floor_base: float = 10.0,
+    ownership_guardrail_floor_cap: float = 24.0,
+    apply_uncertainty_shrink: bool = False,
+    uncertainty_weight: float = 0.18,
+    high_risk_extra_shrink: float = 0.10,
+    dnp_risk_threshold: float = 0.30,
+    uncertainty_min_multiplier: float = 0.68,
+) -> pd.DataFrame:
+    if pool_df.empty:
+        return pool_df.copy()
+
+    prepared = apply_projection_calibration(
+        pool_df,
+        projection_scale=projection_scale,
+        projection_salary_bucket_scales=projection_salary_bucket_scales,
+        projection_role_bucket_scales=projection_role_bucket_scales,
+    )
+    prepared = apply_minutes_shock_override(prepared)
+    if apply_uncertainty_shrink:
+        prepared = apply_projection_uncertainty_adjustment(
+            prepared,
+            uncertainty_weight=uncertainty_weight,
+            high_risk_extra_shrink=high_risk_extra_shrink,
+            dnp_risk_threshold=dnp_risk_threshold,
+            min_multiplier=uncertainty_min_multiplier,
+        )
+    if apply_ownership_guardrails:
+        prepared = apply_ownership_surprise_guardrails(
+            prepared,
+            projected_ownership_threshold=ownership_guardrail_projected_threshold,
+            surge_score_threshold=ownership_guardrail_surge_threshold,
+            projection_rank_threshold=ownership_guardrail_projection_rank_threshold,
+            ownership_floor_base=ownership_guardrail_floor_base,
+            ownership_floor_cap=ownership_guardrail_floor_cap,
+        )
+    prepared = apply_focus_game_chalk_guardrail(prepared)
+    prepared = apply_chalk_ceiling_guardrail(prepared)
+    prepared = apply_false_chalk_discount(prepared)
+    prepared = apply_ownership_calibration(prepared, contest_type=contest_type)
+    prepared = normalize_projected_ownership_total(prepared)
+    prepared = apply_midrange_chalk_floor(prepared)
+    return prepared.copy()
+
+
 def _build_cluster_specs(
     players: list[dict[str, Any]],
     num_lineups: int,
@@ -4700,6 +4755,7 @@ def generate_lineups(
     max_attempts_per_lineup: int = 1200,
     model_profile: str = "legacy_baseline",
     progress_callback: Callable[[int, int, str], None] | None = None,
+    prepared_pool_df: pd.DataFrame | None = None,
 ) -> tuple[list[dict[str, Any]], list[str]]:
     if pool_df.empty:
         return [], ["Player pool is empty."]
@@ -4713,36 +4769,27 @@ def generate_lineups(
     if progress_callback is not None:
         progress_callback(0, requested_num_lineups, "Starting lineup generation...")
 
-    calibrated = apply_projection_calibration(
-        pool_df,
-        projection_scale=projection_scale,
-        projection_salary_bucket_scales=projection_salary_bucket_scales,
-        projection_role_bucket_scales=projection_role_bucket_scales,
-    )
-    calibrated = apply_minutes_shock_override(calibrated)
-    if apply_uncertainty_shrink:
-        calibrated = apply_projection_uncertainty_adjustment(
-            calibrated,
+    if prepared_pool_df is not None:
+        calibrated = prepared_pool_df.copy()
+    else:
+        calibrated = prepare_generation_pool(
+            pool_df,
+            contest_type=contest_type,
+            projection_scale=projection_scale,
+            projection_salary_bucket_scales=projection_salary_bucket_scales,
+            projection_role_bucket_scales=projection_role_bucket_scales,
+            apply_ownership_guardrails=apply_ownership_guardrails,
+            ownership_guardrail_projected_threshold=ownership_guardrail_projected_threshold,
+            ownership_guardrail_surge_threshold=ownership_guardrail_surge_threshold,
+            ownership_guardrail_projection_rank_threshold=ownership_guardrail_projection_rank_threshold,
+            ownership_guardrail_floor_base=ownership_guardrail_floor_base,
+            ownership_guardrail_floor_cap=ownership_guardrail_floor_cap,
+            apply_uncertainty_shrink=apply_uncertainty_shrink,
             uncertainty_weight=uncertainty_weight,
             high_risk_extra_shrink=high_risk_extra_shrink,
             dnp_risk_threshold=dnp_risk_threshold,
-            min_multiplier=uncertainty_min_multiplier,
+            uncertainty_min_multiplier=uncertainty_min_multiplier,
         )
-    if apply_ownership_guardrails:
-        calibrated = apply_ownership_surprise_guardrails(
-            calibrated,
-            projected_ownership_threshold=ownership_guardrail_projected_threshold,
-            surge_score_threshold=ownership_guardrail_surge_threshold,
-            projection_rank_threshold=ownership_guardrail_projection_rank_threshold,
-            ownership_floor_base=ownership_guardrail_floor_base,
-            ownership_floor_cap=ownership_guardrail_floor_cap,
-        )
-    calibrated = apply_focus_game_chalk_guardrail(calibrated)
-    calibrated = apply_chalk_ceiling_guardrail(calibrated)
-    calibrated = apply_false_chalk_discount(calibrated)
-    calibrated = apply_ownership_calibration(calibrated, contest_type=contest_type)
-    calibrated = normalize_projected_ownership_total(calibrated)
-    calibrated = apply_midrange_chalk_floor(calibrated)
     scored = apply_contest_objective(calibrated, contest_type, include_tail_signals=include_tail_signals)
     scored = apply_stack_anchor_bias(scored)
     scored = apply_model_profile_adjustments(scored, model_profile=model_profile)
