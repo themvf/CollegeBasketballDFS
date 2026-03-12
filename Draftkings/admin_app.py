@@ -118,6 +118,25 @@ def _resolve_odds_api_key() -> str | None:
     return os.getenv("THE_ODDS_API_KEY") or _secret("the_odds_api_key")
 
 
+def _build_lineup_versions_export_frame(generated_versions: dict[str, Any]) -> pd.DataFrame:
+    export_frames: list[pd.DataFrame] = []
+    for version_key, version_data in (generated_versions or {}).items():
+        lineups = version_data.get("lineups") or []
+        if not lineups:
+            continue
+        summary_df = lineups_summary_frame(lineups).copy()
+        if summary_df.empty:
+            continue
+        summary_df.insert(0, "Version Key", str(version_key))
+        summary_df.insert(1, "Version Label", str(version_data.get("version_label") or version_key))
+        summary_df.insert(2, "Lineup Strategy", str(version_data.get("lineup_strategy") or ""))
+        summary_df.insert(3, "Model Profile", str(version_data.get("model_profile") or ""))
+        export_frames.append(summary_df)
+    if not export_frames:
+        return pd.DataFrame()
+    return pd.concat(export_frames, ignore_index=True)
+
+
 ROLE_FILTER_OPTIONS = ["All", "Guard (G)", "Forward (F)"]
 MINUTES_STABILITY_FILTER_OPTIONS = ["All", "Stable", "Moderate", "Volatile"]
 ROLE_CHANGE_FILTER_OPTIONS = ["All", "Rising", "Neutral", "Falling"]
@@ -7112,6 +7131,11 @@ with tab_lineups:
 
                     if generated:
                         summary_df = lineups_summary_frame(generated)
+                        combined_export_df = _build_lineup_versions_export_frame(generated_versions)
+                        if not combined_export_df.empty:
+                            combined_export_df.insert(0, "Run ID", str(run_bundle.get("run_id") or ""))
+                            combined_export_df.insert(1, "Slate Date", str(run_bundle_slate_date or selected_lineup_slate_date))
+                            combined_export_df.insert(2, "Slate Key", str(run_bundle_slate_key or selected_lineup_slate_key))
                         st.dataframe(summary_df, hide_index=True, use_container_width=True)
 
                         slots_df = lineups_slots_frame(generated)
@@ -7121,13 +7145,29 @@ with tab_lineups:
 
                         export_date = run_bundle_slate_date or selected_lineup_slate_date
                         export_slate = run_bundle_slate_key or selected_lineup_slate_key
-                        st.download_button(
+                        dl1, dl2, dl3 = st.columns(3)
+                        dl1.download_button(
                             "Download DK Upload CSV",
                             data=upload_csv,
                             file_name=f"dk_lineups_{export_date}_{export_slate}_{active_version_key}.csv",
                             mime="text/csv",
                             key="download_dk_upload_csv",
                             disabled=(not active_ready),
+                        )
+                        dl2.download_button(
+                            "Download Active Summary CSV",
+                            data=summary_df.to_csv(index=False),
+                            file_name=f"lineup_summary_{export_date}_{export_slate}_{active_version_key}.csv",
+                            mime="text/csv",
+                            key="download_active_lineup_summary_csv",
+                        )
+                        dl3.download_button(
+                            "Download All Versions CSV",
+                            data=combined_export_df.to_csv(index=False) if not combined_export_df.empty else "",
+                            file_name=f"lineup_summary_all_versions_{export_date}_{export_slate}.csv",
+                            mime="text/csv",
+                            key="download_all_versions_lineup_summary_csv",
+                            disabled=combined_export_df.empty,
                         )
                 elif generate_lineups_clicked:
                     st.error("No lineups were generated. Adjust locks/exclusions/exposure settings and retry.")
