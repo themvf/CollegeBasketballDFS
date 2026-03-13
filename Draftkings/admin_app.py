@@ -6132,7 +6132,37 @@ with tab_lineups:
             elif pool_df.empty:
                 st.warning("No players available after injury filtering. Check `Injuries` tab or slate date.")
             else:
-                pool_sorted = pool_df.sort_values("projected_dk_points", ascending=False).copy()
+                available_team_options = sorted(
+                    {
+                        str(team).strip().upper()
+                        for team in pool_df.get("TeamAbbrev", pd.Series(dtype=str)).tolist()
+                        if str(team).strip()
+                    }
+                )
+                included_teams = st.multiselect(
+                    "Include Teams",
+                    options=available_team_options,
+                    default=available_team_options,
+                    help="All teams are included by default. Uncheck teams to exclude them from lineup generation.",
+                )
+                included_team_set = {str(team).strip().upper() for team in included_teams if str(team).strip()}
+                excluded_team_options = [
+                    team for team in available_team_options if team not in included_team_set
+                ]
+                pool_filtered_df = pool_df.loc[
+                    pool_df.get("TeamAbbrev", pd.Series(dtype=str)).astype(str).str.strip().str.upper().isin(included_team_set)
+                ].copy()
+                st.caption(
+                    f"Included teams: `{len(included_team_set)}/{len(available_team_options)}` | "
+                    f"Player pool after team filter: `{len(pool_filtered_df)}`"
+                )
+                if not included_team_set:
+                    st.warning("Select at least one team to enable lineup generation.")
+                    pool_filtered_df = pd.DataFrame(columns=pool_df.columns)
+
+                pool_sorted = pool_filtered_df.sort_values("projected_dk_points", ascending=False).copy()
+                if pool_sorted.empty:
+                    st.warning("No players remain after the selected team filter. Re-include at least one team with available players.")
                 effective_spike_max_pair_overlap = int(spike_max_pair_overlap)
                 effective_salary_left_target = int(salary_left_target)
                 effective_low_own_bucket_exposure_pct = float(low_own_bucket_exposure_pct)
@@ -6143,7 +6173,7 @@ with tab_lineups:
                 effective_ceiling_boost_stack_bonus = float(ceiling_boost_stack_bonus)
                 effective_ceiling_boost_salary_left_target = int(ceiling_boost_salary_left_target)
                 auto_contest_profile_meta: dict[str, Any] = {}
-                if auto_contest_profile_enabled:
+                if auto_contest_profile_enabled and not pool_sorted.empty:
                     auto_contest_profile_meta = recommend_contest_profile_settings(
                         pool_sorted,
                         contest_type=contest_type,
@@ -6270,7 +6300,7 @@ with tab_lineups:
                 generate_lineups_clicked = st.button(
                     "Generate DK Lineups",
                     key="generate_dk_lineups",
-                    disabled=(not active_ready or pool_df.empty),
+                    disabled=(not active_ready or pool_sorted.empty),
                 )
                 if generate_lineups_clicked:
                     # Prevent stale prior-date run data from being shown/exported if generation fails mid-run.
@@ -6746,6 +6776,8 @@ with tab_lineups:
                             "locked_ids": locked_ids,
                             "excluded_ids": excluded_ids,
                             "exposure_caps_pct": exposure_caps,
+                            "included_teams": sorted(included_team_set),
+                            "excluded_teams": excluded_team_options,
                         },
                         "versions": generated_versions,
                     }
