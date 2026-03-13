@@ -5916,16 +5916,10 @@ with tab_lineups:
     )
     run_mode_key = "all" if run_mode_label == "All Versions" else "single"
     cp1, cp2, cp3, cp4 = st.columns(4)
-    contest_profile_mode = cp1.selectbox(
-        "Contest Profile",
-        options=["Auto", "Manual"],
-        index=0,
-        help=(
-            "Auto uses slate game count plus contest field size and entry limit to tune "
-            "overlap, low-owned forcing, and ceiling-archetype settings."
-        ),
-    )
-    auto_contest_profile_enabled = contest_profile_mode == "Auto"
+    contest_profile_mode = "Auto"
+    auto_contest_profile_enabled = True
+    cp1.caption("Contest Profile")
+    cp1.write("System-managed auto profile")
     contest_field_size = int(
         cp2.number_input(
             "Field Size",
@@ -5949,10 +5943,8 @@ with tab_lineups:
         "20-Max": "20_max",
         "150-Max+": "150_max",
     }.get(contest_entry_limit_label, "single_entry")
-    if auto_contest_profile_enabled:
-        cp4.caption("Auto profile waits for the loaded slate, then applies contest-aware settings.")
-    else:
-        cp4.caption("Manual profile uses the controls below exactly as shown.")
+    cp4.caption("Generator policy")
+    cp4.write("Auto profile only")
 
     c5, c6, c7 = st.columns(3)
     if run_mode_key == "single":
@@ -5960,30 +5952,20 @@ with tab_lineups:
             "Lineup Model",
             options=[
                 "Standard v1",
-                "Spike v1 (Legacy A/B)",
                 "Spike v2 (Tail A/B)",
-                "Cluster v1 (Experimental)",
                 "Standout v1 (Missed-Capture)",
                 "Chalk-Value v1 (Leverage Pivots)",
                 "Salary-Efficiency v1 (Ceiling)",
             ],
-            index=4,
+            index=2,
             help=(
-                "Run one lineup model. Use All Versions to save all models in a single run."
+                "Run one approved lineup model. Use All Versions to save the full system-managed model set."
             ),
         )
         if lineup_model_label == "Spike v2 (Tail A/B)":
             selected_model_key = "spike_v2_tail"
             lineup_strategy = "spike"
             include_tail_signals = True
-        elif lineup_model_label == "Cluster v1 (Experimental)":
-            selected_model_key = "cluster_v1_experimental"
-            lineup_strategy = "cluster"
-            include_tail_signals = False
-        elif lineup_model_label == "Spike v1 (Legacy A/B)":
-            selected_model_key = "spike_v1_legacy"
-            lineup_strategy = "spike"
-            include_tail_signals = False
         elif lineup_model_label == "Standout v1 (Missed-Capture)":
             selected_model_key = "standout_v1_capture"
             lineup_strategy = "standard"
@@ -6010,52 +5992,35 @@ with tab_lineups:
         lineup_strategy = "standard"
         include_tail_signals = False
 
-    if lineup_strategy == "cluster":
-        st.caption(
-            "Cluster v1 Phase 1 uses seed + mutation generation with target `15 clusters x 10 variants` "
-            "(auto-adjusted for smaller lineup counts/slates)."
-        )
-
     game_packet_for_lineups = st.session_state.get("cbb_game_slate_ai_packet")
     game_packet_ready = isinstance(game_packet_for_lineups, dict) and bool(game_packet_for_lineups)
-    ga1, ga2, ga3 = st.columns(3)
-    apply_game_agent_stack_bias = bool(
-        ga1.checkbox(
-            "Apply Game Agent Stack Bias",
-            value=True,
-            disabled=not game_packet_ready,
-            help=(
-                "Uses Game Slate packet stack targets to boost objective scores for matching games, "
-                "teams, and players before lineup construction."
-            ),
-        )
-    )
-    game_agent_bias_strength_pct = float(
-        ga2.slider(
-            "Agent Bias Strength %",
-            min_value=0,
-            max_value=200,
-            value=100,
-            step=5,
-            disabled=not apply_game_agent_stack_bias,
-            help="100% uses default boost weights; lower softens, higher amplifies.",
-        )
-    )
-    game_agent_focus_games = int(
-        ga3.slider(
-            "Agent Focus Games",
-            min_value=1,
-            max_value=10,
-            value=2,
-            step=1,
-            disabled=not apply_game_agent_stack_bias,
-            help="How many top stack games to prioritize from the packet.",
-        )
-    )
+    packet_review_date = ""
     if game_packet_ready:
         packet_review_date = str((game_packet_for_lineups.get("review_context") or {}).get("review_date") or "")
-        if packet_review_date:
-            st.caption(f"Game Agent packet loaded for `{packet_review_date}`.")
+    packet_matches_lineup_date = bool(packet_review_date and packet_review_date == lineup_slate_date.isoformat())
+    apply_game_agent_stack_bias = bool(game_packet_ready and packet_matches_lineup_date)
+    game_agent_bias_strength_pct = 100.0
+    game_agent_focus_games = 2
+    ga1, ga2, ga3 = st.columns(3)
+    ga1.caption("Game Agent Bias")
+    if apply_game_agent_stack_bias:
+        ga1.write("Auto for matching slate packet")
+    elif game_packet_ready:
+        ga1.write("Disabled for stale packet")
+    else:
+        ga1.write("Disabled until packet exists")
+    ga2.caption("Bias Strength")
+    ga2.write("100%")
+    ga3.caption("Focus Games")
+    ga3.write("2")
+    if game_packet_ready and apply_game_agent_stack_bias:
+        st.caption(f"Game Agent packet loaded for `{packet_review_date}`.")
+    elif game_packet_ready:
+        stale_label = packet_review_date or "unknown"
+        st.warning(
+            "Game Agent stack bias is disabled because the loaded packet does not match the lineup slate date: "
+            f"packet=`{stale_label}`, lineup=`{lineup_slate_date.isoformat()}`."
+        )
     else:
         st.caption("Game Agent stack bias is disabled until you build a packet in `Slate + Vegas`.")
 
@@ -6079,302 +6044,54 @@ with tab_lineups:
             help="Caps every player's max lineup rate across the run (locks override this cap).",
         )
     )
-    s1, s2, s3 = st.columns(3)
-    strict_salary_utilization = bool(
-        s1.checkbox(
-            "Strict Salary Utilization",
-            value=False,
-            help="When enabled, lineups are constrained to use at least 49,950 salary.",
-        )
-    )
-    salary_left_target = int(
-        s2.slider(
-            "Salary Left Target",
-            min_value=0,
-            max_value=500,
-            value=100,
-            step=10,
-            help="Scoring penalty targets this salary-left value.",
-        )
-    )
-    auto_projection_calibration = bool(
-        s3.checkbox(
-            "Auto Projection Calibration",
-            value=True,
-            help="Scale projections from recent phantom review actual-vs-projected results.",
-        )
-    )
+    strict_salary_utilization = False
+    salary_left_target = 100
+    auto_projection_calibration = True
     calibration_lookback_days = 14
-    if auto_projection_calibration:
-        calibration_lookback_days = int(
-            st.slider(
-                "Calibration Lookback Days",
-                min_value=3,
-                max_value=60,
-                value=14,
-                step=1,
-                help="Uses prior phantom review summaries to estimate projection scale.",
-            )
-        )
-    b1, b2 = st.columns(2)
-    auto_salary_bucket_calibration = bool(
-        b1.checkbox(
-            "Salary-Bucket Residual Calibration",
-            value=True,
-            help="Apply per-salary projection scales from recent projection-vs-actual errors.",
-        )
-    )
-    bucket_calibration_min_samples = int(
-        b2.slider(
-            "Min Samples Per Salary Bucket",
-            min_value=5,
-            max_value=80,
-            value=20,
-            step=1,
-            help="Buckets below this count stay at scale 1.0.",
-        )
-    )
+    auto_salary_bucket_calibration = True
+    bucket_calibration_min_samples = 20
     bucket_calibration_lookback_days = int(max(7, calibration_lookback_days))
-    if auto_salary_bucket_calibration:
-        bucket_calibration_lookback_days = int(
-            st.slider(
-                "Salary-Bucket Calibration Lookback Days",
-                min_value=7,
-                max_value=90,
-                value=int(max(7, calibration_lookback_days)),
-                step=1,
-                help="Uses prior slates with both DK slate projections and final box-score results.",
-            )
-        )
-    rb1, rb2 = st.columns(2)
-    auto_role_bucket_calibration = bool(
-        rb1.checkbox(
-            "Role-Bucket Residual Calibration",
-            value=True,
-            help="Apply per-role projection scales (Guard/Forward/Center/Other) from recent residuals.",
-        )
-    )
-    role_calibration_min_samples = int(
-        rb2.slider(
-            "Min Samples Per Role Bucket",
-            min_value=5,
-            max_value=120,
-            value=25,
-            step=1,
-            help="Role buckets below this count stay at scale 1.0.",
-        )
-    )
+    auto_role_bucket_calibration = True
+    role_calibration_min_samples = 25
     role_calibration_lookback_days = int(max(7, calibration_lookback_days))
-    if auto_role_bucket_calibration:
-        role_calibration_lookback_days = int(
-            st.slider(
-                "Role-Bucket Calibration Lookback Days",
-                min_value=7,
-                max_value=90,
-                value=int(max(7, calibration_lookback_days)),
-                step=1,
-                help="Uses prior slates with both projections and final results to calibrate role-level drift.",
-            )
-        )
-    u1, u2, u3, u4 = st.columns(4)
-    apply_uncertainty_shrink = bool(
-        u1.checkbox(
-            "Minutes/DNP Uncertainty Shrink",
-            value=True,
-            help="Shrinks projections for players with high minutes volatility and DNP risk.",
-        )
-    )
-    uncertainty_shrink_pct = float(
-        u2.slider(
-            "Uncertainty Shrink %",
-            min_value=0,
-            max_value=35,
-            value=15,
-            step=1,
-            help="Base shrink applied proportionally to projection uncertainty score.",
-        )
-    )
-    dnp_risk_threshold_pct = float(
-        u3.slider(
-            "DNP Risk Threshold %",
-            min_value=10,
-            max_value=60,
-            value=35,
-            step=1,
-            help="Extra shrink applies above this DNP-risk level.",
-        )
-    )
-    high_risk_extra_shrink_pct = float(
-        u4.slider(
-            "High-Risk Extra Shrink %",
-            min_value=0,
-            max_value=30,
-            value=8,
-            step=1,
-            help="Additional shrink for players above the DNP-risk threshold.",
-        )
-    )
-    og1, og2, og3, og4 = st.columns(4)
-    apply_ownership_guardrails = bool(
-        og1.checkbox(
-            "Ownership Surprise Guardrails",
-            value=True,
-            help="Raises ownership floor for projected-low players with strong surge/chalk signals.",
-        )
-    )
-    ownership_guardrail_proj_threshold = float(
-        og2.slider(
-            "Guardrail Projected Own <= %",
-            min_value=3,
-            max_value=20,
-            value=8,
-            step=1,
-            disabled=not apply_ownership_guardrails,
-        )
-    )
-    ownership_guardrail_surge_threshold = float(
-        og3.slider(
-            "Guardrail Surge Score >= ",
-            min_value=40,
-            max_value=95,
-            value=78,
-            step=1,
-            disabled=not apply_ownership_guardrails,
-        )
-    )
-    ownership_guardrail_floor_cap = float(
-        og4.slider(
-            "Guardrail Ownership Cap %",
-            min_value=12,
-            max_value=35,
-            value=22,
-            step=1,
-            disabled=not apply_ownership_guardrails,
-        )
-    )
-    if auto_contest_profile_enabled:
-        low_own_bucket_exposure_pct = 24.0
-        low_own_bucket_min_per_lineup = 1
-        low_own_bucket_max_projected_ownership = 14.0
-        low_own_bucket_min_projection = 20.0
-        ceiling_boost_lineup_pct = 25.0
-        ceiling_boost_stack_bonus = 2.2
-        ceiling_boost_salary_left_target = 60
-        st.caption(
-            "Auto contest profile will set low-own bucket, ceiling-archetype, and overlap settings "
-            "after the slate player pool is loaded."
-        )
-        cb1, cb2, cb3, cb4 = st.columns(4)
-    else:
-        lo1, lo2, lo3, lo4 = st.columns(4)
-        low_own_bucket_exposure_pct = float(
-            lo1.slider(
-                "Low-Own Bucket Exposure %",
-                min_value=0,
-                max_value=80,
-                value=24,
-                step=1,
-                help="Portion of lineups that must include at least one low-owned upside candidate.",
-            )
-        )
-        low_own_bucket_min_per_lineup = int(
-            lo2.slider(
-                "Low-Own Min Players",
-                min_value=0,
-                max_value=3,
-                value=1,
-                step=1,
-                disabled=low_own_bucket_exposure_pct <= 0.0,
-            )
-        )
-        low_own_bucket_max_projected_ownership = float(
-            lo3.slider(
-                "Low-Own Max Projected Own %",
-                min_value=3,
-                max_value=20,
-                value=14,
-                step=1,
-                disabled=low_own_bucket_exposure_pct <= 0.0,
-            )
-        )
-        low_own_bucket_min_projection = float(
-            lo4.slider(
-                "Low-Own Min Projection",
-                min_value=10,
-                max_value=40,
-                value=20,
-                step=1,
-                disabled=low_own_bucket_exposure_pct <= 0.0,
-            )
-        )
-        cb1, cb2, cb3, cb4 = st.columns(4)
-        ceiling_boost_lineup_pct = float(
-            cb1.slider(
-                "Ceiling Archetype Lineups %",
-                min_value=0,
-                max_value=80,
-                value=25,
-                step=1,
-                help="Allocates a subset of lineups to more aggressive top-end construction scoring.",
-            )
-        )
-        ceiling_boost_stack_bonus = float(
-            cb2.slider(
-                "Ceiling Stack Bonus",
-                min_value=0.0,
-                max_value=6.0,
-                value=2.2,
-                step=0.1,
-                disabled=ceiling_boost_lineup_pct <= 0.0,
-            )
-        )
-        ceiling_boost_salary_left_target = int(
-            cb3.slider(
-                "Ceiling Salary Left Target",
-                min_value=0,
-                max_value=500,
-                value=60,
-                step=10,
-                disabled=ceiling_boost_lineup_pct <= 0.0,
-            )
-        )
-    promote_phantom_constructions = bool(
-        cb4.checkbox(
-            "Promote Top Phantom Constructions",
-            value=True,
-            help="In All Versions mode, reallocate version lineup counts using recent phantom beat-rate.",
-        )
-    )
-    phantom_promotion_lookback_days = int(
-        st.slider(
-            "Phantom Promotion Lookback Days",
-            min_value=3,
-            max_value=60,
-            value=14,
-            step=1,
-            disabled=(not promote_phantom_constructions) or (run_mode_key != "all"),
-            help="Used only for All Versions mode when promotion is enabled.",
-        )
-    )
-    effective_max_salary_left = min(max_salary_left, 50) if strict_salary_utilization else max_salary_left
+    apply_uncertainty_shrink = True
+    uncertainty_shrink_pct = 15.0
+    dnp_risk_threshold_pct = 35.0
+    high_risk_extra_shrink_pct = 8.0
+    apply_ownership_guardrails = True
+    ownership_guardrail_proj_threshold = 8.0
+    ownership_guardrail_surge_threshold = 78.0
+    ownership_guardrail_floor_cap = 22.0
+    low_own_bucket_exposure_pct = 24.0
+    low_own_bucket_min_per_lineup = 1
+    low_own_bucket_max_projected_ownership = 14.0
+    low_own_bucket_min_projection = 20.0
+    ceiling_boost_lineup_pct = 25.0
+    ceiling_boost_stack_bonus = 2.2
+    ceiling_boost_salary_left_target = 60
+    promote_phantom_constructions = bool(run_mode_key == "all")
+    phantom_promotion_lookback_days = 14
+    effective_max_salary_left = max_salary_left
     spike_max_pair_overlap = 4
-    if run_mode_key == "all" or lineup_strategy == "spike":
-        if auto_contest_profile_enabled:
-            st.caption("Auto contest profile will set spike overlap after the slate is loaded.")
-        else:
-            spike_max_pair_overlap = int(
-                st.slider(
-                    "Spike Max Shared Players (A vs B)",
-                    min_value=0,
-                    max_value=8,
-                    value=4,
-                    step=1,
-                    help=(
-                        "Within each A/B pair, lineup B can share at most this many players with lineup A "
-                        "(locks can force overlap)."
-                    ),
-                )
-            )
+
+    p1, p2, p3, p4 = st.columns(4)
+    p1.caption("Lineup Policy")
+    p1.write("System-managed")
+    p2.caption("Calibration")
+    p2.write("14-day phantom lookback")
+    p3.caption("Guardrails")
+    p3.write("Always on")
+    p4.caption("Phantom Promotion")
+    p4.write("Auto in All Versions" if run_mode_key == "all" else "All Versions only")
+    st.caption(
+        "Locked lineup policy: projection calibration, salary/role residual calibration, "
+        "ownership surprise guardrails, minutes/DNP shrink, salary-left targeting, low-own bucket, "
+        "ceiling archetype, spike overlap, and phantom promotion are system-managed to keep runs comparable."
+    )
+    st.caption(
+        "Auto contest profile will set the final salary-left target, low-own mix, ceiling settings, "
+        "and spike overlap after the slate player pool is loaded."
+    )
     if not bucket_name:
         st.info("Set a GCS bucket in sidebar to generate lineups.")
     else:
@@ -6766,30 +6483,6 @@ with tab_lineups:
                                     "lineup_strategy": "spike",
                                     "include_tail_signals": True,
                                     "model_profile": "tail_spike_pairs",
-                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
-                                }
-                            ]
-                        elif selected_model_key == "cluster_v1_experimental":
-                            version_plan = [
-                                {
-                                    "version_key": "cluster_v1_experimental",
-                                    "version_label": "Cluster v1 (Experimental)",
-                                    "lineup_strategy": "cluster",
-                                    "include_tail_signals": False,
-                                    "model_profile": "cluster_seed_mutation_v1",
-                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
-                                    "cluster_target_count": 15,
-                                    "cluster_variants_per_cluster": 10,
-                                }
-                            ]
-                        elif selected_model_key == "spike_v1_legacy":
-                            version_plan = [
-                                {
-                                    "version_key": "spike_v1_legacy",
-                                    "version_label": "Spike v1 (Legacy A/B)",
-                                    "lineup_strategy": "spike",
-                                    "include_tail_signals": False,
-                                    "model_profile": "legacy_spike_pairs",
                                     "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                 }
                             ]
