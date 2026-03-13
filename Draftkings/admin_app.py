@@ -5911,7 +5911,7 @@ with tab_lineups:
         index=0,
         help=(
             "All Versions generates and saves all lineup models: "
-            "standard_v1, spike_v1_legacy, spike_v2_tail, cluster_v1_experimental, standout_v1_capture."
+            "standard_v1, spike_v2_tail, standout_v1_capture, chalk_value_capture_v1, salary_efficiency_ceiling_v1."
         ),
     )
     run_mode_key = "all" if run_mode_label == "All Versions" else "single"
@@ -5964,6 +5964,8 @@ with tab_lineups:
                 "Spike v2 (Tail A/B)",
                 "Cluster v1 (Experimental)",
                 "Standout v1 (Missed-Capture)",
+                "Chalk-Value v1 (Leverage Pivots)",
+                "Salary-Efficiency v1 (Ceiling)",
             ],
             index=4,
             help=(
@@ -5986,6 +5988,14 @@ with tab_lineups:
             selected_model_key = "standout_v1_capture"
             lineup_strategy = "standard"
             include_tail_signals = True
+        elif lineup_model_label == "Chalk-Value v1 (Leverage Pivots)":
+            selected_model_key = "chalk_value_capture_v1"
+            lineup_strategy = "standard"
+            include_tail_signals = True
+        elif lineup_model_label == "Salary-Efficiency v1 (Ceiling)":
+            selected_model_key = "salary_efficiency_ceiling_v1"
+            lineup_strategy = "standard"
+            include_tail_signals = True
         else:
             selected_model_key = "standard_v1"
             lineup_strategy = "standard"
@@ -5993,14 +6003,14 @@ with tab_lineups:
     else:
         c5.caption("Lineup Models")
         c5.write(
-            "All Versions: `standard_v1`, `spike_v1_legacy`, `spike_v2_tail`, "
-            "`cluster_v1_experimental`, `standout_v1_capture`"
+            "All Versions: `standard_v1`, `spike_v2_tail`, `standout_v1_capture`, "
+            "`chalk_value_capture_v1`, `salary_efficiency_ceiling_v1`"
         )
         selected_model_key = "standard_v1"
         lineup_strategy = "standard"
         include_tail_signals = False
 
-    if run_mode_key == "all" or lineup_strategy == "cluster":
+    if lineup_strategy == "cluster":
         st.caption(
             "Cluster v1 Phase 1 uses seed + mutation generation with target `15 clusters x 10 variants` "
             "(auto-adjusted for smaller lineup counts/slates)."
@@ -6036,7 +6046,7 @@ with tab_lineups:
             "Agent Focus Games",
             min_value=1,
             max_value=10,
-            value=3,
+            value=2,
             step=1,
             disabled=not apply_game_agent_stack_bias,
             help="How many top stack games to prioritize from the packet.",
@@ -6082,7 +6092,7 @@ with tab_lineups:
             "Salary Left Target",
             min_value=0,
             max_value=500,
-            value=200,
+            value=100,
             step=10,
             help="Scoring penalty targets this salary-left value.",
         )
@@ -6249,7 +6259,7 @@ with tab_lineups:
         low_own_bucket_min_projection = 20.0
         ceiling_boost_lineup_pct = 25.0
         ceiling_boost_stack_bonus = 2.2
-        ceiling_boost_salary_left_target = 120
+        ceiling_boost_salary_left_target = 60
         st.caption(
             "Auto contest profile will set low-own bucket, ceiling-archetype, and overlap settings "
             "after the slate player pool is loaded."
@@ -6323,7 +6333,7 @@ with tab_lineups:
                 "Ceiling Salary Left Target",
                 min_value=0,
                 max_value=500,
-                value=120,
+                value=60,
                 step=10,
                 disabled=ceiling_boost_lineup_pct <= 0.0,
             )
@@ -6402,6 +6412,7 @@ with tab_lineups:
             else:
                 pool_sorted = pool_df.sort_values("projected_dk_points", ascending=False).copy()
                 effective_spike_max_pair_overlap = int(spike_max_pair_overlap)
+                effective_salary_left_target = int(salary_left_target)
                 effective_low_own_bucket_exposure_pct = float(low_own_bucket_exposure_pct)
                 effective_low_own_bucket_min_per_lineup = int(low_own_bucket_min_per_lineup)
                 effective_low_own_bucket_max_projected_ownership = float(low_own_bucket_max_projected_ownership)
@@ -6418,6 +6429,9 @@ with tab_lineups:
                         entry_limit=contest_entry_limit_key,
                     )
                     effective_spike_max_pair_overlap = int(auto_contest_profile_meta.get("spike_max_pair_overlap") or effective_spike_max_pair_overlap)
+                    effective_salary_left_target = int(
+                        auto_contest_profile_meta.get("salary_left_target") or effective_salary_left_target
+                    )
                     effective_low_own_bucket_exposure_pct = float(
                         auto_contest_profile_meta.get("low_own_bucket_exposure_pct") or effective_low_own_bucket_exposure_pct
                     )
@@ -6451,6 +6465,7 @@ with tab_lineups:
                         "Auto contest profile applied: "
                         f"field_size={int(auto_contest_profile_meta.get('field_size') or contest_field_size):,}, "
                         f"entry_limit={contest_entry_limit_label}, "
+                        f"salary_left_target={effective_salary_left_target}, "
                         f"low_own_max_own={effective_low_own_bucket_max_projected_ownership:.0f}%, "
                         f"low_own_min_projection={effective_low_own_bucket_min_projection:.0f}, "
                         f"ceiling_stack_bonus={effective_ceiling_boost_stack_bonus:.1f}, "
@@ -6710,14 +6725,6 @@ with tab_lineups:
                                 "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             },
                             {
-                                "version_key": "spike_v1_legacy",
-                                "version_label": "Spike v1 (Legacy A/B)",
-                                "lineup_strategy": "spike",
-                                "include_tail_signals": False,
-                                "model_profile": "legacy_spike_pairs",
-                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
-                            },
-                            {
                                 "version_key": "spike_v2_tail",
                                 "version_label": "Spike v2 (Tail A/B)",
                                 "lineup_strategy": "spike",
@@ -6726,21 +6733,27 @@ with tab_lineups:
                                 "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             },
                             {
-                                "version_key": "cluster_v1_experimental",
-                                "version_label": "Cluster v1 (Experimental)",
-                                "lineup_strategy": "cluster",
-                                "include_tail_signals": False,
-                                "model_profile": "cluster_seed_mutation_v1",
-                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
-                                "cluster_target_count": 15,
-                                "cluster_variants_per_cluster": 10,
-                            },
-                            {
                                 "version_key": "standout_v1_capture",
                                 "version_label": "Standout v1 (Missed-Capture)",
                                 "lineup_strategy": "standard",
                                 "include_tail_signals": True,
                                 "model_profile": "standout_capture_v1",
+                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
+                            },
+                            {
+                                "version_key": "chalk_value_capture_v1",
+                                "version_label": "Chalk-Value v1 (Leverage Pivots)",
+                                "lineup_strategy": "standard",
+                                "include_tail_signals": True,
+                                "model_profile": "chalk_value_capture_v1",
+                                "spike_max_pair_overlap": effective_spike_max_pair_overlap,
+                            },
+                            {
+                                "version_key": "salary_efficiency_ceiling_v1",
+                                "version_label": "Salary-Efficiency v1 (Ceiling)",
+                                "lineup_strategy": "standard",
+                                "include_tail_signals": True,
+                                "model_profile": "salary_efficiency_ceiling_v1",
                                 "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             },
                         ]
@@ -6788,6 +6801,28 @@ with tab_lineups:
                                     "lineup_strategy": "standard",
                                     "include_tail_signals": True,
                                     "model_profile": "standout_capture_v1",
+                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
+                                }
+                            ]
+                        elif selected_model_key == "chalk_value_capture_v1":
+                            version_plan = [
+                                {
+                                    "version_key": "chalk_value_capture_v1",
+                                    "version_label": "Chalk-Value v1 (Leverage Pivots)",
+                                    "lineup_strategy": "standard",
+                                    "include_tail_signals": True,
+                                    "model_profile": "chalk_value_capture_v1",
+                                    "spike_max_pair_overlap": effective_spike_max_pair_overlap,
+                                }
+                            ]
+                        elif selected_model_key == "salary_efficiency_ceiling_v1":
+                            version_plan = [
+                                {
+                                    "version_key": "salary_efficiency_ceiling_v1",
+                                    "version_label": "Salary-Efficiency v1 (Ceiling)",
+                                    "lineup_strategy": "standard",
+                                    "include_tail_signals": True,
+                                    "model_profile": "salary_efficiency_ceiling_v1",
                                     "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                                 }
                             ]
@@ -6920,7 +6955,7 @@ with tab_lineups:
                             ceiling_boost_stack_bonus=effective_ceiling_boost_stack_bonus,
                             ceiling_boost_salary_left_target=effective_ceiling_boost_salary_left_target,
                             objective_score_adjustments=objective_score_adjustments,
-                            salary_left_target=salary_left_target,
+                            salary_left_target=effective_salary_left_target,
                             random_seed=lineup_seed + version_idx,
                             model_profile=str(version_cfg.get("model_profile") or "legacy_baseline"),
                             progress_callback=_lineup_progress,
@@ -6963,7 +6998,8 @@ with tab_lineups:
                             "max_salary_left": effective_max_salary_left,
                             "requested_max_salary_left": max_salary_left,
                             "strict_salary_utilization": strict_salary_utilization,
-                            "salary_left_target": salary_left_target,
+                            "salary_left_target": effective_salary_left_target,
+                            "requested_salary_left_target": salary_left_target,
                             "global_max_exposure_pct": global_max_exposure_pct,
                             "spike_max_pair_overlap": effective_spike_max_pair_overlap,
                             "cluster_target_count": 15,

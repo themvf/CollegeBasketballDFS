@@ -5,6 +5,7 @@ import pandas as pd
 from college_basketball_dfs.cbb_dk_optimizer import (
     _apply_uncertainty_exposure_caps,
     _rerank_lineup_portfolio,
+    apply_cheap_value_chalk_guardrail,
     apply_focus_game_chalk_guardrail,
     apply_midrange_chalk_floor,
     apply_model_profile_adjustments,
@@ -804,6 +805,7 @@ def test_recommend_contest_profile_settings_tightens_short_slate_single_entry() 
     assert int(settings["slate_game_count"]) == 3
     assert str(settings["entry_limit"]) == "single_entry"
     assert int(settings["spike_max_pair_overlap"]) >= 6
+    assert int(settings["salary_left_target"]) >= 120
     assert float(settings["low_own_bucket_exposure_pct"]) <= 18.0
     assert float(settings["low_own_bucket_min_projection"]) >= 20.0
     assert float(settings["ceiling_boost_lineup_pct"]) > 0.0
@@ -840,6 +842,7 @@ def test_recommend_contest_profile_settings_opens_up_large_field_twenty_max() ->
     assert int(settings["slate_game_count"]) == 6
     assert str(settings["entry_limit"]) == "20_max"
     assert int(settings["spike_max_pair_overlap"]) <= 3
+    assert int(settings["salary_left_target"]) <= 100
     assert float(settings["low_own_bucket_exposure_pct"]) >= 35.0
     assert float(settings["low_own_bucket_max_projected_ownership"]) <= 9.0
     assert float(settings["ceiling_boost_lineup_pct"]) >= 35.0
@@ -1562,6 +1565,50 @@ def test_apply_focus_game_chalk_guardrail_lifts_focus_game_candidates() -> None:
     assert bool(adjusted.loc[1, "focus_game_chalk_guardrail_flag"]) is False
 
 
+def test_apply_cheap_value_chalk_guardrail_lifts_consensus_value_candidates() -> None:
+    pool = pd.DataFrame(
+        [
+            {
+                "Name": "Cheap Chalk",
+                "Salary": 4800,
+                "projected_dk_points": 25.5,
+                "projected_ownership": 8.0,
+                "value_per_1k": 5.31,
+                "historical_ownership_baseline": 22.0,
+                "field_ownership_pct": 19.0,
+                "game_stack_focus_score": 82.0,
+                "team_stack_popularity_score": 74.0,
+                "ownership_chalk_surge_score": 88.0,
+                "minutes_shock_boost_pct": 9.0,
+                "consensus_value_signal": 0.84,
+                "rotowire_signal_score": 0.76,
+            },
+            {
+                "Name": "Expensive Neutral",
+                "Salary": 7600,
+                "projected_dk_points": 25.0,
+                "projected_ownership": 9.5,
+                "value_per_1k": 3.29,
+                "historical_ownership_baseline": 10.0,
+                "field_ownership_pct": 9.0,
+                "game_stack_focus_score": 41.0,
+                "team_stack_popularity_score": 30.0,
+                "ownership_chalk_surge_score": 20.0,
+                "minutes_shock_boost_pct": 1.0,
+                "consensus_value_signal": 0.20,
+                "rotowire_signal_score": 0.18,
+            },
+        ]
+    )
+
+    adjusted = apply_cheap_value_chalk_guardrail(pool)
+
+    assert bool(adjusted.loc[0, "cheap_value_chalk_guardrail_flag"]) is True
+    assert float(adjusted.loc[0, "cheap_value_chalk_guardrail_delta"]) > 0.0
+    assert float(adjusted.loc[0, "projected_ownership"]) >= 24.0
+    assert bool(adjusted.loc[1, "cheap_value_chalk_guardrail_flag"]) is False
+
+
 def test_apply_midrange_chalk_floor_enforces_midrange_projection_chalk_minimum() -> None:
     pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
     pool["projected_ownership"] = 9.0
@@ -1588,6 +1635,71 @@ def test_apply_midrange_chalk_floor_enforces_midrange_projection_chalk_minimum()
     assert float(adjusted.loc[0, "projected_ownership"]) >= 18.0
     assert float(adjusted.loc[0, "midrange_chalk_floor_delta"]) > 0.0
     assert bool(adjusted.loc[1, "midrange_chalk_floor_flag"]) is False
+
+
+def test_generate_lineups_caps_low_signal_game_stack_exposure_on_large_slate() -> None:
+    base_pool = build_player_pool(_sample_slate(), _sample_props(), bookmaker_filter="fanduel").copy().reset_index(drop=True)
+    game_map = [
+        ("AAA@BBB", "AAA", "BBB"),
+        ("CCC@DDD", "CCC", "DDD"),
+        ("EEE@FFF", "EEE", "FFF"),
+        ("GGG@HHH", "GGG", "HHH"),
+        ("III@JJJ", "III", "JJJ"),
+        ("KKK@LLL", "KKK", "LLL"),
+        ("MMM@NNN", "MMM", "NNN"),
+        ("OOO@PPP", "OOO", "PPP"),
+    ]
+    expanded_parts: list[pd.DataFrame] = []
+    for idx, (game_key, team_a, team_b) in enumerate(game_map):
+        part = base_pool.copy()
+        offset = idx * 100
+        part["ID"] = part["ID"].astype(int) + offset
+        part["ID"] = part["ID"].astype(str)
+        part["Name"] = part["Name"].astype(str) + f" {idx + 1}"
+        part["Name + ID"] = part["Name"].astype(str) + " (" + part["ID"].astype(str) + ")"
+        part["game_key"] = game_key
+        part.loc[part["Position"].astype(str).str.contains("G"), "TeamAbbrev"] = team_a
+        part.loc[part["Position"].astype(str).str.contains("F"), "TeamAbbrev"] = team_b
+        part["game_total_line"] = 149.0 - (idx * 2.0)
+        part["game_spread_abs"] = 4.0 + idx
+        part["game_tail_score"] = 68.0 - (idx * 3.0)
+        part["team_stack_popularity_score"] = 66.0 - (idx * 4.0)
+        expanded_parts.append(part)
+
+    pool = pd.concat(expanded_parts, ignore_index=True)
+    tail_game = "OOO@PPP"
+    tail_mask = pool["game_key"] == tail_game
+    pool.loc[tail_mask, "projected_dk_points"] = 17.0
+    pool.loc[tail_mask, "ceiling_projection"] = 22.0
+    pool.loc[tail_mask, "projected_ownership"] = 4.0
+    pool.loc[tail_mask, "historical_ownership_baseline"] = 3.0
+    pool.loc[tail_mask, "game_total_line"] = 132.0
+    pool.loc[tail_mask, "game_spread_abs"] = 12.0
+    pool.loc[tail_mask, "game_tail_score"] = 34.0
+    pool.loc[tail_mask, "team_stack_popularity_score"] = 18.0
+    pool.loc[tail_mask, "value_per_1k"] = 3.0
+    objective_bonuses = {
+        str(pid): 80.0 for pid in pool.loc[tail_mask, "ID"].astype(str).tolist()
+    }
+
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=12,
+        contest_type="Large GPP",
+        objective_score_adjustments=objective_bonuses,
+        auto_preferred_game_count=0,
+        random_seed=17,
+    )
+
+    tail_stacks = 0
+    for lineup in lineups:
+        game_counts = Counter(str(player.get("game_key") or "") for player in lineup["players"])
+        if int(game_counts.get(tail_game, 0)) >= 2:
+            tail_stacks += 1
+
+    assert len(lineups) == 12
+    assert any("Game-stack exposure caps active" in warning for warning in warnings)
+    assert tail_stacks <= 1
 
 
 def test_apply_false_chalk_discount_shrinks_unsupported_high_ownership_and_normalizes_total() -> None:

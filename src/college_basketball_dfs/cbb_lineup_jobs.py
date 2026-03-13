@@ -44,7 +44,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "include_tail_signals": False,
         "model_profile": "legacy_baseline",
         "gpp_overrides": {
-            "salary_left_target": 125,
+            "salary_left_target": 100,
             "low_own_bucket_exposure_pct": 22.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 13.0,
@@ -57,7 +57,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_unsupported_false_chalk_per_lineup": 0,
             "ceiling_boost_lineup_pct": 32.0,
             "ceiling_boost_stack_bonus": 2.4,
-            "ceiling_boost_salary_left_target": 100,
+            "ceiling_boost_salary_left_target": 60,
         },
     },
     {
@@ -67,7 +67,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "include_tail_signals": True,
         "model_profile": "tail_spike_pairs",
         "gpp_overrides": {
-            "salary_left_target": 220,
+            "salary_left_target": 130,
             "low_own_bucket_exposure_pct": 48.0,
             "low_own_bucket_min_per_lineup": 2,
             "low_own_bucket_max_projected_ownership": 11.0,
@@ -80,7 +80,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 70.0,
             "ceiling_boost_stack_bonus": 3.5,
-            "ceiling_boost_salary_left_target": 150,
+            "ceiling_boost_salary_left_target": 70,
         },
     },
     {
@@ -90,7 +90,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "include_tail_signals": True,
         "model_profile": "standout_capture_v1",
         "gpp_overrides": {
-            "salary_left_target": 150,
+            "salary_left_target": 110,
             "low_own_bucket_exposure_pct": 36.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 12.0,
@@ -103,7 +103,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 52.0,
             "ceiling_boost_stack_bonus": 2.9,
-            "ceiling_boost_salary_left_target": 130,
+            "ceiling_boost_salary_left_target": 50,
         },
     },
     {
@@ -113,7 +113,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "include_tail_signals": True,
         "model_profile": "chalk_value_capture_v1",
         "gpp_overrides": {
-            "salary_left_target": 125,
+            "salary_left_target": 95,
             "low_own_bucket_exposure_pct": 20.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 13.0,
@@ -126,7 +126,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 38.0,
             "ceiling_boost_stack_bonus": 2.5,
-            "ceiling_boost_salary_left_target": 110,
+            "ceiling_boost_salary_left_target": 60,
         },
     },
     {
@@ -136,7 +136,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
         "include_tail_signals": True,
         "model_profile": "salary_efficiency_ceiling_v1",
         "gpp_overrides": {
-            "salary_left_target": 100,
+            "salary_left_target": 80,
             "low_own_bucket_exposure_pct": 32.0,
             "low_own_bucket_min_per_lineup": 1,
             "low_own_bucket_max_projected_ownership": 12.0,
@@ -149,7 +149,7 @@ LINEUP_MODEL_REGISTRY: tuple[dict[str, Any], ...] = (
             "max_unsupported_false_chalk_per_lineup": 1,
             "ceiling_boost_lineup_pct": 66.0,
             "ceiling_boost_stack_bonus": 3.1,
-            "ceiling_boost_salary_left_target": 125,
+            "ceiling_boost_salary_left_target": 40,
         },
     },
 )
@@ -178,7 +178,7 @@ def _contest_is_gpp(contest_type: str) -> bool:
 
 def _runtime_controls(contest_type: str, model_cfg: dict[str, Any], request: dict[str, Any]) -> dict[str, Any]:
     controls = {
-        "salary_left_target": int(request.get("salary_left_target", 180)),
+        "salary_left_target": int(request.get("salary_left_target", 100)),
         "low_own_bucket_exposure_pct": float(request.get("low_own_bucket_exposure_pct", 22.0)),
         "low_own_bucket_min_per_lineup": int(request.get("low_own_bucket_min_per_lineup", 1)),
         "low_own_bucket_max_projected_ownership": float(request.get("low_own_bucket_max_projected_ownership", 12.0)),
@@ -191,7 +191,7 @@ def _runtime_controls(contest_type: str, model_cfg: dict[str, Any], request: dic
         "max_unsupported_false_chalk_per_lineup": int(request.get("max_unsupported_false_chalk_per_lineup", 1)),
         "ceiling_boost_lineup_pct": float(request.get("ceiling_boost_lineup_pct", 50.0)),
         "ceiling_boost_stack_bonus": float(request.get("ceiling_boost_stack_bonus", 2.5)),
-        "ceiling_boost_salary_left_target": int(request.get("ceiling_boost_salary_left_target", 120)),
+        "ceiling_boost_salary_left_target": int(request.get("ceiling_boost_salary_left_target", 60)),
     }
     if _contest_is_gpp(contest_type):
         controls.update({k: v for k, v in (model_cfg.get("gpp_overrides") or {}).items()})
