@@ -4115,7 +4115,7 @@ def render_lineupstarter_tab(
             st.exception(exc)
 
     source_label = active_source_label or "Unavailable"
-    if active_source == "legacy_dk_fallback":
+    if active_source in {"uploaded_dk_slate", "legacy_dk_fallback"}:
         source_label = "Uploaded DraftKings slate"
     ls_status_1, ls_status_2, ls_status_3 = st.columns(3)
     ls_status_1.metric("Active Source", source_label)
@@ -4154,7 +4154,7 @@ def render_lineupstarter_tab(
     )
     preview_lineupstarter_df = pd.DataFrame()
     preview_lineupstarter_coverage: dict[str, Any] = {}
-    if active_source == "legacy_dk_fallback" and active_ready:
+    if active_source in {"uploaded_dk_slate", "legacy_dk_fallback"} and active_ready:
         st.caption("LineupStarter mapping is using the uploaded DraftKings slate for this date.")
     if lineupstarter_upload is not None and not active_slate_df.empty:
         preview_payload = _read_uploaded_csv_frame(lineupstarter_upload)
@@ -4996,7 +4996,7 @@ with tab_dk:
         )
         unresolved_df = filter_unresolved_resolution_rows(resolution_df)
         source_label = active_source_label or "Unavailable"
-        if active_source == "legacy_dk_fallback":
+        if active_source in {"uploaded_dk_slate", "legacy_dk_fallback"}:
             source_label = "Uploaded DraftKings slate"
 
         st.subheader("Active Slate")
@@ -5005,7 +5005,7 @@ with tab_dk:
         a2.metric("Active Rows", int(len(active_slate_df)))
         a3.metric("Cached DK Rows", int(len(legacy_dk_slate_df)))
         a4.metric("Slate Games", int(slate_meta.get("game_count") or 0))
-        if active_ready and active_source == "legacy_dk_fallback":
+        if active_ready and active_source in {"uploaded_dk_slate", "legacy_dk_fallback"}:
             st.success("Using the uploaded DraftKings slate as the active optimizer source.")
         elif active_ready:
             st.info(active_source_detail or "Using an alternate active slate source.")
@@ -5049,7 +5049,7 @@ with tab_dk:
             )
 
             if resolved_slate_df.empty:
-                if active_source == "legacy_dk_fallback" and not legacy_dk_slate_df.empty:
+                if active_source in {"uploaded_dk_slate", "legacy_dk_fallback"} and not legacy_dk_slate_df.empty:
                     st.info("No resolved RotoWire slate is available. The uploaded DraftKings slate is controlling the optimizer.")
                 else:
                     st.info("No RotoWire slate rows were returned for the selected configuration.")
@@ -5548,13 +5548,13 @@ with tab_slate_vegas:
                     f"Average projected minutes: `{avg_mins:.1f}` | "
                     f"Average recent minutes ({int(slate_projection_recency['recent_form_games'])}g): `{avg_mins_recent:.1f}`"
                 )
-                if active_source == "legacy_dk_fallback":
+                if active_source in {"uploaded_dk_slate", "legacy_dk_fallback"}:
                     st.warning(
                         active_source_detail
-                        or "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+                        or "Using the uploaded DraftKings slate as the active optimizer source."
                     )
                     st.caption(
-                        "RotoWire repair is still recommended. Current prior attachment on the active DK slate: "
+                        "Current RotoWire prior attachment on the active DK slate: "
                         f"projection matches=`{int(slate_context.get('rotowire_projection_matched_players') or 0)}` | "
                         f"minutes matches=`{int(slate_context.get('rotowire_minutes_matched_players') or 0)}` | "
                         f"team exact=`{int(slate_context.get('rotowire_team_exact_matches') or 0)}` | "
@@ -6224,14 +6224,14 @@ with tab_lineups:
                             )
                             exposure_caps[label_to_id[label]] = float(pct)
 
-                if active_source == "legacy_dk_fallback":
+                if active_source in {"uploaded_dk_slate", "legacy_dk_fallback"}:
                     st.warning(
                         active_source_detail
-                        or "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+                        or "Using the uploaded DraftKings slate as the active optimizer source."
                     )
                     st.caption(
                         "Active source: "
-                        f"`{active_source_label or 'Legacy DraftKings fallback'}` | "
+                        f"`{active_source_label or 'Uploaded DraftKings slate'}` | "
                         "RotoWire prior attachment on this active DK slate: "
                         f"projection matches=`{int(slate_context.get('rotowire_projection_matched_players') or 0)}` | "
                         f"minutes matches=`{int(slate_context.get('rotowire_minutes_matched_players') or 0)}` | "

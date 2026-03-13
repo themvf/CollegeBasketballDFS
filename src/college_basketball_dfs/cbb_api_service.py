@@ -603,27 +603,38 @@ def resolve_active_slate_context(
     active_source = "unavailable"
     active_source_label = "No active slate"
     active_source_detail = ""
-    if rotowire_ready:
-        active_slate_df = resolved_slate_df.copy()
-        active_source = "rotowire_resolved"
-        active_source_label = "Resolved RotoWire slate"
-        active_source_detail = "Using resolved RotoWire slate as the active optimizer source."
-    elif legacy_available:
+    if legacy_available:
         active_slate_df = legacy_dk_slate_df.copy()
-        active_source = "legacy_dk_fallback"
-        active_source_label = "Legacy DraftKings fallback"
+        active_source = "uploaded_dk_slate"
+        active_source_label = "Uploaded DraftKings slate"
         if coverage_error:
             active_source_detail = (
-                "Using cached legacy DraftKings slate because RotoWire DK resolution is incomplete."
+                "Using the uploaded DraftKings slate as the active optimizer source. "
+                "RotoWire registry coverage is incomplete, so RotoWire prior attachment may be partial."
             )
         elif rotowire_error:
             active_source_detail = (
-                "Using cached legacy DraftKings slate because RotoWire slate loading failed."
+                "Using the uploaded DraftKings slate as the active optimizer source. "
+                "RotoWire slate loading failed, so only non-RotoWire priors are attached."
             )
         else:
-            active_source_detail = "Using cached legacy DraftKings slate as the active optimizer source."
+            active_source_detail = "Using the uploaded DraftKings slate as the active optimizer source."
+    elif rotowire_ready:
+        active_source = "unavailable"
+        active_source_label = "No active slate"
+        active_source_detail = (
+            "No uploaded DraftKings slate is cached for the selected date+slate. "
+            "Upload a DraftKings slate CSV to enable optimizer, LineupStarter mapping, and exports."
+        )
     else:
-        active_source_detail = coverage_error or rotowire_error or "No active slate source is available."
+        reason_parts = [
+            "No uploaded DraftKings slate is cached for the selected date+slate. Upload a DraftKings slate CSV to continue."
+        ]
+        if coverage_error:
+            reason_parts.append(coverage_error)
+        elif rotowire_error:
+            reason_parts.append(f"RotoWire slate load failed. {rotowire_error}")
+        active_source_detail = " ".join(str(part).strip() for part in reason_parts if str(part).strip())
 
     return {
         "slate": dict(resolved_bundle.get("slate") or {}),
