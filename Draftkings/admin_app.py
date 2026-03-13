@@ -127,10 +127,15 @@ def _build_lineup_versions_export_frame(generated_versions: dict[str, Any]) -> p
         summary_df = lineups_summary_frame(lineups).copy()
         if summary_df.empty:
             continue
-        summary_df.insert(0, "Version Key", str(version_key))
-        summary_df.insert(1, "Version Label", str(version_data.get("version_label") or version_key))
-        summary_df.insert(2, "Lineup Strategy", str(version_data.get("lineup_strategy") or ""))
-        summary_df.insert(3, "Model Profile", str(version_data.get("model_profile") or ""))
+        metadata_cols = {
+            "Version Key": str(version_key),
+            "Version Label": str(version_data.get("version_label") or version_key),
+            "Lineup Strategy": str(version_data.get("lineup_strategy") or ""),
+            "Model Profile": str(version_data.get("model_profile") or ""),
+        }
+        summary_df = summary_df.loc[:, ~summary_df.columns.isin(metadata_cols.keys())].copy()
+        for idx, (col_name, col_value) in enumerate(metadata_cols.items()):
+            summary_df.insert(idx, col_name, col_value)
         export_frames.append(summary_df)
     if not export_frames:
         return pd.DataFrame()
