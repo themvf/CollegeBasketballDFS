@@ -39,8 +39,15 @@ function Ensure-SecretVersion {
         throw "Service account JSON file not found: $JsonPath"
     }
 
-    & gcloud secrets describe $ResolvedSecretName --project $ResolvedProjectId *> $null
-    if ($LASTEXITCODE -ne 0) {
+    $secretExists = $true
+    try {
+        & gcloud secrets describe $ResolvedSecretName --project $ResolvedProjectId *> $null
+        $secretExists = ($LASTEXITCODE -eq 0)
+    } catch {
+        $secretExists = $false
+    }
+
+    if (-not $secretExists) {
         & gcloud secrets create $ResolvedSecretName --replication-policy=automatic --project $ResolvedProjectId
         if ($LASTEXITCODE -ne 0) {
             throw "Failed to create Secret Manager secret '$ResolvedSecretName'."
@@ -50,6 +57,27 @@ function Ensure-SecretVersion {
     & gcloud secrets versions add $ResolvedSecretName --data-file=$JsonPath --project $ResolvedProjectId
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upload a secret version from $JsonPath."
+    }
+}
+
+function Ensure-SecretAccessorBinding {
+    param(
+        [string]$ResolvedProjectId,
+        [string]$ResolvedSecretName
+    )
+
+    $projectNumber = (& gcloud projects describe $ResolvedProjectId --format="value(projectNumber)" 2>$null | Out-String).Trim()
+    if (-not $projectNumber) {
+        throw "Could not resolve the project number for $ResolvedProjectId."
+    }
+
+    $runtimeServiceAccount = "${projectNumber}-compute@developer.gserviceaccount.com"
+    & gcloud secrets add-iam-policy-binding $ResolvedSecretName `
+        --project $ResolvedProjectId `
+        --member "serviceAccount:$runtimeServiceAccount" `
+        --role "roles/secretmanager.secretAccessor" *> $null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to grant Secret Manager access to $runtimeServiceAccount."
     }
 }
 
@@ -100,7 +128,8 @@ if ($ServiceAccountJsonPath.Trim()) {
         throw "SecretName cannot be blank when ServiceAccountJsonPath is supplied."
     }
     Ensure-SecretVersion -ResolvedProjectId $ResolvedProjectId -ResolvedSecretName $ResolvedSecretName -JsonPath $ServiceAccountJsonPath
-    $deployArgs += @("--set-secrets", "GCP_SERVICE_ACCOUNT_JSON=$ResolvedSecretName:latest")
+    Ensure-SecretAccessorBinding -ResolvedProjectId $ResolvedProjectId -ResolvedSecretName $ResolvedSecretName
+    $deployArgs += @("--set-secrets", "GCP_SERVICE_ACCOUNT_JSON=${ResolvedSecretName}:latest")
     Write-Host "Secret Manager: $ResolvedSecretName"
 } else {
     Write-Warning "No service account JSON path supplied. Cloud Run will rely on ADC/workload identity."

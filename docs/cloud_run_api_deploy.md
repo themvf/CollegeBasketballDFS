@@ -49,13 +49,14 @@ If you already use workload identity on Cloud Run, omit `-ServiceAccountJsonPath
 
 1. resolves your GCP project
 2. uploads the service-account JSON to Secret Manager if you pass `-ServiceAccountJsonPath`
-3. builds the API container from the repo root
-4. deploys Cloud Run with the required env vars
-5. prints:
+3. grants the Cloud Run runtime service account access to that secret
+4. builds the API container from the repo root
+5. deploys Cloud Run with the required env vars
+6. prints:
    - the service URL
    - `/health`
    - the slate-status URL
-6. runs smoke checks against both endpoints
+7. runs smoke checks against both endpoints
 
 ## Expected Smoke Test URLs
 

@@ -2,7 +2,8 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import date, timedelta
+import math
+from datetime import date, datetime, timedelta
 import os
 from pathlib import Path
 import re
@@ -87,6 +88,35 @@ def _resolve_selected_date(selected_date: date | str) -> date:
     if pd.isna(target_date):
         raise ValueError("selected_date must be a valid date")
     return target_date.date()
+
+
+def _api_json_safe(value: Any) -> Any:
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, (date, datetime, pd.Timestamp)):
+        try:
+            return value.isoformat()
+        except Exception:
+            return str(value)
+    if isinstance(value, dict):
+        return {str(k): _api_json_safe(v) for k, v in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_api_json_safe(item) for item in value]
+    if hasattr(value, "item"):
+        try:
+            return _api_json_safe(value.item())
+        except Exception:
+            return str(value)
+    try:
+        if pd.isna(value):
+            return None
+    except Exception:
+        pass
+    return str(value)
 
 
 def filter_unresolved_resolution_rows(resolution_df: pd.DataFrame | None) -> pd.DataFrame:
@@ -1053,7 +1083,7 @@ def build_slate_status_payload(
     coverage = dict(bundle.get("coverage") or {})
     selected_day = _resolve_selected_date(selected_date)
 
-    return {
+    return _api_json_safe({
         "selected_date": selected_day.isoformat(),
         "slate_key": _slate_key_from_label(slate_key),
         "slate_label": _normalize_slate_label(slate_meta.get("slate_name") or slate_key, default="Main"),
@@ -1082,7 +1112,7 @@ def build_slate_status_payload(
             "error": str(bundle.get("coverage_error") or ""),
             "unresolved_sample": unresolved_sample_df.to_dict(orient="records"),
         },
-    }
+    })
 
 
 def build_lineup_runs_payload(
@@ -1108,12 +1138,12 @@ def build_lineup_runs_payload(
     if limit is not None and int(limit) >= 0:
         manifests = manifests[: int(limit)]
     runs = [_build_lineup_run_summary(manifest, include_versions=include_versions) for manifest in manifests]
-    return {
+    return _api_json_safe({
         "selected_date": selected_day.isoformat(),
         "slate_key": _slate_key_from_label(slate_key),
         "rows": int(len(runs)),
         "runs": runs,
-    }
+    })
 
 
 def build_lineup_run_detail_payload(
@@ -1190,12 +1220,12 @@ def build_lineup_run_detail_payload(
 
     run_detail = _build_lineup_run_summary(manifest, include_versions=False)
     run_detail["settings"] = manifest.get("settings") or {}
-    return {
+    return _api_json_safe({
         "selected_date": selected_day.isoformat(),
         "slate_key": selected_slate_key,
         "run": run_detail,
         "versions": versions_out,
-    }
+    })
 
 
 def _default_roster_position(value: Any) -> str:

@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
 import io
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from college_basketball_dfs.cbb_api_service import (
@@ -338,18 +340,18 @@ def test_build_slate_status_payload_summarizes_active_context(monkeypatch) -> No
         "college_basketball_dfs.cbb_api_service.resolve_active_slate_context",
         lambda **_: {
             "slate": {
-                "slate_id": 901,
+                "slate_id": np.int64(901),
                 "slate_date": "2026-03-13",
                 "contest_type": "Classic",
                 "slate_name": "Main",
-                "game_count": 9,
+                "game_count": np.int64(9),
             },
             "coverage": {
-                "players_total": 2,
-                "resolved_players": 1,
-                "unresolved_players": 1,
-                "conflict_players": 0,
-                "coverage_pct": 50.0,
+                "players_total": np.int64(2),
+                "resolved_players": np.int64(1),
+                "unresolved_players": np.int64(1),
+                "conflict_players": np.int64(0),
+                "coverage_pct": np.float64(50.0),
                 "fully_resolved": False,
             },
             "coverage_error": "DK registry resolution incomplete.",
@@ -389,6 +391,7 @@ def test_build_slate_status_payload_summarizes_active_context(monkeypatch) -> No
     assert payload["active_source"]["code"] == "uploaded_dk_slate"
     assert payload["registry_coverage"]["coverage_pct"] == 50.0
     assert len(payload["registry_coverage"]["unresolved_sample"]) == 1
+    json.dumps(payload)
 
 
 def test_build_lineup_runs_payload_returns_manifest_summaries(monkeypatch) -> None:
