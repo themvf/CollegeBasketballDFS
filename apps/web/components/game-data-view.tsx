@@ -28,11 +28,13 @@ export default async function GameDataView({ selectedDate }: GameDataViewProps) 
   const resolvedCount = Number(coverage.resolved_players ?? 0);
   const totalCount = Number(coverage.players_total ?? 0);
   const activeReady = Boolean(slateStatus?.active_source?.ready);
-  const blockers = [
+  const mappingOpenIssues = unresolvedCount + conflictCount;
+  const notes = [
     slateStatus ? "" : "Slate status endpoint is unavailable.",
-    slateStatus?.active_source?.detail,
-    coverage.error,
-    slateStatus?.rotowire?.error,
+    !activeReady ? slateStatus?.active_source?.detail ?? "" : "",
+    activeReady && coveragePct > 0 && coveragePct < 98
+      ? `Supplemental mapping is partial (${coveragePct.toFixed(2)}% coverage, ${unresolvedCount} unresolved, ${conflictCount} conflicts). This does not block lineup generation.`
+      : "",
   ].filter((value, index, arr): value is string => Boolean(value) && arr.indexOf(value) === index);
   const unresolvedRows = slateStatus?.registry_coverage?.unresolved_sample ?? [];
 
@@ -40,7 +42,7 @@ export default async function GameDataView({ selectedDate }: GameDataViewProps) 
     <main className="page">
       <section className="hero">
         <h1>Game Data</h1>
-        <p>Validate the real active slate source, registry coverage, and readiness blockers before the lineup workflow moves on.</p>
+        <p>Validate the uploaded DraftKings slate and core readiness state before moving deeper into the lineup workflow.</p>
         <div className="badge-row">
           <span className="badge">Date: {selectedDate}</span>
           <span className="badge">API: {healthOk ? "Connected" : "Unavailable"}</span>
@@ -82,12 +84,24 @@ export default async function GameDataView({ selectedDate }: GameDataViewProps) 
         </article>
 
         <article className="panel">
-          <h2>Registry Coverage</h2>
-          <p className="meta">Resolve these issues before trusting any downstream player-pool or lineup output.</p>
+          <h2>Supplemental Mapping</h2>
+          <p className="meta">Optional enrichment quality. These numbers should improve over time, but they do not block a DK-slate-backed run.</p>
           <div className="metric-grid">
             <div className="metric">
-              <p className="label">Resolved</p>
+              <p className="label">Mapped</p>
               <p className="value">{resolvedCount}</p>
+            </div>
+            <div className="metric">
+              <p className="label">Open Issues</p>
+              <p className={`value ${statusClass(mappingOpenIssues, "count")}`}>{mappingOpenIssues}</p>
+            </div>
+            <div className="metric">
+              <p className="label">Coverage %</p>
+              <p className={`value ${statusClass(coveragePct, "coverage")}`}>{coveragePct.toFixed(2)}%</p>
+            </div>
+            <div className="metric">
+              <p className="label">Supplemental Players</p>
+              <p className="value">{totalCount}</p>
             </div>
             <div className="metric">
               <p className="label">Unresolved</p>
@@ -97,33 +111,19 @@ export default async function GameDataView({ selectedDate }: GameDataViewProps) 
               <p className="label">Conflicts</p>
               <p className={`value ${statusClass(conflictCount, "count")}`}>{conflictCount}</p>
             </div>
-            <div className="metric">
-              <p className="label">Players</p>
-              <p className="value">{totalCount}</p>
-            </div>
-            <div className="metric">
-              <p className="label">RotoWire Rows</p>
-              <p className="value">{Number(slateStatus?.rotowire?.rows ?? 0)}</p>
-            </div>
-            <div className="metric">
-              <p className="label">Source Cached</p>
-              <p className={`value ${Boolean(slateStatus?.cached_dk_slate?.available) ? "ok" : "bad"}`}>
-                {Boolean(slateStatus?.cached_dk_slate?.available) ? "Yes" : "No"}
-              </p>
-            </div>
           </div>
         </article>
       </section>
 
       <section className="content-grid" style={{ marginTop: 16 }}>
         <article className="panel">
-          <h2>Current Blockers</h2>
-          {blockers.length === 0 ? (
-            <p className="meta">No current blockers. The slate looks ready for the rest of the workflow.</p>
+          <h2>Current Notes</h2>
+          {notes.length === 0 ? (
+            <p className="meta">The DK slate is loaded and no operational issues are blocking the workflow.</p>
           ) : (
             <ul className="list">
-              {blockers.map((blocker) => (
-                <li key={blocker}>{blocker}</li>
+              {notes.map((note) => (
+                <li key={note}>{note}</li>
               ))}
             </ul>
           )}
@@ -131,7 +131,7 @@ export default async function GameDataView({ selectedDate }: GameDataViewProps) 
 
         <article className="panel">
           <h2>Workflow Path</h2>
-          <p className="meta">Generate Lineup flow now tracks the state explicitly instead of relying on hidden page state.</p>
+          <p className="meta">The web flow stays focused on the required lineup steps and keeps supplemental data out of the main path.</p>
           <ol className="list">
             <li>Game Data</li>
             <li>Prop Data</li>
@@ -139,7 +139,6 @@ export default async function GameDataView({ selectedDate }: GameDataViewProps) 
             <li>DK Slate</li>
             <li>Injuries</li>
             <li>Slate + Vegas</li>
-            <li>RotoWire Scraper</li>
             <li>Lineup Generator</li>
             <li>Saved Runs</li>
             <li>Projection Review</li>
@@ -149,11 +148,11 @@ export default async function GameDataView({ selectedDate }: GameDataViewProps) 
       </section>
 
       <section className="panel" style={{ marginTop: 16 }}>
-        <h2>Current Unresolved Sample</h2>
+        <h2>Supplemental Mapping Exceptions</h2>
         {!slateStatus ? (
           <p className="meta">Slate status data is unavailable.</p>
         ) : unresolvedRows.length === 0 ? (
-          <p className="meta">No unresolved players for this date.</p>
+          <p className="meta">No supplemental mapping exceptions for this date.</p>
         ) : (
           <div className="table-shell">
             <table className="data-table">

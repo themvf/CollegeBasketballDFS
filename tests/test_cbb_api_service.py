@@ -331,6 +331,8 @@ def test_resolve_active_slate_context_falls_back_to_cached_dk_when_rotowire_unre
     assert result["active_source"] == "uploaded_dk_slate"
     assert bool(result["active_ready"]) is True
     assert bool(result["rotowire_fully_resolved"]) is False
+    assert "uploaded DraftKings slate as the active optimizer source" in result["active_source_detail"]
+    assert "Supplemental player mapping is partial" in result["active_source_detail"]
     assert len(result["active_slate_df"]) == 1
     assert str(result["active_slate_df"].iloc[0]["ID"]) == "2002"
 

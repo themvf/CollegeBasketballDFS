@@ -79,12 +79,6 @@ const GENERATE_LINEUP_SUBNAV: SubNavItem[] = [
     description: "Slate pool and game environment diagnostics.",
   },
   {
-    key: "rotowire-scraper",
-    label: "RotoWire Scraper",
-    href: "/generate-lineup/rotowire-scraper",
-    description: "RotoWire pull, normalization, and validation.",
-  },
-  {
     key: "lineup-generator",
     label: "Lineup Generator",
     href: "/generate-lineup/lineup-generator",
@@ -200,7 +194,7 @@ const LEGACY_ROUTE_MAP: Array<{ legacyPath: string; canonicalPath: string }> = [
   { legacyPath: "/dk-slate", canonicalPath: "/generate-lineup/dk-slate" },
   { legacyPath: "/injuries", canonicalPath: "/generate-lineup/injuries" },
   { legacyPath: "/slate-vegas", canonicalPath: "/generate-lineup/slate-vegas" },
-  { legacyPath: "/rotowire", canonicalPath: "/generate-lineup/rotowire-scraper" },
+  { legacyPath: "/rotowire", canonicalPath: "/generate-lineup/game-data" },
   { legacyPath: "/lineups", canonicalPath: "/generate-lineup/lineup-generator" },
   { legacyPath: "/projection-review", canonicalPath: "/player-team-review/projection-review" },
   { legacyPath: "/tournament-review", canonicalPath: "/player-team-review/tournament-review" },

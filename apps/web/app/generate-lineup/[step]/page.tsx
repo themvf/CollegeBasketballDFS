@@ -1,4 +1,4 @@
-import { notFound } from "next/navigation";
+import { notFound, redirect } from "next/navigation";
 import BackfillView from "../../../components/backfill-view";
 import DkSlateImportView from "../../../components/dk-slate-import-view";
 import GameDataView from "../../../components/game-data-view";
@@ -6,7 +6,6 @@ import InjuriesView from "../../../components/injuries-view";
 import LineupGeneratorView from "../../../components/lineup-generator-view";
 import ProjectionReviewView from "../../../components/projection-review-view";
 import PropDataView from "../../../components/prop-data-view";
-import RotowireScraperView from "../../../components/rotowire-scraper-view";
 import SavedLineupRunsView from "../../../components/saved-lineup-runs-view";
 import SectionPlaceholder from "../../../components/section-placeholder";
 import SlateVegasView from "../../../components/slate-vegas-view";
@@ -67,15 +66,6 @@ const STEP_CONTENT: Record<string, StepContent> = {
       "Refresh slate pool and blended projection columns.",
       "Expose game-environment diagnostics for stack prioritization.",
       "Save a pre-lock snapshot for projection and ownership review.",
-    ],
-  },
-  "rotowire-scraper": {
-    title: "RotoWire Scraper",
-    description: "Pull RotoWire projections/minutes and inspect normalization + DK mapping quality.",
-    milestones: [
-      "Run authenticated scraper pull for the selected slate.",
-      "Compare scraped rows against DK registry coverage.",
-      "Surface unresolved players and conflict candidates.",
     ],
   },
   "projection-review": {
@@ -142,7 +132,7 @@ export default async function GenerateLineupStepPage({ params, searchParams }: G
   }
 
   if (step === "rotowire-scraper") {
-    return <RotowireScraperView selectedDate={selectedDate} />;
+    redirect(`/generate-lineup/game-data?date=${encodeURIComponent(selectedDate)}`);
   }
 
   if (step === "lineup-generator") {

@@ -665,12 +665,12 @@ def resolve_active_slate_context(
         if coverage_error:
             active_source_detail = (
                 "Using the uploaded DraftKings slate as the active optimizer source. "
-                "RotoWire registry coverage is incomplete, so RotoWire prior attachment may be partial."
+                "Supplemental player mapping is partial, so external priors may be incomplete."
             )
         elif rotowire_error:
             active_source_detail = (
                 "Using the uploaded DraftKings slate as the active optimizer source. "
-                "RotoWire slate loading failed, so only non-RotoWire priors are attached."
+                "Supplemental source data is unavailable, so only baseline priors are attached."
             )
         else:
             active_source_detail = "Using the uploaded DraftKings slate as the active optimizer source."
@@ -679,17 +679,13 @@ def resolve_active_slate_context(
         active_source_label = "No active slate"
         active_source_detail = (
             "No uploaded DraftKings slate is cached for the selected date+slate. "
-            "Upload a DraftKings slate CSV to enable optimizer, LineupStarter mapping, and exports."
+            "Upload a DraftKings slate CSV to enable optimizer, exports, and downstream slate review."
         )
     else:
-        reason_parts = [
-            "No uploaded DraftKings slate is cached for the selected date+slate. Upload a DraftKings slate CSV to continue."
-        ]
-        if coverage_error:
-            reason_parts.append(coverage_error)
-        elif rotowire_error:
-            reason_parts.append(f"RotoWire slate load failed. {rotowire_error}")
-        active_source_detail = " ".join(str(part).strip() for part in reason_parts if str(part).strip())
+        active_source_detail = (
+            "No uploaded DraftKings slate is cached for the selected date+slate. "
+            "Upload a DraftKings slate CSV to continue."
+        )
 
     return {
         "slate": dict(resolved_bundle.get("slate") or {}),

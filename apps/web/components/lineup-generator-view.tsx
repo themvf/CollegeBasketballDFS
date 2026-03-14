@@ -63,7 +63,6 @@ export default function LineupJobsPage() {
   const [numLineups, setNumLineups] = useState<number>(150);
   const [maxSalaryLeft, setMaxSalaryLeft] = useState<number>(400);
   const [globalMaxExposurePct, setGlobalMaxExposurePct] = useState<number>(50);
-  const [rotowireCookie, setRotowireCookie] = useState<string>("");
 
   const [submitting, setSubmitting] = useState<boolean>(false);
   const [jobId, setJobId] = useState<string>("");
@@ -140,16 +139,11 @@ export default function LineupJobsPage() {
         num_lineups: numLineups,
         max_salary_left: maxSalaryLeft,
         global_max_exposure_pct: globalMaxExposurePct,
-        rotowire_contest_type: "Classic",
-        rotowire_slate_name: "All",
       };
 
       const headers: Record<string, string> = {
         "Content-Type": "application/json",
       };
-      if (rotowireCookie.trim()) {
-        headers["X-Rotowire-Cookie"] = rotowireCookie.trim();
-      }
 
       const response = await fetch(`${base}/v1/lineups/generate`, {
         method: "POST",
@@ -252,16 +246,6 @@ export default function LineupJobsPage() {
               />
             </label>
           </div>
-
-          <label className="field" style={{ marginTop: 12 }}>
-            <span>RotoWire Cookie (optional)</span>
-            <input
-              type="password"
-              placeholder="Paste member cookie if endpoint requires auth"
-              value={rotowireCookie}
-              onChange={(e) => setRotowireCookie(e.target.value)}
-            />
-          </label>
 
           <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
             <button className="action-btn" disabled={submitting || !selectedDate} onClick={submitJob}>

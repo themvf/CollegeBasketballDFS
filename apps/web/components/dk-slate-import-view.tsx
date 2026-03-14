@@ -53,7 +53,6 @@ export default function DkSlateImportView({ selectedDate }: DkSlateImportViewPro
   const [contestType, setContestType] = useState("Classic");
   const [slateName, setSlateName] = useState("All");
   const [slateKey, setSlateKey] = useState("main");
-  const [cookieValue, setCookieValue] = useState("");
   const [uploading, setUploading] = useState(false);
   const [error, setError] = useState("");
   const [result, setResult] = useState<ImportPayload | null>(null);
@@ -78,14 +77,9 @@ export default function DkSlateImportView({ selectedDate }: DkSlateImportViewPro
       });
       const form = new FormData();
       form.append("file", selectedFile);
-      const headers: Record<string, string> = {};
-      if (cookieValue.trim()) {
-        headers["X-Rotowire-Cookie"] = cookieValue.trim();
-      }
       const response = await fetch(`${base}/v1/registry/import-dk-slate?${params.toString()}`, {
         method: "POST",
         body: form,
-        headers,
       });
       if (!response.ok) {
         const text = await response.text();
@@ -107,7 +101,7 @@ export default function DkSlateImportView({ selectedDate }: DkSlateImportViewPro
     <main className="page">
       <section className="hero">
         <h1>DK Slate</h1>
-        <p>Upload DraftKings salary CSV and persist derived registry overrides.</p>
+        <p>Upload the DraftKings salary CSV that drives the active slate. Supplemental ID mapping runs automatically when available.</p>
       </section>
 
       <section className="panel" style={{ marginTop: 16 }}>
@@ -128,15 +122,6 @@ export default function DkSlateImportView({ selectedDate }: DkSlateImportViewPro
           <label className="field">
             <span>Slate Key</span>
             <input value={slateKey} onChange={(e) => setSlateKey(e.target.value)} />
-          </label>
-          <label className="field">
-            <span>RotoWire Cookie (optional)</span>
-            <input
-              type="password"
-              value={cookieValue}
-              onChange={(e) => setCookieValue(e.target.value)}
-              placeholder="Paste Cookie header"
-            />
           </label>
           <label className="field">
             <span>DK Salary CSV</span>
@@ -163,7 +148,7 @@ export default function DkSlateImportView({ selectedDate }: DkSlateImportViewPro
         <>
           <section className="content-grid" style={{ marginTop: 16 }}>
             <article className="panel">
-              <h2>Coverage Before</h2>
+              <h2>Supplemental Mapping Before</h2>
               <div className="metric-grid">
                 <div className="metric">
                   <p className="label">Players</p>
@@ -185,7 +170,7 @@ export default function DkSlateImportView({ selectedDate }: DkSlateImportViewPro
             </article>
 
             <article className="panel">
-              <h2>Coverage After</h2>
+              <h2>Supplemental Mapping After</h2>
               <div className="metric-grid">
                 <div className="metric">
                   <p className="label">Players</p>
@@ -216,7 +201,7 @@ export default function DkSlateImportView({ selectedDate }: DkSlateImportViewPro
           </section>
 
           <section className="panel" style={{ marginTop: 16 }}>
-            <h2>Remaining Unresolved After Import</h2>
+            <h2>Remaining Mapping Exceptions After Import</h2>
             {unresolvedAfter.length === 0 ? (
               <p className="meta">No unresolved players remain.</p>
             ) : (
