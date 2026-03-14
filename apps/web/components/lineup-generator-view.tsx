@@ -267,6 +267,12 @@ export default function LineupJobsPage() {
             <button className="action-btn" disabled={submitting || !selectedDate} onClick={submitJob}>
               {submitting ? "Submitting..." : "Submit Job"}
             </button>
+            <a
+              className="ghost-btn"
+              href={`/generate-lineup/saved-runs?date=${encodeURIComponent(selectedDate)}&slate_key=main`}
+            >
+              View Saved Runs
+            </a>
             {jobId ? (
               <button
                 className="ghost-btn"

@@ -91,6 +91,12 @@ const GENERATE_LINEUP_SUBNAV: SubNavItem[] = [
     description: "Async generation and artifact downloads.",
   },
   {
+    key: "saved-runs",
+    label: "Saved Runs",
+    href: "/generate-lineup/saved-runs",
+    description: "Browse persisted lineup runs and inspect version outputs.",
+  },
+  {
     key: "projection-review",
     label: "Projection Review",
     href: "/generate-lineup/projection-review",

@@ -19,6 +19,8 @@ Default API base URL:
 
 - `/` migration dashboard + registry coverage
 - `/lineups` async lineup job submit/poll/download UI
+- `/generate-lineup/game-data` slate readiness status surface
+- `/generate-lineup/saved-runs` saved lineup run browser + version detail
 
 ## Deploy to Vercel
 

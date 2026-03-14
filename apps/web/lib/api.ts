@@ -24,6 +24,107 @@ export type CoverageResponse = {
   }>;
 };
 
+export type SlateStatusResponse = {
+  selected_date: string;
+  slate_key: string;
+  slate_label?: string;
+  slate?: {
+    slate_id?: number;
+    slate_date?: string;
+    contest_type?: string;
+    slate_name?: string;
+    game_count?: number;
+    players?: number;
+  };
+  active_rows?: number;
+  cached_dk_rows?: number;
+  slate_games?: number;
+  active_source?: {
+    code?: string;
+    label?: string;
+    detail?: string;
+    ready?: boolean;
+  };
+  cached_dk_slate?: {
+    available?: boolean;
+    rows?: number;
+  };
+  rotowire?: {
+    loaded?: boolean;
+    rows?: number;
+    fully_resolved?: boolean;
+    error?: string;
+  };
+  registry_coverage?: {
+    players_total?: number;
+    resolved_players?: number;
+    unresolved_players?: number;
+    conflict_players?: number;
+    coverage_pct?: number;
+    fully_resolved?: boolean;
+    error?: string;
+    unresolved_sample?: Array<{
+      player_name?: string;
+      team_abbr?: string;
+      dk_resolution_status?: string;
+      dk_match_reason?: string;
+    }>;
+  };
+};
+
+export type LineupRunVersionSummary = {
+  version_key?: string;
+  version_label?: string;
+  lineup_strategy?: string;
+  model_profile?: string;
+  include_tail_signals?: boolean;
+  lineup_count_generated?: number;
+  warning_count?: number;
+  json_ref?: string;
+  csv_ref?: string;
+  dk_upload_ref?: string;
+};
+
+export type LineupRunSummary = {
+  run_id?: string;
+  slate_date?: string;
+  slate_key?: string;
+  slate_label?: string;
+  generated_at_utc?: string;
+  run_mode?: string;
+  version_count?: number;
+  lineups_generated?: number;
+  warnings_count?: number;
+  storage_source?: string;
+  manifest_ref?: string;
+  versions?: LineupRunVersionSummary[];
+  settings?: Record<string, unknown>;
+};
+
+export type LineupRunVersionDetail = LineupRunVersionSummary & {
+  loaded?: boolean;
+  payload_source?: string;
+  payload_ref?: string;
+  warnings?: string[];
+  lineups_loaded?: number;
+  lineups?: Array<Record<string, unknown>>;
+  dk_upload_csv?: string;
+};
+
+export type LineupRunsResponse = {
+  selected_date: string;
+  slate_key: string;
+  rows: number;
+  runs: LineupRunSummary[];
+};
+
+export type LineupRunDetailResponse = {
+  selected_date: string;
+  slate_key: string;
+  run?: LineupRunSummary;
+  versions?: LineupRunVersionDetail[];
+};
+
 export type VegasGameLinesResponse = {
   selected_date: string;
   bucket_name?: string;
@@ -240,6 +341,62 @@ export async function fetchRegistryCoverage(selectedDate: string): Promise<Cover
       return null;
     }
     return (await response.json()) as CoverageResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchSlateStatus(
+  selectedDate: string,
+  slateKey = "main",
+): Promise<SlateStatusResponse | null> {
+  const url =
+    `${getApiBaseUrl()}/v1/slates/${encodeURIComponent(selectedDate)}/${encodeURIComponent(slateKey)}/status` +
+    "?contest_type=Classic&slate_name=All";
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as SlateStatusResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchLineupRuns(
+  selectedDate: string,
+  slateKey = "main",
+  includeVersions = false,
+): Promise<LineupRunsResponse | null> {
+  const url =
+    `${getApiBaseUrl()}/v1/lineup-runs?date=${encodeURIComponent(selectedDate)}` +
+    `&slate_key=${encodeURIComponent(slateKey)}&include_versions=${includeVersions ? "true" : "false"}`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as LineupRunsResponse;
+  } catch {
+    return null;
+  }
+}
+
+export async function fetchLineupRunDetail(
+  selectedDate: string,
+  runId: string,
+  slateKey = "main",
+): Promise<LineupRunDetailResponse | null> {
+  const url =
+    `${getApiBaseUrl()}/v1/lineup-runs/${encodeURIComponent(runId)}?date=${encodeURIComponent(selectedDate)}` +
+    `&slate_key=${encodeURIComponent(slateKey)}&include_lineups=true`;
+  try {
+    const response = await fetch(url, { cache: "no-store" });
+    if (!response.ok) {
+      return null;
+    }
+    return (await response.json()) as LineupRunDetailResponse;
   } catch {
     return null;
   }

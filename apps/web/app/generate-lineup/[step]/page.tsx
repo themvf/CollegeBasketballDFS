@@ -7,6 +7,7 @@ import LineupGeneratorView from "../../../components/lineup-generator-view";
 import ProjectionReviewView from "../../../components/projection-review-view";
 import PropDataView from "../../../components/prop-data-view";
 import RotowireScraperView from "../../../components/rotowire-scraper-view";
+import SavedLineupRunsView from "../../../components/saved-lineup-runs-view";
 import SectionPlaceholder from "../../../components/section-placeholder";
 import SlateVegasView from "../../../components/slate-vegas-view";
 import TournamentReviewView from "../../../components/tournament-review-view";
@@ -86,6 +87,15 @@ const STEP_CONTENT: Record<string, StepContent> = {
       "Save review artifacts to support model iteration.",
     ],
   },
+  "saved-runs": {
+    title: "Saved Runs",
+    description: "Review persisted run manifests and inspect the lineups each model version produced.",
+    milestones: [
+      "List saved runs from local backup and GCS for the selected slate.",
+      "Load per-version lineup payloads with model and strategy metadata.",
+      "Use run detail as the default handoff into postmortem and contest review.",
+    ],
+  },
   "tournament-review": {
     title: "Tournament Review",
     description: "Run contest postmortem across stacks, leverage, and final lineup outcomes.",
@@ -137,6 +147,12 @@ export default async function GenerateLineupStepPage({ params, searchParams }: G
 
   if (step === "lineup-generator") {
     return <LineupGeneratorView />;
+  }
+
+  if (step === "saved-runs") {
+    const slateKey = typeof query.slate_key === "string" ? query.slate_key : "main";
+    const runId = typeof query.run_id === "string" ? query.run_id : "";
+    return <SavedLineupRunsView selectedDate={selectedDate} slateKey={slateKey} selectedRunId={runId} />;
   }
 
   if (step === "projection-review") {
