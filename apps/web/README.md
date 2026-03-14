@@ -26,3 +26,9 @@ Default API base URL:
 2. Set Root Directory to `apps/web`.
 3. Set environment variable `NEXT_PUBLIC_API_BASE_URL` to your API deployment URL.
 4. Deploy.
+
+## Architecture Plan
+
+The concrete Streamlit-to-Vercel migration plan for this repo lives in:
+
+- [docs/vercel_migration_plan.md](/abs/path/c:/Docs/_AI%20Python%20Projects/CollegeBasketballDFS/docs/vercel_migration_plan.md)
