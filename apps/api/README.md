@@ -16,6 +16,7 @@ uvicorn main:app --reload --port 8000
 - `GET /health`
 - `GET /v1/rotowire/slates`
 - `GET /v1/registry/coverage`
+- `GET /v1/slates/{date}/{slate_key}/status`
 - `POST /v1/registry/import-dk-slate`
 - `GET /v1/vegas/game-lines`
 - `GET /v1/vegas/market-context`
@@ -28,6 +29,8 @@ uvicorn main:app --reload --port 8000
 - `POST /v1/reviews/projection/ownership/upload`
 - `GET /v1/reviews/tournament`
 - `POST /v1/reviews/tournament/standings/upload`
+- `GET /v1/lineup-runs?date=YYYY-MM-DD&slate_key=main`
+- `GET /v1/lineup-runs/{run_id}?date=YYYY-MM-DD&slate_key=main`
 - `POST /v1/lineups/generate`
 - `GET /v1/lineups/jobs/{job_id}`
 - `GET /v1/lineups/jobs/{job_id}/artifacts`

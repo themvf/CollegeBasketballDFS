@@ -6,6 +6,9 @@ from pathlib import Path
 import pandas as pd
 
 from college_basketball_dfs.cbb_api_service import (
+    build_lineup_run_detail_payload,
+    build_lineup_runs_payload,
+    build_slate_status_payload,
     filter_unresolved_resolution_rows,
     import_dk_slate_overrides,
     import_injuries_feed_csv,
@@ -323,11 +326,171 @@ def test_resolve_active_slate_context_falls_back_to_cached_dk_when_rotowire_unre
         bucket_name="test-bucket",
     )
 
-    assert result["active_source"] == "legacy_dk_fallback"
+    assert result["active_source"] == "uploaded_dk_slate"
     assert bool(result["active_ready"]) is True
     assert bool(result["rotowire_fully_resolved"]) is False
     assert len(result["active_slate_df"]) == 1
     assert str(result["active_slate_df"].iloc[0]["ID"]) == "2002"
+
+
+def test_build_slate_status_payload_summarizes_active_context(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service.resolve_active_slate_context",
+        lambda **_: {
+            "slate": {
+                "slate_id": 901,
+                "slate_date": "2026-03-13",
+                "contest_type": "Classic",
+                "slate_name": "Main",
+                "game_count": 9,
+            },
+            "coverage": {
+                "players_total": 2,
+                "resolved_players": 1,
+                "unresolved_players": 1,
+                "conflict_players": 0,
+                "coverage_pct": 50.0,
+                "fully_resolved": False,
+            },
+            "coverage_error": "DK registry resolution incomplete.",
+            "rotowire_error": "",
+            "rotowire_df": pd.DataFrame([{"player_name": "Jane Smith"}]),
+            "resolution_df": pd.DataFrame(
+                [
+                    {
+                        "player_name": "Jane Smith",
+                        "team_abbr": "AWAY",
+                        "dk_resolution_status": "unresolved",
+                        "dk_match_reason": "low_confidence",
+                    }
+                ]
+            ),
+            "legacy_dk_slate_df": pd.DataFrame([{"ID": "2002"}]),
+            "active_slate_df": pd.DataFrame([{"ID": "2002"}]),
+            "active_source": "uploaded_dk_slate",
+            "active_source_label": "Uploaded DraftKings slate",
+            "active_source_detail": "Using uploaded slate.",
+            "active_ready": True,
+            "legacy_dk_available": True,
+            "legacy_dk_rows": 1,
+            "rotowire_fully_resolved": False,
+        },
+    )
+
+    payload = build_slate_status_payload(
+        selected_date="2026-03-13",
+        slate_key="main",
+    )
+
+    assert payload["selected_date"] == "2026-03-13"
+    assert payload["active_rows"] == 1
+    assert payload["cached_dk_rows"] == 1
+    assert payload["slate_games"] == 9
+    assert payload["active_source"]["code"] == "uploaded_dk_slate"
+    assert payload["registry_coverage"]["coverage_pct"] == 50.0
+    assert len(payload["registry_coverage"]["unresolved_sample"]) == 1
+
+
+def test_build_lineup_runs_payload_returns_manifest_summaries(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._load_all_saved_lineup_run_manifests",
+        lambda **_: [
+            {
+                "run_id": "run_1",
+                "slate_date": "2026-03-13",
+                "slate_key": "main",
+                "slate_label": "Main",
+                "generated_at_utc": "2026-03-13T22:30:00Z",
+                "run_mode": "single",
+                "_storage_source": "local",
+                "_manifest_ref": "data/local_lineup_runs/2026-03-13/main/run_1/manifest.json",
+                "versions": [
+                    {
+                        "version_key": "spike_v2_tail",
+                        "version_label": "Spike v2",
+                        "lineup_strategy": "spike",
+                        "model_profile": "tail_spike_pairs",
+                        "lineup_count_generated": 20,
+                        "warning_count": 1,
+                    }
+                ],
+            }
+        ],
+    )
+
+    payload = build_lineup_runs_payload(
+        selected_date="2026-03-13",
+        slate_key="main",
+        include_versions=True,
+    )
+
+    assert payload["rows"] == 1
+    run = payload["runs"][0]
+    assert run["run_id"] == "run_1"
+    assert run["lineups_generated"] == 20
+    assert run["warnings_count"] == 1
+    assert run["storage_source"] == "local"
+    assert run["versions"][0]["version_key"] == "spike_v2_tail"
+
+
+def test_build_lineup_run_detail_payload_loads_version_payloads(monkeypatch) -> None:
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._load_all_saved_lineup_run_manifests",
+        lambda **_: [
+            {
+                "run_id": "run_1",
+                "slate_date": "2026-03-13",
+                "slate_key": "main",
+                "slate_label": "Main",
+                "generated_at_utc": "2026-03-13T22:30:00Z",
+                "run_mode": "single",
+                "settings": {"num_lineups": 20},
+                "_storage_source": "local",
+                "_manifest_ref": "data/local_lineup_runs/2026-03-13/main/run_1/manifest.json",
+                "versions": [
+                    {
+                        "version_key": "spike_v2_tail",
+                        "version_label": "Spike v2",
+                        "lineup_strategy": "spike",
+                        "model_profile": "tail_spike_pairs",
+                        "lineup_count_generated": 20,
+                        "warning_count": 1,
+                    }
+                ],
+            }
+        ],
+    )
+    monkeypatch.setattr(
+        "college_basketball_dfs.cbb_api_service._load_lineup_version_payload",
+        lambda **_: {
+            "version_key": "spike_v2_tail",
+            "version_label": "Spike v2",
+            "lineup_strategy": "spike",
+            "model_profile": "tail_spike_pairs",
+            "include_tail_signals": True,
+            "warnings": ["test warning"],
+            "lineups": [{"lineup_index": 1, "projected_points": 201.5}],
+            "dk_upload_csv": "Entry ID,Contest ID\n",
+            "_storage_source": "local",
+            "_payload_ref": "data/local_lineup_runs/2026-03-13/main/run_1/spike_v2_tail/lineups.json",
+        },
+    )
+
+    payload = build_lineup_run_detail_payload(
+        selected_date="2026-03-13",
+        slate_key="main",
+        run_id="run_1",
+        include_upload_csv=True,
+    )
+
+    assert payload["run"]["run_id"] == "run_1"
+    assert payload["run"]["settings"]["num_lineups"] == 20
+    assert len(payload["versions"]) == 1
+    version = payload["versions"][0]
+    assert version["loaded"] is True
+    assert version["warnings"] == ["test warning"]
+    assert version["lineups"][0]["projected_points"] == 201.5
+    assert version["dk_upload_csv"].startswith("Entry ID")
 
 
 def test_write_and_load_manual_overrides_round_trip(tmp_path: Path) -> None:

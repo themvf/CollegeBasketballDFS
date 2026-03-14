@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import io
+import json
 from datetime import date, timedelta
 import os
 from pathlib import Path
@@ -46,6 +47,7 @@ from .cbb_vegas_review import (
 REPO_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_DRAFTKINGS_DIR = REPO_ROOT / "Draftkings"
 DEFAULT_MANUAL_OVERRIDES_PATH = REPO_ROOT / "data" / "dk_manual_overrides.csv"
+LOCAL_LINEUP_RUNS_ROOT = REPO_ROOT / "data" / "local_lineup_runs"
 
 MANUAL_OVERRIDE_COLUMNS = [
     "player_name",
@@ -62,6 +64,29 @@ MANUAL_OVERRIDE_COLUMNS = [
     "reason",
     "source_name",
 ]
+
+
+def _safe_path_segment(value: object, default: str) -> str:
+    safe = re.sub(r"[^a-zA-Z0-9_.-]", "_", str(value or "").strip())
+    return safe or default
+
+
+def _normalize_slate_label(value: object, default: str = "Main") -> str:
+    text = re.sub(r"\s+", " ", str(value or "").strip())
+    return text or default
+
+
+def _slate_key_from_label(value: object, default: str = "main") -> str:
+    text = str(value or "").strip().lower()
+    text = re.sub(r"[^a-z0-9]+", "_", text).strip("_")
+    return text or default
+
+
+def _resolve_selected_date(selected_date: date | str) -> date:
+    target_date = pd.to_datetime(selected_date, errors="coerce")
+    if pd.isna(target_date):
+        raise ValueError("selected_date must be a valid date")
+    return target_date.date()
 
 
 def filter_unresolved_resolution_rows(resolution_df: pd.DataFrame | None) -> pd.DataFrame:
@@ -703,6 +728,473 @@ def build_registry_coverage(
         "slate": dict(resolved.get("slate") or {}),
         "coverage": dict(resolved.get("coverage") or {}),
         "unresolved_players": list(resolved.get("unresolved_players") or []),
+    }
+
+
+def _local_lineup_run_dir(
+    slate_date: date,
+    run_id: str,
+    slate_key: str | None = None,
+) -> Path:
+    safe_date = slate_date.isoformat()
+    safe_slate = _slate_key_from_label(slate_key, default="main")
+    safe_run = _safe_path_segment(run_id, "run")
+    return LOCAL_LINEUP_RUNS_ROOT / safe_date / safe_slate / safe_run
+
+
+def _read_json_payload(path: Path) -> dict[str, Any] | None:
+    if not path.exists():
+        return None
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _load_local_lineup_run_manifests(
+    selected_date: date,
+    selected_slate_key: str | None,
+) -> list[dict[str, Any]]:
+    slate_dir = LOCAL_LINEUP_RUNS_ROOT / selected_date.isoformat() / _slate_key_from_label(selected_slate_key, default="main")
+    if not slate_dir.exists():
+        return []
+    manifests: list[dict[str, Any]] = []
+    for manifest_path in sorted(slate_dir.glob("*/manifest.json"), reverse=True):
+        payload = _read_json_payload(manifest_path)
+        if not isinstance(payload, dict):
+            continue
+        payload["_storage_source"] = "local"
+        payload["_manifest_ref"] = str(manifest_path)
+        manifests.append(payload)
+    manifests.sort(key=lambda item: str(item.get("generated_at_utc") or ""), reverse=True)
+    return manifests
+
+
+def _load_saved_lineup_run_manifests(
+    *,
+    selected_date: date,
+    selected_slate_key: str | None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> list[dict[str, Any]]:
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return []
+    try:
+        run_ids = store.list_lineup_run_ids(selected_date, selected_slate_key)
+    except TypeError:
+        run_ids = store.list_lineup_run_ids(selected_date)
+    manifests: list[dict[str, Any]] = []
+    for run_id in run_ids:
+        try:
+            payload = store.read_lineup_run_manifest_json(selected_date, run_id, selected_slate_key)
+        except TypeError:
+            payload = store.read_lineup_run_manifest_json(selected_date, run_id)
+        if not isinstance(payload, dict):
+            continue
+        if selected_slate_key:
+            manifest_slate_key = _slate_key_from_label(
+                payload.get("slate_key") or payload.get("slate_label"),
+                default="main",
+            )
+            if manifest_slate_key != _slate_key_from_label(selected_slate_key):
+                continue
+        payload["_storage_source"] = "gcs"
+        try:
+            payload["_manifest_ref"] = store.lineup_run_manifest_blob_name(
+                selected_date,
+                str(run_id),
+                slate_key=selected_slate_key,
+            )
+        except TypeError:
+            payload["_manifest_ref"] = store.lineup_run_manifest_blob_name(selected_date, str(run_id))
+        manifests.append(payload)
+    manifests.sort(key=lambda item: str(item.get("generated_at_utc") or ""), reverse=True)
+    return manifests
+
+
+def _load_all_saved_lineup_run_manifests(
+    *,
+    selected_date: date,
+    selected_slate_key: str | None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> list[dict[str, Any]]:
+    manifests: list[dict[str, Any]] = []
+    seen_keys: set[tuple[str, str]] = set()
+
+    for manifest in _load_local_lineup_run_manifests(selected_date, selected_slate_key):
+        entry = dict(manifest)
+        run_key = (
+            str(entry.get("run_id") or "").strip(),
+            _slate_key_from_label(entry.get("slate_key") or entry.get("slate_label"), default="main"),
+        )
+        seen_keys.add(run_key)
+        manifests.append(entry)
+
+    for manifest in _load_saved_lineup_run_manifests(
+        selected_date=selected_date,
+        selected_slate_key=selected_slate_key,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    ):
+        entry = dict(manifest)
+        run_key = (
+            str(entry.get("run_id") or "").strip(),
+            _slate_key_from_label(entry.get("slate_key") or entry.get("slate_label"), default="main"),
+        )
+        if run_key in seen_keys:
+            manifests = [
+                existing
+                for existing in manifests
+                if (
+                    str(existing.get("run_id") or "").strip(),
+                    _slate_key_from_label(existing.get("slate_key") or existing.get("slate_label"), default="main"),
+                )
+                != run_key
+            ]
+        seen_keys.add(run_key)
+        manifests.append(entry)
+
+    manifests.sort(key=lambda item: str(item.get("generated_at_utc") or ""), reverse=True)
+    return manifests
+
+
+def _load_local_lineup_version_payload(
+    selected_date: date,
+    run_id: str,
+    version_key: str,
+    selected_slate_key: str | None,
+) -> dict[str, Any] | None:
+    version_dir = _local_lineup_run_dir(selected_date, run_id, selected_slate_key) / _safe_path_segment(version_key, "version")
+    payload_path = version_dir / "lineups.json"
+    payload = _read_json_payload(payload_path)
+    if payload is None:
+        return None
+    payload["_storage_source"] = "local"
+    payload["_payload_ref"] = str(payload_path)
+    return payload
+
+
+def _load_saved_lineup_version_payload(
+    *,
+    selected_date: date,
+    run_id: str,
+    version_key: str,
+    selected_slate_key: str | None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any] | None:
+    store = _maybe_build_api_store(
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if store is None:
+        return None
+    try:
+        payload = store.read_lineup_version_json(selected_date, run_id, version_key, selected_slate_key)
+    except TypeError:
+        payload = store.read_lineup_version_json(selected_date, run_id, version_key)
+    if not isinstance(payload, dict):
+        return None
+    payload["_storage_source"] = "gcs"
+    try:
+        payload["_payload_ref"] = store.lineup_version_json_blob_name(
+            selected_date,
+            run_id,
+            version_key,
+            slate_key=selected_slate_key,
+        )
+    except TypeError:
+        payload["_payload_ref"] = store.lineup_version_json_blob_name(selected_date, run_id, version_key)
+    return payload
+
+
+def _load_lineup_version_payload(
+    *,
+    selected_date: date,
+    run_id: str,
+    version_key: str,
+    selected_slate_key: str | None,
+    preferred_source: str | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any] | None:
+    if preferred_source == "local":
+        local_payload = _load_local_lineup_version_payload(selected_date, run_id, version_key, selected_slate_key)
+        if local_payload is not None:
+            return local_payload
+    if preferred_source == "gcs":
+        gcs_payload = _load_saved_lineup_version_payload(
+            selected_date=selected_date,
+            run_id=run_id,
+            version_key=version_key,
+            selected_slate_key=selected_slate_key,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            service_account_json=service_account_json,
+            service_account_json_b64=service_account_json_b64,
+        )
+        if gcs_payload is not None:
+            return gcs_payload
+
+    local_payload = _load_local_lineup_version_payload(selected_date, run_id, version_key, selected_slate_key)
+    if local_payload is not None:
+        return local_payload
+    return _load_saved_lineup_version_payload(
+        selected_date=selected_date,
+        run_id=run_id,
+        version_key=version_key,
+        selected_slate_key=selected_slate_key,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+
+
+def _build_lineup_run_version_summary(entry: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "version_key": str(entry.get("version_key") or ""),
+        "version_label": str(entry.get("version_label") or ""),
+        "lineup_strategy": str(entry.get("lineup_strategy") or ""),
+        "model_profile": str(entry.get("model_profile") or ""),
+        "include_tail_signals": bool(entry.get("include_tail_signals", False)),
+        "lineup_count_generated": int(entry.get("lineup_count_generated") or 0),
+        "warning_count": int(entry.get("warning_count") or 0),
+        "json_ref": str(entry.get("json_blob") or entry.get("json_path") or ""),
+        "csv_ref": str(entry.get("csv_blob") or entry.get("csv_path") or ""),
+        "dk_upload_ref": str(entry.get("dk_upload_blob") or entry.get("dk_upload_path") or ""),
+    }
+
+
+def _build_lineup_run_summary(
+    manifest: dict[str, Any],
+    *,
+    include_versions: bool = False,
+) -> dict[str, Any]:
+    versions = [
+        _build_lineup_run_version_summary(item)
+        for item in (manifest.get("versions") or [])
+        if isinstance(item, dict)
+    ]
+    summary = {
+        "run_id": str(manifest.get("run_id") or ""),
+        "slate_date": str(manifest.get("slate_date") or ""),
+        "slate_key": _slate_key_from_label(manifest.get("slate_key") or manifest.get("slate_label"), default="main"),
+        "slate_label": _normalize_slate_label(manifest.get("slate_label") or manifest.get("slate_key"), default="Main"),
+        "generated_at_utc": str(manifest.get("generated_at_utc") or ""),
+        "run_mode": str(manifest.get("run_mode") or "single"),
+        "version_count": int(len(versions)),
+        "lineups_generated": int(sum(int(item.get("lineup_count_generated") or 0) for item in versions)),
+        "warnings_count": int(sum(int(item.get("warning_count") or 0) for item in versions)),
+        "storage_source": str(manifest.get("_storage_source") or ""),
+        "manifest_ref": str(manifest.get("_manifest_ref") or ""),
+    }
+    if include_versions:
+        summary["versions"] = versions
+    return summary
+
+
+def build_slate_status_payload(
+    *,
+    selected_date: date | str,
+    slate_key: str = "main",
+    contest_type: str = "Classic",
+    slate_name: str = "All",
+    slate_id: int | None = None,
+    site_id: int = 1,
+    cookie_header: str | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+    unresolved_sample_limit: int = 25,
+) -> dict[str, Any]:
+    bundle = resolve_active_slate_context(
+        selected_date=selected_date,
+        slate_key=slate_key,
+        contest_type=contest_type,
+        slate_name=slate_name,
+        slate_id=slate_id,
+        site_id=site_id,
+        cookie_header=cookie_header,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    resolution_df = bundle.get("resolution_df")
+    unresolved_sample_df = filter_unresolved_resolution_rows(resolution_df).head(max(1, int(unresolved_sample_limit)))
+    active_slate_df = bundle.get("active_slate_df")
+    legacy_dk_slate_df = bundle.get("legacy_dk_slate_df")
+    rotowire_df = bundle.get("rotowire_df")
+    slate_meta = dict(bundle.get("slate") or {})
+    coverage = dict(bundle.get("coverage") or {})
+    selected_day = _resolve_selected_date(selected_date)
+
+    return {
+        "selected_date": selected_day.isoformat(),
+        "slate_key": _slate_key_from_label(slate_key),
+        "slate_label": _normalize_slate_label(slate_meta.get("slate_name") or slate_key, default="Main"),
+        "slate": slate_meta,
+        "active_rows": int(len(active_slate_df)) if isinstance(active_slate_df, pd.DataFrame) else 0,
+        "cached_dk_rows": int(len(legacy_dk_slate_df)) if isinstance(legacy_dk_slate_df, pd.DataFrame) else 0,
+        "slate_games": int(slate_meta.get("game_count") or 0),
+        "active_source": {
+            "code": str(bundle.get("active_source") or ""),
+            "label": str(bundle.get("active_source_label") or ""),
+            "detail": str(bundle.get("active_source_detail") or ""),
+            "ready": bool(bundle.get("active_ready")),
+        },
+        "cached_dk_slate": {
+            "available": bool(bundle.get("legacy_dk_available")),
+            "rows": int(bundle.get("legacy_dk_rows") or 0),
+        },
+        "rotowire": {
+            "loaded": bool(isinstance(rotowire_df, pd.DataFrame) and not rotowire_df.empty),
+            "rows": int(len(rotowire_df)) if isinstance(rotowire_df, pd.DataFrame) else 0,
+            "fully_resolved": bool(bundle.get("rotowire_fully_resolved")),
+            "error": str(bundle.get("rotowire_error") or ""),
+        },
+        "registry_coverage": {
+            **coverage,
+            "error": str(bundle.get("coverage_error") or ""),
+            "unresolved_sample": unresolved_sample_df.to_dict(orient="records"),
+        },
+    }
+
+
+def build_lineup_runs_payload(
+    *,
+    selected_date: date | str,
+    slate_key: str = "main",
+    include_versions: bool = False,
+    limit: int | None = None,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    selected_day = _resolve_selected_date(selected_date)
+    manifests = _load_all_saved_lineup_run_manifests(
+        selected_date=selected_day,
+        selected_slate_key=slate_key,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    if limit is not None and int(limit) >= 0:
+        manifests = manifests[: int(limit)]
+    runs = [_build_lineup_run_summary(manifest, include_versions=include_versions) for manifest in manifests]
+    return {
+        "selected_date": selected_day.isoformat(),
+        "slate_key": _slate_key_from_label(slate_key),
+        "rows": int(len(runs)),
+        "runs": runs,
+    }
+
+
+def build_lineup_run_detail_payload(
+    *,
+    selected_date: date | str,
+    run_id: str,
+    slate_key: str = "main",
+    include_lineups: bool = True,
+    include_upload_csv: bool = False,
+    bucket_name: str | None = None,
+    gcp_project: str | None = None,
+    service_account_json: str | None = None,
+    service_account_json_b64: str | None = None,
+) -> dict[str, Any]:
+    selected_day = _resolve_selected_date(selected_date)
+    selected_slate_key = _slate_key_from_label(slate_key)
+    resolved_run_id = str(run_id or "").strip()
+    if not resolved_run_id:
+        raise ValueError("run_id is required")
+
+    manifests = _load_all_saved_lineup_run_manifests(
+        selected_date=selected_day,
+        selected_slate_key=selected_slate_key,
+        bucket_name=bucket_name,
+        gcp_project=gcp_project,
+        service_account_json=service_account_json,
+        service_account_json_b64=service_account_json_b64,
+    )
+    manifest = next(
+        (item for item in manifests if str(item.get("run_id") or "").strip() == resolved_run_id),
+        None,
+    )
+    if manifest is None:
+        raise ValueError(f"lineup run not found for {selected_day.isoformat()} / {selected_slate_key}: {resolved_run_id}")
+
+    versions_out: list[dict[str, Any]] = []
+    preferred_source = str(manifest.get("_storage_source") or "").strip().lower() or None
+    for version_entry in manifest.get("versions") or []:
+        if not isinstance(version_entry, dict):
+            continue
+        version_summary = _build_lineup_run_version_summary(version_entry)
+        version_key = str(version_summary.get("version_key") or "").strip()
+        payload = None
+        if version_key:
+            payload = _load_lineup_version_payload(
+                selected_date=selected_day,
+                run_id=resolved_run_id,
+                version_key=version_key,
+                selected_slate_key=selected_slate_key,
+                preferred_source=preferred_source,
+                bucket_name=bucket_name,
+                gcp_project=gcp_project,
+                service_account_json=service_account_json,
+                service_account_json_b64=service_account_json_b64,
+            )
+        detail = dict(version_summary)
+        detail["loaded"] = bool(isinstance(payload, dict))
+        if isinstance(payload, dict):
+            detail["version_label"] = str(payload.get("version_label") or detail.get("version_label") or version_key)
+            detail["lineup_strategy"] = str(payload.get("lineup_strategy") or detail.get("lineup_strategy") or "")
+            detail["model_profile"] = str(payload.get("model_profile") or detail.get("model_profile") or "")
+            detail["include_tail_signals"] = bool(payload.get("include_tail_signals", detail.get("include_tail_signals", False)))
+            detail["payload_source"] = str(payload.get("_storage_source") or preferred_source or "")
+            detail["payload_ref"] = str(payload.get("_payload_ref") or "")
+            warnings = payload.get("warnings") or []
+            lineups = payload.get("lineups") or []
+            detail["warnings"] = [str(item) for item in warnings]
+            detail["lineups_loaded"] = int(len(lineups))
+            if include_lineups:
+                detail["lineups"] = lineups if isinstance(lineups, list) else []
+            if include_upload_csv:
+                detail["dk_upload_csv"] = str(payload.get("dk_upload_csv") or "")
+        versions_out.append(detail)
+
+    run_detail = _build_lineup_run_summary(manifest, include_versions=False)
+    run_detail["settings"] = manifest.get("settings") or {}
+    return {
+        "selected_date": selected_day.isoformat(),
+        "slate_key": selected_slate_key,
+        "run": run_detail,
+        "versions": versions_out,
     }
 
 

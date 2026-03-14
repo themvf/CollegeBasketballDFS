@@ -9,10 +9,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
 from college_basketball_dfs.cbb_api_service import (
+    build_lineup_run_detail_payload,
+    build_lineup_runs_payload,
     build_cache_coverage_payload,
     build_injuries_review_payload,
     build_projection_review_payload,
     build_props_review_payload,
+    build_slate_status_payload,
     build_tournament_review_payload,
     build_registry_coverage,
     build_vegas_game_lines_payload,
@@ -141,6 +144,36 @@ def registry_coverage(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     return result
+
+
+@app.get("/v1/slates/{selected_date}/{slate_key}/status")
+def slate_status(
+    selected_date: date,
+    slate_key: str,
+    contest_type: str = Query(default="Classic"),
+    slate_name: str = Query(default="All"),
+    slate_id: int | None = Query(default=None),
+    site_id: int = Query(default=1),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+    unresolved_sample_limit: int = Query(default=25, ge=1, le=100),
+    x_rotowire_cookie: str | None = Header(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_slate_status_payload(
+            selected_date=selected_date,
+            slate_key=slate_key,
+            contest_type=contest_type,
+            slate_name=slate_name,
+            slate_id=slate_id,
+            site_id=site_id,
+            cookie_header=x_rotowire_cookie,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+            unresolved_sample_limit=unresolved_sample_limit,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 @app.get("/v1/vegas/game-lines")
@@ -368,6 +401,52 @@ async def tournament_standings_upload(
             selected_date=selected_date,
             contest_id=contest_id,
             slate_key=slate_key,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/lineup-runs")
+def lineup_runs(
+    selected_date: date = Query(..., alias="date", description="Slate date in YYYY-MM-DD"),
+    slate_key: str = Query(default="main"),
+    include_versions: bool = Query(default=False),
+    limit: int = Query(default=50, ge=1, le=500),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_lineup_runs_payload(
+            selected_date=selected_date,
+            slate_key=slate_key,
+            include_versions=include_versions,
+            limit=limit,
+            bucket_name=bucket_name,
+            gcp_project=gcp_project,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@app.get("/v1/lineup-runs/{run_id}")
+def lineup_run_detail(
+    run_id: str,
+    selected_date: date = Query(..., alias="date", description="Slate date in YYYY-MM-DD"),
+    slate_key: str = Query(default="main"),
+    include_lineups: bool = Query(default=True),
+    include_upload_csv: bool = Query(default=False),
+    bucket_name: str | None = Query(default=None, description="Override GCS bucket; defaults to CBB_GCS_BUCKET"),
+    gcp_project: str | None = Query(default=None),
+) -> dict[str, Any]:
+    try:
+        return build_lineup_run_detail_payload(
+            selected_date=selected_date,
+            run_id=run_id,
+            slate_key=slate_key,
+            include_lineups=include_lineups,
+            include_upload_csv=include_upload_csv,
             bucket_name=bucket_name,
             gcp_project=gcp_project,
         )
