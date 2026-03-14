@@ -11,6 +11,23 @@ pip install -e ../..
 uvicorn main:app --reload --port 8000
 ```
 
+## Deploy To Cloud Run
+
+Use the repo-level deploy setup documented in:
+
+- [docs/cloud_run_api_deploy.md](/abs/path/c:/Docs/_AI%20Python%20Projects/CollegeBasketballDFS/docs/cloud_run_api_deploy.md)
+
+From the repo root:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy_api_cloud_run.ps1 `
+  -ProjectId YOUR_PROJECT_ID `
+  -Region us-central1 `
+  -ServiceName college-basketball-dfs-api `
+  -BucketName YOUR_GCS_BUCKET `
+  -ServiceAccountJsonPath .\college-basketball-487322-384e69b56597.json
+```
+
 ## Endpoints
 
 - `GET /health`

@@ -153,6 +153,7 @@ This repository now includes an initial migration scaffold out of Streamlit:
 - API backend starter: `apps/api`
 - Next.js frontend starter: `apps/web`
 - Migration plan: `docs/vercel_migration_plan.md`
+- Cloud Run API deploy guide: `docs/cloud_run_api_deploy.md`
 
 Run locally:
 
@@ -170,6 +171,19 @@ cp .env.example .env.local
 npm install
 npm run dev
 ```
+
+Deploy the API for Vercel with:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\deploy_api_cloud_run.ps1 `
+  -ProjectId YOUR_PROJECT_ID `
+  -Region us-central1 `
+  -ServiceName college-basketball-dfs-api `
+  -BucketName YOUR_GCS_BUCKET `
+  -ServiceAccountJsonPath .\college-basketball-487322-384e69b56597.json
+```
+
+Then set `NEXT_PUBLIC_API_BASE_URL` in Vercel to the resulting Cloud Run URL and redeploy.
 
 ## AI Review Packet
 

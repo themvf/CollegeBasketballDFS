@@ -1,0 +1,27 @@
+.git
+.gitignore
+.gcloudignore
+.devcontainer
+.pytest_cache
+.streamlit
+.tmp*
+__pycache__
+*.pyc
+*.pyo
+*.pyd
+*.egg-info
+.venv
+
+apps/web
+dashboard
+DFS Articles
+Draftkings
+contest-standings-*/
+tests
+data
+
+*.zip
+*.docx
+*.csv
+*.code-workspace
+college-basketball-487322-384e69b56597.json
