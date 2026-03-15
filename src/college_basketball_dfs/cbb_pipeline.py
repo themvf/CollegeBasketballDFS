@@ -12,6 +12,20 @@ from college_basketball_dfs.cbb_ncaa import NcaaApiClient, fetch_games_with_boxs
 from college_basketball_dfs.cbb_transform import flatten_games_payload, rows_to_csv_text
 
 
+def _cached_payload_is_complete(payload: dict[str, Any] | None, *, game_date: date) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    game_count = int(payload.get("game_count") or 0)
+    success_count = int(payload.get("boxscore_success_count") or 0)
+    failure_count = int(payload.get("boxscore_failure_count") or 0)
+    if game_count <= 0:
+        return True
+    if success_count >= game_count and failure_count <= 0:
+        return True
+    # For current-day slates, allow partial cache reuse while games/boxscores are still settling.
+    return game_date >= date.today()
+
+
 def run_cbb_cache_pipeline(
     game_date: date,
     bucket_name: str | None = None,
@@ -43,6 +57,9 @@ def run_cbb_cache_pipeline(
     if not force_refresh:
         payload = store.read_raw_json(game_date)
         raw_cache_hit = payload is not None
+        if payload is not None and not _cached_payload_is_complete(payload, game_date=game_date):
+            payload = None
+            raw_cache_hit = False
 
     if payload is None:
         client = NcaaApiClient(base_url=ncaa_base_url)

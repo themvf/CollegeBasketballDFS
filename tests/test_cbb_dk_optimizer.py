@@ -3,6 +3,7 @@ from collections import Counter
 import pandas as pd
 
 from college_basketball_dfs.cbb_dk_optimizer import (
+    _build_game_stack_cap_counts,
     _apply_uncertainty_exposure_caps,
     _rerank_lineup_portfolio,
     apply_cheap_value_chalk_guardrail,
@@ -29,6 +30,7 @@ from college_basketball_dfs.cbb_dk_optimizer import (
     prepare_generation_pool,
     projection_salary_bucket_key,
     recommend_contest_profile_settings,
+    recommended_focus_stack_settings,
     remove_injured_players,
 )
 
@@ -76,6 +78,83 @@ def _sample_props() -> pd.DataFrame:
             {"player_name": "Forward 1", "bookmaker": "fanduel", "market": "player_threes_made", "line": 1.5},
         ]
     )
+
+
+def _sample_large_slate() -> pd.DataFrame:
+    rows = []
+    player_id = 3000
+    for game_idx in range(1, 11):
+        away = f"A{game_idx:02d}"
+        home = f"B{game_idx:02d}"
+        game_info = f"{away}@{home} 02/{10 + game_idx:02d}/2026 07:00PM ET"
+        for side_idx, team in enumerate([away, home], start=1):
+            rows.append(
+                {
+                    "Position": "G",
+                    "Name + ID": f"{team} Guard ({player_id})",
+                    "Name": f"{team} Guard",
+                    "ID": str(player_id),
+                    "Roster Position": "G/UTIL",
+                    "Salary": 6200 - (game_idx * 40) - (side_idx * 25),
+                    "Game Info": game_info,
+                    "TeamAbbrev": team,
+                    "AvgPointsPerGame": 24 + game_idx + side_idx,
+                }
+            )
+            player_id += 1
+            rows.append(
+                {
+                    "Position": "F",
+                    "Name + ID": f"{team} Forward ({player_id})",
+                    "Name": f"{team} Forward",
+                    "ID": str(player_id),
+                    "Roster Position": "F/UTIL",
+                    "Salary": 6100 - (game_idx * 35) - (side_idx * 20),
+                    "Game Info": game_info,
+                    "TeamAbbrev": team,
+                    "AvgPointsPerGame": 23 + game_idx + side_idx,
+                }
+            )
+            player_id += 1
+    return pd.DataFrame(rows)
+
+
+def _sample_large_focus_pool() -> pd.DataFrame:
+    pool = build_player_pool(_sample_large_slate(), pd.DataFrame(), bookmaker_filter="fanduel").copy()
+    pool["historical_ownership_baseline"] = 11.0
+    pool["game_tail_score"] = 44.0
+    pool["game_total_line"] = 145.0
+    pool["game_spread_line"] = 8.0
+    pool["team_stack_popularity_score"] = 36.0
+    pool["minutes_shock_boost_pct"] = 1.5
+    pool["value_per_1k"] = pd.to_numeric(pool.get("value_per_1k"), errors="coerce").fillna(4.9)
+
+    focus_mask = pool["game_key"].astype(str).str.upper() == "A01@B01"
+    pool.loc[focus_mask, "projected_dk_points"] = pd.to_numeric(
+        pool.loc[focus_mask, "projected_dk_points"],
+        errors="coerce",
+    ).fillna(0.0) + 8.0
+    pool.loc[focus_mask, "projected_ownership"] = 25.0
+    pool.loc[focus_mask, "historical_ownership_baseline"] = 19.0
+    pool.loc[focus_mask, "game_tail_score"] = 86.0
+    pool.loc[focus_mask, "game_total_line"] = 157.0
+    pool.loc[focus_mask, "game_spread_line"] = 4.0
+    pool.loc[focus_mask, "team_stack_popularity_score"] = 72.0
+    pool.loc[focus_mask, "minutes_shock_boost_pct"] = 7.5
+
+    secondary_mask = pool["game_key"].astype(str).str.upper() == "A02@B02"
+    pool.loc[secondary_mask, "projected_dk_points"] = pd.to_numeric(
+        pool.loc[secondary_mask, "projected_dk_points"],
+        errors="coerce",
+    ).fillna(0.0) + 3.5
+    pool.loc[secondary_mask, "projected_ownership"] = 18.0
+    pool.loc[secondary_mask, "historical_ownership_baseline"] = 15.0
+    pool.loc[secondary_mask, "game_tail_score"] = 63.0
+    pool.loc[secondary_mask, "game_total_line"] = 150.0
+    pool.loc[secondary_mask, "game_spread_line"] = 5.5
+    pool.loc[secondary_mask, "team_stack_popularity_score"] = 54.0
+    pool.loc[secondary_mask, "minutes_shock_boost_pct"] = 4.5
+    return pool
 
 
 def _sample_season_stats() -> pd.DataFrame:
@@ -2055,6 +2134,126 @@ def test_generate_lineups_preferred_game_bonus_increases_preferred_exposure() ->
         / max(1, len(boosted_lineups))
     )
     assert boosted_avg >= base_avg
+
+
+def test_recommended_focus_stack_settings_stays_conservative_on_large_slates() -> None:
+    pool = _sample_large_focus_pool()
+
+    settings = recommended_focus_stack_settings(
+        pool,
+        contest_type="Large GPP",
+        focus_game_count=2,
+    )
+
+    assert settings["preferred_game_keys"][0] == "A01@B01"
+    assert int(settings["slate_game_count"]) == 10
+    assert float(settings["stack_lineup_pct"]) <= 32.0
+    assert int(settings["min_players"]) == 2
+    assert float(settings["preferred_game_bonus"]) <= 0.65
+
+
+def test_recommended_focus_stack_settings_limits_short_slate_auto_focus_games() -> None:
+    pool = _sample_large_focus_pool().copy()
+    keep_games = {"A01@B01", "A02@B02", "A03@B03", "A04@B04", "A05@B05"}
+    pool = pool.loc[pool["game_key"].astype(str).isin(keep_games)].copy()
+
+    settings = recommended_focus_stack_settings(
+        pool,
+        contest_type="Large GPP",
+        focus_game_count=2,
+    )
+
+    assert int(settings["slate_game_count"]) == 5
+    assert settings["preferred_game_keys"] == ["A01@B01"]
+
+
+def test_build_game_stack_cap_counts_applies_on_short_slates() -> None:
+    pool = _sample_large_focus_pool().copy()
+    keep_games = {"A01@B01", "A02@B02", "A03@B03", "A04@B04", "A05@B05"}
+    pool = pool.loc[pool["game_key"].astype(str).isin(keep_games)].copy()
+
+    caps, meta = _build_game_stack_cap_counts(
+        pool,
+        total_lineups=20,
+        contest_type="Large GPP",
+        preferred_games={"A01@B01"},
+    )
+
+    assert int(meta["active_game_count"]) == 5
+    assert caps["A01@B01"] <= 10
+    assert caps["A02@B02"] <= 8
+    assert max(value for key, value in caps.items() if key != "A01@B01") <= 8
+
+
+def test_generate_lineups_auto_focus_trims_preferred_stack_pressure() -> None:
+    pool = _sample_large_focus_pool()
+
+    lineups, warnings = generate_lineups(
+        pool_df=pool,
+        num_lineups=10,
+        contest_type="Large GPP",
+        preferred_game_bonus=2.0,
+        preferred_game_stack_lineup_pct=70.0,
+        auto_preferred_game_count=2,
+        random_seed=13,
+    )
+
+    assert len(lineups) > 0
+    assert any("trimmed preferred-game bonus" in warning for warning in warnings)
+    assert any("trimmed preferred-game stack forcing" in warning for warning in warnings)
+
+
+def test_rerank_lineup_portfolio_backfills_when_game_stack_caps_come_up_short() -> None:
+    def _lineup(lineup_id: str, projected: float, stacked_game_key: str) -> dict[str, object]:
+        players = []
+        player_ids = []
+        for idx in range(8):
+            player_id = f"{lineup_id}_{idx}"
+            player_ids.append(player_id)
+            players.append(
+                {
+                    "ID": player_id,
+                    "Name": f"Player {player_id}",
+                    "game_key": stacked_game_key if idx < 3 else "A02@B02",
+                    "projection_uncertainty_score": 0.10,
+                    "dnp_risk_score": 0.05,
+                }
+            )
+        return {
+            "player_ids": player_ids,
+            "players": players,
+            "projected_points": projected,
+            "ceiling_projection": projected + 18.0,
+            "projected_ownership_sum": 118.0,
+            "salary_left": 50,
+            "preferred_game_stack_size": 0,
+            "preferred_game_player_count": 0,
+            "preferred_game_stack_met": False,
+            "low_own_upside_count": 0,
+            "unsupported_false_chalk_count": 0,
+            "ceiling_boost_active": False,
+        }
+
+    lineups = [
+        _lineup("L1", 198.0, "A01@B01"),
+        _lineup("L2", 196.0, "A01@B01"),
+    ]
+    cap_counts = {str(pid): 1 for lineup in lineups for pid in lineup["player_ids"]}
+
+    reranked = _rerank_lineup_portfolio(
+        lineups,
+        target_lineups=2,
+        contest_type="Large GPP",
+        cap_counts=cap_counts,
+        game_stack_cap_counts={"A01@B01": 1},
+        preferred_games=set(),
+        preferred_target_count=0,
+        low_own_target_count=0,
+        ceiling_boost_target_count=0,
+        salary_left_target=50,
+    )
+
+    assert len(reranked) == 2
 
 
 def test_generate_lineups_preferred_game_stack_requirement_enforces_share() -> None:

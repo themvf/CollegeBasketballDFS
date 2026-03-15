@@ -6678,7 +6678,7 @@ with tab_lineups:
                             low_own_bucket_min_tail_score=55.0,
                             low_own_bucket_objective_bonus=1.3,
                             preferred_game_keys=list(game_agent_bias_meta.get("applied_game_keys") or []),
-                            preferred_game_bonus=0.6,
+                            preferred_game_bonus=0.6 if bool(game_agent_bias_meta.get("applied_game_keys")) else 0.0,
                             ceiling_boost_lineup_pct=effective_ceiling_boost_lineup_pct,
                             ceiling_boost_stack_bonus=effective_ceiling_boost_stack_bonus,
                             ceiling_boost_salary_left_target=effective_ceiling_boost_salary_left_target,
@@ -9364,6 +9364,19 @@ with tab_tournament_review:
                         f"`ownership_miss_tracker_top` is missing game context on {ownership_tracker_missing_game_context} row(s). "
                         "Avoid game-environment claims for those players."
                     )
+                if (
+                    projection_rows_total > 0
+                    and projection_matched_rows < max(10, int(round(0.5 * projection_rows_total)))
+                ):
+                    packet_warnings.append(
+                        f"Actual player results only matched {projection_matched_rows} of {projection_rows_total} projection rows. "
+                        "Refresh the player-results cache for this date before relying on projection-vs-actual or phantom actual-score conclusions."
+                    )
+                if phantom_avg_coverage_pct is not None and phantom_avg_coverage_pct < 80.0:
+                    packet_warnings.append(
+                        f"Phantom lineup actual matching is incomplete (`avg_coverage_pct={phantom_avg_coverage_pct:.1f}`). "
+                        "Saved lineups may be missing player names/IDs, or the player-results cache is stale."
+                    )
                 if not bool(lineup_settings_snapshot.get("settings_available")):
                     packet_warnings.append(
                         "Saved lineup settings are unavailable for this run. Do not infer contest-profile or lineup-tuning intent."
@@ -9426,6 +9439,27 @@ with tab_tournament_review:
                 actual_own_rows = int(
                     pd.to_numeric(pm_exposure_df.get("actual_ownership_from_file"), errors="coerce").notna().sum()
                 ) if not pm_exposure_df.empty else 0
+                projection_rows_total = int(len(pm_proj_compare_df))
+                projection_matched_rows = _safe_int_value(projection_quality.get("matched_rows"), default=0)
+                phantom_avg_coverage_pct = None
+                if not pm_phantom_df.empty and "coverage_pct" in pm_phantom_df.columns:
+                    phantom_avg_coverage_pct = _safe_float_value(
+                        pd.to_numeric(pm_phantom_df["coverage_pct"], errors="coerce").mean(),
+                        default=0.0,
+                    )
+                stack_underexposed_games = 0
+                stack_overweight_games = 0
+                if not game_stack_summary_df.empty and "stack_underexposure_gap" in game_stack_summary_df.columns:
+                    stack_signal_scope = game_stack_summary_df.copy()
+                    if "top10_entries_with_stack" in stack_signal_scope.columns:
+                        scoped_stack_signal = stack_signal_scope.loc[
+                            pd.to_numeric(stack_signal_scope["top10_entries_with_stack"], errors="coerce").fillna(0) > 0
+                        ].copy()
+                        if not scoped_stack_signal.empty:
+                            stack_signal_scope = scoped_stack_signal
+                    stack_gap = pd.to_numeric(stack_signal_scope["stack_underexposure_gap"], errors="coerce")
+                    stack_underexposed_games = int((stack_gap > 0).sum())
+                    stack_overweight_games = int((stack_gap < 0).sum())
 
                 right_notes: list[str] = []
                 wrong_notes: list[str] = []
@@ -9453,6 +9487,15 @@ with tab_tournament_review:
                     wrong_notes.append(
                         "Actual ownership rows from standings are missing; verify contest standings format and slate mapping."
                     )
+                if (
+                    projection_rows_total > 0
+                    and projection_matched_rows < max(10, int(round(0.5 * projection_rows_total)))
+                ):
+                    wrong_notes.append(
+                        "Actual player results look incomplete for this date "
+                        f"(`matched_rows={projection_matched_rows}` of `{projection_rows_total}` projection rows). "
+                        "Refresh the player-results cache before trusting phantom/postmortem actual-score conclusions."
+                    )
                 if lineup_scored > 0:
                     if lineup_avg_delta >= 0.0:
                         right_notes.append(
@@ -9470,6 +9513,12 @@ with tab_tournament_review:
                         wrong_notes.append(f"Phantom builds lagged field (`avg_would_beat_pct={lineup_avg_beat:.1f}`).")
                 else:
                     wrong_notes.append("No phantom runs are scored yet for this date; construction feedback is incomplete.")
+                if phantom_avg_coverage_pct is not None and phantom_avg_coverage_pct < 80.0:
+                    wrong_notes.append(
+                        "Phantom lineup actual matching is incomplete "
+                        f"(`avg_coverage_pct={phantom_avg_coverage_pct:.1f}`). "
+                        "Saved lineup payloads or actual results may be stale/incompatible."
+                    )
                 if field_top10_salary_left <= field_avg_salary_left:
                     right_notes.append(
                         "Top-10 lineups generally spent more salary than field average "
@@ -9654,13 +9703,22 @@ with tab_tournament_review:
                         }
                     )
                 if phantom_gap_to_winner is not None:
+                    ceiling_next_change = "Increase exposure to high-upside game/team stack archetypes seen in top finishers."
+                    ceiling_success_metric = "Close winner gap and improve top-end phantom lineup outcomes."
+                    if stack_overweight_games > 0 and stack_underexposed_games <= 0 and missed_game_stack_df.empty:
+                        ceiling_next_change = (
+                            "Reduce blind stack inflation; phantoms were already overweight relative to the field on the main stack signals."
+                        )
+                        ceiling_success_metric = (
+                            "Close winner gap while shrinking negative `stack_underexposure_gap` on the highest-priority games."
+                        )
                     improvement_rows.append(
                         {
                             "priority": 4,
                             "area": "Ceiling Capture",
                             "why": f"winner_gap={phantom_gap_to_winner:.2f}",
-                            "next_slate_change": "Increase exposure to high-upside game/team stack archetypes seen in top finishers.",
-                            "success_metric": "Close winner gap and improve top-end phantom lineup outcomes.",
+                            "next_slate_change": ceiling_next_change,
+                            "success_metric": ceiling_success_metric,
                         }
                     )
                 improvement_rows.append(

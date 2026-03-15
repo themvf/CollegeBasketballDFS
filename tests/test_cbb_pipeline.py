@@ -121,3 +121,33 @@ def test_pipeline_fetches_when_cache_missing(monkeypatch) -> None:
     assert summary["player_row_count"] == 1
     assert len(store.raw_writes) == 1
     assert len(store.players_writes) == 1
+
+
+def test_pipeline_refetches_incomplete_past_date_cache(monkeypatch) -> None:
+    incomplete_payload = _sample_payload()
+    incomplete_payload["game_count"] = 2
+    incomplete_payload["boxscore_success_count"] = 1
+    incomplete_payload["boxscore_failure_count"] = 1
+    store = FakeStore(cached_payload=incomplete_payload)
+
+    class StubClient:
+        def __init__(self, base_url: str) -> None:
+            self.base_url = base_url
+
+        def close(self) -> None:
+            return
+
+    monkeypatch.setattr("college_basketball_dfs.cbb_pipeline.NcaaApiClient", StubClient)
+    monkeypatch.setattr("college_basketball_dfs.cbb_pipeline.fetch_games_with_boxscores", lambda **kwargs: _sample_payload())
+
+    summary = run_cbb_cache_pipeline(
+        game_date=date(2026, 2, 12),
+        ncaa_base_url="http://example",
+        store=store,
+    )
+
+    assert summary["raw_cache_hit"] is False
+    assert summary["game_count"] == 1
+    assert summary["player_row_count"] == 1
+    assert len(store.raw_writes) == 1
+    assert len(store.players_writes) == 1

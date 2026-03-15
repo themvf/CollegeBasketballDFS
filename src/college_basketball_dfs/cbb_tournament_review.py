@@ -98,6 +98,66 @@ def _norm_col_key(value: Any) -> str:
     return re.sub(r"[^a-z0-9]", "", str(value or "").strip().lower())
 
 
+def _name_without_id_suffix(value: Any) -> str:
+    text = str(value or "").strip()
+    if not text or text.lower() in NULLISH_TEXT_VALUES:
+        return ""
+    return re.sub(r"\s*\([^)]*\)\s*$", "", text).strip()
+
+
+def _extract_lineup_player_name(value: Any) -> str:
+    candidates: list[Any] = []
+    if isinstance(value, dict):
+        candidates.extend(
+            [
+                value.get("Name"),
+                value.get("player_name"),
+                value.get("resolved_name"),
+                value.get("name"),
+                value.get("Name + ID"),
+                value.get("name_plus_id"),
+            ]
+        )
+    else:
+        candidates.append(value)
+    for candidate in candidates:
+        cleaned = _name_without_id_suffix(candidate)
+        if cleaned:
+            return cleaned
+    return ""
+
+
+def _extract_lineup_player_id(value: Any) -> str:
+    if not isinstance(value, dict):
+        return ""
+    for key in ("ID", "player_id", "id"):
+        player_id = str(value.get(key) or "").strip()
+        if player_id and player_id.lower() not in NULLISH_TEXT_VALUES:
+            return player_id
+    name_plus_id = str(value.get("Name + ID") or value.get("name_plus_id") or "").strip()
+    match = re.search(r"\(([^()]+)\)\s*$", name_plus_id)
+    if not match:
+        return ""
+    player_id = str(match.group(1) or "").strip()
+    if not player_id or player_id.lower() in NULLISH_TEXT_VALUES:
+        return ""
+    return player_id
+
+
+def _fill_name_from_name_plus_id(df: pd.DataFrame, *, name_col: str = "Name", name_plus_id_col: str = "Name + ID") -> pd.DataFrame:
+    out = df.copy()
+    if name_col not in out.columns:
+        out[name_col] = ""
+    out[name_col] = out[name_col].astype(str).str.strip()
+    if name_plus_id_col not in out.columns:
+        return out
+    fallback_names = out[name_plus_id_col].map(_name_without_id_suffix)
+    missing = _is_blank_text_series(out[name_col])
+    if missing.any():
+        out.loc[missing, name_col] = fallback_names.loc[missing]
+    return out
+
+
 def _salary_bucket_label(value: Any) -> str:
     salary = pd.to_numeric(value, errors="coerce")
     if pd.isna(salary):
@@ -1222,8 +1282,8 @@ def build_projection_actual_comparison(
     if actual_results_df is None or actual_results_df.empty:
         return pd.DataFrame()
 
-    proj = projection_df.copy()
-    actual = actual_results_df.copy()
+    proj = _fill_name_from_name_plus_id(projection_df.copy())
+    actual = _fill_name_from_name_plus_id(actual_results_df.copy())
 
     for col in ["ID", "Name", "TeamAbbrev", "Position"]:
         if col not in proj.columns:
@@ -1237,14 +1297,14 @@ def build_projection_actual_comparison(
         actual["actual_minutes"] = pd.NA
 
     proj["ID"] = proj["ID"].astype(str).str.strip()
-    proj["Name"] = proj["Name"].astype(str).str.strip()
+    proj["Name"] = proj["Name"].map(_name_without_id_suffix)
     proj["TeamAbbrev"] = proj["TeamAbbrev"].astype(str).str.strip().str.upper()
     proj["Position"] = proj["Position"].astype(str).str.strip().str.upper()
     proj["name_key"] = proj["Name"].map(_norm)
     proj["name_key_loose"] = proj["Name"].map(_norm_loose)
 
     actual["ID"] = actual["ID"].astype(str).str.strip()
-    actual["Name"] = actual["Name"].astype(str).str.strip()
+    actual["Name"] = actual["Name"].map(_name_without_id_suffix)
     actual["actual_dk_points"] = pd.to_numeric(actual["actual_dk_points"], errors="coerce")
     actual["actual_minutes"] = pd.to_numeric(actual["actual_minutes"], errors="coerce")
     actual["name_key"] = actual["Name"].map(_norm)
@@ -1827,7 +1887,7 @@ def build_top10_winner_gap_analysis(
             )
             players = lineup.get("players") or []
             for p in players:
-                player_name = str(p.get("Name") or "").strip()
+                player_name = _extract_lineup_player_name(p)
                 if not player_name:
                     continue
                 our_rows.append(
@@ -1963,7 +2023,7 @@ def build_top10_winner_gap_analysis(
                 lineup_key_set: set[str] = set()
                 lineup_loose_set: set[str] = set()
                 for p in players:
-                    player_name = str(p.get("Name") or "").strip()
+                    player_name = _extract_lineup_player_name(p)
                     if not player_name:
                         continue
                     name_key = _norm(player_name)
@@ -2105,12 +2165,12 @@ def score_generated_lineups_against_actuals(
         matched = 0
         missing_names: list[str] = []
         for p in players:
-            pid = str(p.get("ID") or "").strip()
-            player_name = str(p.get("Name") or "").strip()
+            pid = _extract_lineup_player_id(p)
+            player_name = _extract_lineup_player_name(p)
             actual_points = None
             if pid and pid in by_id:
                 actual_points = by_id.get(pid)
-            elif player_name:
+            if (actual_points is None or pd.isna(actual_points)) and player_name:
                 actual_points = by_name.get(_norm(player_name))
                 if actual_points is None or pd.isna(actual_points):
                     actual_points = by_name_loose.get(_norm_loose(player_name))

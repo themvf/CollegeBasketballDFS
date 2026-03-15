@@ -1746,26 +1746,75 @@ def recommended_focus_stack_settings(
             "preferred_game_keys": [],
             "stack_lineup_pct": 0.0,
             "min_players": 0,
+            "preferred_game_bonus": 0.0,
+            "focus_gap_score": 0.0,
             "slate_game_count": 0,
             "focus_summary": summary,
         }
 
-    preferred_game_keys = summary.head(focus_count)["game_key"].astype(str).tolist()
     slate_game_count = int(summary["game_key"].nunique())
     contest_norm = str(contest_type or "").strip().lower()
+    focus_scores = pd.to_numeric(summary.get("game_stack_focus_score"), errors="coerce").fillna(0.0)
+    focus_baseline = float(focus_scores.median()) if not focus_scores.empty else 0.0
+    if len(focus_scores) >= 3:
+        focus_baseline = float(focus_scores.iloc[2])
+    elif len(focus_scores) >= 2:
+        focus_baseline = float(focus_scores.iloc[1])
+    top_focus_score = float(focus_scores.iloc[0]) if not focus_scores.empty else 0.0
+    focus_gap_score = max(0.0, top_focus_score - focus_baseline)
+    top_recommended_stack = int(_safe_num(summary.iloc[0].get("recommended_stack_size"), 2)) if not summary.empty else 2
+    if slate_game_count <= 6:
+        focus_count = min(focus_count, 1)
+    preferred_game_keys = summary.head(focus_count)["game_key"].astype(str).tolist()
+
     if contest_norm == "cash":
         stack_lineup_pct = 0.0
+        preferred_game_bonus = 0.0
     elif contest_norm == "small gpp":
-        stack_lineup_pct = 50.0
+        stack_lineup_pct = 18.0
+        preferred_game_bonus = 0.65
     else:
-        stack_lineup_pct = 60.0
-    if slate_game_count > 0 and slate_game_count <= 4 and stack_lineup_pct > 0.0:
-        stack_lineup_pct = min(80.0, stack_lineup_pct + 10.0)
-    min_players = 0 if stack_lineup_pct <= 0.0 else (3 if slate_game_count <= 4 else 2)
+        stack_lineup_pct = 14.0
+        preferred_game_bonus = 0.50
+
+    if stack_lineup_pct > 0.0:
+        if slate_game_count <= 4:
+            stack_lineup_pct += 14.0 if contest_norm == "small gpp" else 12.0
+            preferred_game_bonus += 0.15
+        elif slate_game_count <= 6:
+            stack_lineup_pct += 7.0 if contest_norm == "small gpp" else 5.0
+            preferred_game_bonus += 0.10
+        elif slate_game_count >= 10:
+            stack_lineup_pct -= 4.0
+            preferred_game_bonus -= 0.10
+        elif slate_game_count >= 8:
+            stack_lineup_pct -= 2.0
+            preferred_game_bonus -= 0.05
+
+        if focus_gap_score >= 12.0:
+            stack_lineup_pct += 10.0
+            preferred_game_bonus += 0.15
+        elif focus_gap_score >= 7.0:
+            stack_lineup_pct += 6.0
+            preferred_game_bonus += 0.10
+        elif focus_gap_score >= 4.0:
+            stack_lineup_pct += 3.0
+            preferred_game_bonus += 0.05
+        elif slate_game_count >= 8:
+            preferred_game_bonus -= 0.05
+
+    max_stack_pct = 52.0 if slate_game_count <= 4 else (40.0 if contest_norm == "small gpp" else 32.0)
+    stack_lineup_pct = max(0.0, min(max_stack_pct, round(stack_lineup_pct, 1)))
+    preferred_game_bonus = max(0.0, min(1.0, round(preferred_game_bonus, 2)))
+    min_players = 0
+    if stack_lineup_pct > 0.0:
+        min_players = 3 if slate_game_count <= 4 and top_recommended_stack >= 3 else 2
     return {
         "preferred_game_keys": preferred_game_keys,
         "stack_lineup_pct": float(stack_lineup_pct),
         "min_players": int(min_players),
+        "preferred_game_bonus": float(preferred_game_bonus),
+        "focus_gap_score": float(round(focus_gap_score, 3)),
         "slate_game_count": slate_game_count,
         "focus_summary": summary,
     }
@@ -1788,7 +1837,7 @@ def _build_game_stack_cap_counts(
         return {}, {"active_game_count": 0, "slate_game_count": 0}
 
     slate_game_count = int(summary["game_key"].nunique())
-    if slate_game_count < 8:
+    if slate_game_count <= 4:
         return {}, {"active_game_count": 0, "slate_game_count": slate_game_count}
 
     contest_norm = str(contest_type or "").strip().lower()
@@ -1797,9 +1846,22 @@ def _build_game_stack_cap_counts(
         for key in (preferred_games or set())
         if _normalize_game_key_for_exposure(key)
     }
-    tail_cap_pct = 10.0 if contest_norm == "small gpp" else 8.0
-    mid_cap_pct = 24.0 if contest_norm == "small gpp" else 18.0
-    preferred_cap_floor_pct = 55.0 if contest_norm == "small gpp" else 45.0
+    if slate_game_count <= 6:
+        tail_cap_pct = 14.0 if contest_norm == "small gpp" else 12.0
+        mid_cap_pct = 26.0 if contest_norm == "small gpp" else 22.0
+        focus_cap_pct = 38.0 if contest_norm == "small gpp" else 34.0
+        focus_high_cap_pct = 44.0 if contest_norm == "small gpp" else 40.0
+        preferred_cap_floor_pct = 34.0 if contest_norm == "small gpp" else 30.0
+        preferred_top_cap_pct = 52.0 if contest_norm == "small gpp" else 48.0
+        preferred_secondary_cap_pct = 44.0 if contest_norm == "small gpp" else 40.0
+    else:
+        tail_cap_pct = 10.0 if contest_norm == "small gpp" else 8.0
+        mid_cap_pct = 24.0 if contest_norm == "small gpp" else 18.0
+        focus_cap_pct = 32.0
+        focus_high_cap_pct = 40.0
+        preferred_cap_floor_pct = 55.0 if contest_norm == "small gpp" else 45.0
+        preferred_top_cap_pct = 65.0
+        preferred_secondary_cap_pct = max(preferred_cap_floor_pct + 5.0, 50.0)
     caps: dict[str, int] = {}
 
     for _, row in summary.iterrows():
@@ -1810,15 +1872,15 @@ def _build_game_stack_cap_counts(
         focus_score = float(_safe_num(row.get("game_stack_focus_score"), 0.0))
         if game_key in preferred:
             if rank <= 1:
-                cap_pct = max(preferred_cap_floor_pct + 15.0, 65.0)
+                cap_pct = preferred_top_cap_pct
             elif rank <= 2:
-                cap_pct = max(preferred_cap_floor_pct + 5.0, 50.0)
+                cap_pct = preferred_secondary_cap_pct
             else:
-                cap_pct = max(preferred_cap_floor_pct, 30.0)
+                cap_pct = preferred_cap_floor_pct
         elif rank <= 2:
-            cap_pct = 32.0 if focus_score < 55.0 else 40.0
+            cap_pct = focus_cap_pct if focus_score < 55.0 else focus_high_cap_pct
         elif rank <= 4:
-            cap_pct = mid_cap_pct if focus_score < 60.0 else (mid_cap_pct + 6.0)
+            cap_pct = mid_cap_pct if focus_score < 60.0 else min(mid_cap_pct + 6.0, focus_high_cap_pct)
         else:
             cap_pct = tail_cap_pct
             if focus_score >= 55.0:
@@ -4086,7 +4148,12 @@ def apply_stack_anchor_bias(
         out["stack_anchor_focus_flag"] = False
         return out
 
+    slate_game_count = int(len(game_metric))
+    focus_baseline = float(game_metric.iloc[1]) if len(game_metric) >= 2 else float(game_metric.iloc[0])
+    focus_gap = max(0.0, float(game_metric.iloc[0]) - focus_baseline)
     top_n = max(1, min(int(top_game_count), len(game_metric)))
+    if slate_game_count >= 10:
+        top_n = min(top_n, 1)
     focus_games = set(game_metric.head(top_n).index.tolist())
     focus_mask = game_norm.isin(focus_games)
     if not bool(focus_mask.any()):
@@ -4094,7 +4161,17 @@ def apply_stack_anchor_bias(
         return out
 
     bonus_base = max(0.0, float(objective_bonus))
-    tail_bonus = (tail / 100.0).clip(lower=0.0, upper=1.0) * 0.30
+    if slate_game_count >= 10:
+        bonus_base = min(bonus_base, 0.35)
+    elif slate_game_count >= 7:
+        bonus_base = min(bonus_base, 0.45)
+    elif slate_game_count >= 5:
+        bonus_base = min(bonus_base, 0.60)
+    else:
+        bonus_base = min(bonus_base, 0.75)
+    if focus_gap < 6.0:
+        bonus_base *= 0.75
+    tail_bonus = (tail / 100.0).clip(lower=0.0, upper=1.0) * 0.18
     bonus = focus_mask.map(lambda x: bonus_base if bool(x) else 0.0).astype(float) + (
         focus_mask.astype(float) * tail_bonus
     )
@@ -4437,6 +4514,7 @@ def _portfolio_base_lineup_score(
     contest_type: str,
     preferred_games: set[str],
     salary_left_target: int | None,
+    include_preferred_bias: bool = True,
 ) -> float:
     contest_norm = str(contest_type or "").strip().lower()
     projected = _safe_num(lineup.get("projected_points"), 0.0)
@@ -4457,11 +4535,13 @@ def _portfolio_base_lineup_score(
     else:
         score = projected + (0.34 * ceiling) - (0.055 * ownership)
 
-    score += (1.6 * preferred_stack) + (0.6 * preferred_total) + (1.1 * low_own) + (1.0 * stack_bonus)
+    if include_preferred_bias:
+        score += (1.6 * preferred_stack) + (0.6 * preferred_total)
+    score += (1.1 * low_own) + (1.0 * stack_bonus)
     score -= (4.5 * unsupported_false_chalk) + (8.0 * uncertainty)
     if salary_left_target is not None:
         score -= abs(float(salary_left) - float(salary_left_target)) / 70.0
-    if preferred_games and bool(lineup.get("preferred_game_stack_met")):
+    if include_preferred_bias and preferred_games and bool(lineup.get("preferred_game_stack_met")):
         score += 2.0
     return float(score)
 
@@ -4550,47 +4630,14 @@ def _rerank_lineup_portfolio(
         return []
     overlap_cap = 5 if max_pair_overlap is None else max(0, int(max_pair_overlap))
 
-    def _uncertainty_mean(players: list[dict[str, Any]]) -> float:
-        if not players:
-            return 0.0
-        values = []
-        for player in players:
-            risk = (0.55 * _safe_num(player.get("dnp_risk_score"), 0.0)) + (
-                0.45 * _safe_num(player.get("projection_uncertainty_score"), 0.0)
-            )
-            values.append(max(0.0, min(1.0, float(risk))))
-        return 0.0 if not values else float(sum(values) / len(values))
-
-    def _base_score(lineup: dict[str, Any]) -> float:
-        contest_norm = str(contest_type or "").strip().lower()
-        projected = _safe_num(lineup.get("projected_points"), 0.0)
-        ceiling = _safe_num(lineup.get("ceiling_projection"), projected * 1.18)
-        ownership = _safe_num(lineup.get("projected_ownership_sum"), 0.0)
-        salary_left = _safe_num(lineup.get("salary_left"), 0.0)
-        preferred_stack = _safe_num(lineup.get("preferred_game_stack_size"), 0.0)
-        preferred_total = _safe_num(lineup.get("preferred_game_player_count"), 0.0)
-        low_own = _safe_num(lineup.get("low_own_upside_count"), 0.0)
-        unsupported_false_chalk = _safe_num(lineup.get("unsupported_false_chalk_count"), 0.0)
-        uncertainty = _uncertainty_mean(list(lineup.get("players") or []))
-        stack_bonus = _stack_bonus_from_counts(_lineup_game_counts(list(lineup.get("players") or [])))
-
-        if contest_norm == "cash":
-            score = projected + (0.20 * ceiling)
-        elif contest_norm == "small gpp":
-            score = projected + (0.28 * ceiling) - (0.035 * ownership)
-        else:
-            score = projected + (0.34 * ceiling) - (0.055 * ownership)
-
-        score += (1.6 * preferred_stack) + (0.6 * preferred_total) + (1.1 * low_own) + (1.0 * stack_bonus)
-        score -= (4.5 * unsupported_false_chalk) + (8.0 * uncertainty)
-        if salary_left_target is not None:
-            score -= abs(float(salary_left) - float(salary_left_target)) / 70.0
-        if preferred_games and bool(lineup.get("preferred_game_stack_met")):
-            score += 2.0
-        return float(score)
-
     for lineup in candidates:
-        lineup["_portfolio_base_score"] = _base_score(lineup)
+        lineup["_portfolio_base_score"] = _portfolio_base_lineup_score(
+            lineup,
+            contest_type=contest_type,
+            preferred_games=preferred_games,
+            salary_left_target=salary_left_target,
+            include_preferred_bias=False,
+        )
 
     candidate_rows = [
         {
@@ -4619,7 +4666,13 @@ def _rerank_lineup_portfolio(
     selected_low_own = 0
     selected_ceiling_boost = 0
 
-    while candidate_rows and len(selected_rows) < requested:
+    def _select_best_index(
+        rows: list[dict[str, Any]],
+        *,
+        cap_counts_ref: dict[str, int],
+        enforce_target_gates: bool,
+        enforce_game_stack_caps: bool,
+    ) -> int | None:
         remaining_slots = requested - len(selected_rows)
         preferred_needed = max(0, int(preferred_target_count) - selected_preferred)
         low_own_needed = max(0, int(low_own_target_count) - selected_low_own)
@@ -4627,21 +4680,33 @@ def _rerank_lineup_portfolio(
         best_idx = None
         best_score = -10**12
 
-        for idx, row in enumerate(candidate_rows):
+        for idx, row in enumerate(rows):
             lineup = row["lineup"]
             lineup_ids = row["player_ids"]
-            if any(exposure_counts.get(pid, 0) >= int(cap_counts.get(pid, requested)) for pid in lineup_ids):
+            if any(exposure_counts.get(pid, 0) >= int(cap_counts_ref.get(pid, requested)) for pid in lineup_ids):
                 continue
-            if game_stack_cap_counts and any(
+            if enforce_game_stack_caps and game_stack_cap_counts and any(
                 int(game_stack_counts.get(game_key, 0)) >= int(game_stack_cap_counts.get(game_key, requested))
                 for game_key in row["stacked_game_keys"]
             ):
                 continue
-            if preferred_needed >= remaining_slots and not bool(lineup.get("preferred_game_stack_met")):
+            if (
+                enforce_target_gates
+                and preferred_needed >= remaining_slots
+                and not bool(lineup.get("preferred_game_stack_met"))
+            ):
                 continue
-            if low_own_needed >= remaining_slots and _safe_num(lineup.get("low_own_upside_count"), 0.0) <= 0.0:
+            if (
+                enforce_target_gates
+                and low_own_needed >= remaining_slots
+                and _safe_num(lineup.get("low_own_upside_count"), 0.0) <= 0.0
+            ):
                 continue
-            if ceiling_boost_needed >= remaining_slots and not bool(lineup.get("ceiling_boost_active")):
+            if (
+                enforce_target_gates
+                and ceiling_boost_needed >= remaining_slots
+                and not bool(lineup.get("ceiling_boost_active"))
+            ):
                 continue
 
             overlap_penalty = 0.0
@@ -4657,7 +4722,7 @@ def _rerank_lineup_portfolio(
                 ) * 2.4
             exposure_penalty = 0.0
             for pid in lineup_ids:
-                cap = max(1, int(cap_counts.get(pid, requested) or 1))
+                cap = max(1, int(cap_counts_ref.get(pid, requested) or 1))
                 exposure_penalty += float(exposure_counts.get(pid, 0)) / float(cap)
 
             preference_bonus = 0.0
@@ -4673,28 +4738,52 @@ def _rerank_lineup_portfolio(
             if candidate_score > best_score:
                 best_score = candidate_score
                 best_idx = idx
+        return best_idx
 
-        if best_idx is None:
+    selection_stages = [
+        {"cap_counts_ref": cap_counts, "enforce_target_gates": True, "enforce_game_stack_caps": True},
+        {"cap_counts_ref": cap_counts, "enforce_target_gates": False, "enforce_game_stack_caps": True},
+        {"cap_counts_ref": cap_counts, "enforce_target_gates": False, "enforce_game_stack_caps": False},
+    ]
+
+    for stage in selection_stages:
+        while candidate_rows and len(selected_rows) < requested:
+            best_idx = _select_best_index(candidate_rows, **stage)
+            if best_idx is None:
+                break
+
+            chosen = candidate_rows.pop(best_idx)
+            lineup = chosen["lineup"]
+            for pid in chosen["player_ids"]:
+                exposure_counts[pid] = exposure_counts.get(pid, 0) + 1
+            for game_key in chosen["stacked_game_keys"]:
+                game_stack_counts[game_key] += 1
+            if bool(lineup.get("preferred_game_stack_met")):
+                selected_preferred += 1
+            if _safe_num(lineup.get("low_own_upside_count"), 0.0) > 0.0:
+                selected_low_own += 1
+            if bool(lineup.get("ceiling_boost_active")):
+                selected_ceiling_boost += 1
+            selected_rows.append(chosen)
+        if len(selected_rows) >= requested:
             break
-
-        chosen = candidate_rows.pop(best_idx)
-        lineup = chosen["lineup"]
-        for pid in chosen["player_ids"]:
-            exposure_counts[pid] = exposure_counts.get(pid, 0) + 1
-        for game_key in chosen["stacked_game_keys"]:
-            game_stack_counts[game_key] += 1
-        if bool(lineup.get("preferred_game_stack_met")):
-            selected_preferred += 1
-        if _safe_num(lineup.get("low_own_upside_count"), 0.0) > 0.0:
-            selected_low_own += 1
-        if bool(lineup.get("ceiling_boost_active")):
-            selected_ceiling_boost += 1
-        selected_rows.append(chosen)
 
     selected = [row["lineup"] for row in selected_rows[:requested]]
     for idx, lineup in enumerate(selected, start=1):
         lineup["lineup_number"] = idx
-        lineup["portfolio_rerank_score"] = round(float(lineup.get("_portfolio_base_score") or _base_score(lineup)), 4)
+        lineup["portfolio_rerank_score"] = round(
+            float(
+                lineup.get("_portfolio_base_score")
+                or _portfolio_base_lineup_score(
+                    lineup,
+                    contest_type=contest_type,
+                    preferred_games=preferred_games,
+                    salary_left_target=salary_left_target,
+                    include_preferred_bias=False,
+                )
+            ),
+            4,
+        )
         lineup.pop("_portfolio_base_score", None)
     return selected
 
@@ -5002,11 +5091,13 @@ def generate_lineups(
         ).clip(lower=0.01)
         scored["objective_score_adjustment"] = pd.to_numeric(objective_bonus, errors="coerce").fillna(0.0)
 
+    warnings: list[str] = []
     preferred_games = {
         str(key or "").strip().upper().split(" ")[0]
         for key in (preferred_game_keys or [])
         if str(key or "").strip()
     }
+    explicit_preferred_games = bool(preferred_games)
     preferred_game_bonus_value = max(0.0, float(preferred_game_bonus))
     preferred_game_stack_lineup_pct_value = max(0.0, min(100.0, float(preferred_game_stack_lineup_pct)))
     preferred_game_stack_min_players_value = max(0, min(ROSTER_SIZE, int(preferred_game_stack_min_players)))
@@ -5016,7 +5107,7 @@ def generate_lineups(
         focus_game_count=max(0, int(auto_preferred_game_count)),
     )
     if (
-        not preferred_games
+        not explicit_preferred_games
         and max(0, int(auto_preferred_game_count)) > 0
         and (
             preferred_game_bonus_value > 0.0
@@ -5030,6 +5121,31 @@ def generate_lineups(
             for key in (focus_settings.get("preferred_game_keys") or [])
             if str(key or "").strip()
         }
+    if preferred_games and not explicit_preferred_games:
+        recommended_bonus = max(0.0, float(focus_settings.get("preferred_game_bonus") or 0.0))
+        recommended_stack_pct = max(0.0, float(focus_settings.get("stack_lineup_pct") or 0.0))
+        recommended_min_players = max(0, int(focus_settings.get("min_players") or 0))
+        if preferred_game_bonus_value > recommended_bonus:
+            warnings.append(
+                "Auto focus-game bias trimmed preferred-game bonus from "
+                f"{preferred_game_bonus_value:.2f} to {recommended_bonus:.2f} for this slate."
+            )
+            preferred_game_bonus_value = recommended_bonus
+        if preferred_game_stack_lineup_pct_value > recommended_stack_pct:
+            warnings.append(
+                "Auto focus-game guardrails trimmed preferred-game stack forcing from "
+                f"{preferred_game_stack_lineup_pct_value:.0f}% to {recommended_stack_pct:.0f}% for this slate."
+            )
+            preferred_game_stack_lineup_pct_value = recommended_stack_pct
+        if recommended_min_players > 0:
+            if preferred_game_stack_min_players_value <= 0:
+                preferred_game_stack_min_players_value = recommended_min_players
+            elif preferred_game_stack_min_players_value > recommended_min_players:
+                warnings.append(
+                    "Auto focus-game guardrails trimmed preferred-game stack size from "
+                    f"{preferred_game_stack_min_players_value} to {recommended_min_players} players."
+                )
+                preferred_game_stack_min_players_value = recommended_min_players
     if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value <= 0:
         preferred_game_stack_min_players_value = int(focus_settings.get("min_players") or 0)
     if "game_key" in scored.columns:
@@ -5057,7 +5173,6 @@ def generate_lineups(
         preferred_games=preferred_games,
     )
 
-    warnings: list[str] = []
     if preferred_games and preferred_game_stack_lineup_pct_value > 0.0 and preferred_game_stack_min_players_value > 0:
         warnings.append(
             "Focus-game stack guardrails active: "
@@ -5685,8 +5800,6 @@ def generate_lineups(
             if active_salary_target is not None:
                 selected_score -= abs(float(salary_left - active_salary_target)) / salary_penalty_divisor
             preferred_count = float(_preferred_game_stack_total_from_counts(selected_preferred_counts))
-            if preferred_games and preferred_game_bonus_value > 0.0:
-                selected_score += preferred_game_bonus_value * preferred_count
             if ceiling_boost_active and ceiling_boost_stack_bonus > 0.0:
                 selected_score += float(ceiling_boost_stack_bonus) * _stack_bonus_from_counts(game_counts)
             selected_ceiling = float(selected_ceiling_sum)
@@ -5864,7 +5977,6 @@ def _generate_lineups_cluster_mode(
     if unsupported_false_chalk_cap is not None and unsupported_false_chalk_cap >= ROSTER_SIZE:
         unsupported_false_chalk_cap = None
     preferred_games = {str(x or "").strip().upper() for x in (preferred_game_keys or set()) if str(x or "").strip()}
-    preferred_bonus = max(0.0, float(preferred_game_bonus))
     preferred_stack_required = {int(x) for x in (preferred_stack_required_indices or set())}
     preferred_stack_min = max(0, min(ROSTER_SIZE, int(preferred_game_stack_min_players)))
     ceiling_idx = {int(x) for x in (ceiling_boost_indices or set())}
@@ -6175,8 +6287,6 @@ def _generate_lineups_cluster_mode(
                 if anchor_game_key:
                     selected_score += 1.8 * float(anchor_count)
                 preferred_count = float(_preferred_game_stack_total_from_counts(selected_preferred_counts))
-                if preferred_games and preferred_bonus > 0.0:
-                    selected_score += preferred_bonus * preferred_count
                 if ceiling_boost_active and ceiling_stack_bonus > 0.0:
                     selected_score += ceiling_stack_bonus * _stack_bonus_from_counts(game_counts)
                 selected_ceiling = float(selected_ceiling_sum)

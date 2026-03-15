@@ -6,6 +6,7 @@ from college_basketball_dfs.cbb_tournament_review import (
     build_ownership_projection_diagnostics,
     build_ownership_teacher_review,
     build_player_exposure_comparison,
+    build_projection_actual_comparison,
     build_projection_bias_heatmap,
     build_segment_impact_table,
     build_top10_winner_gap_analysis,
@@ -544,6 +545,64 @@ def test_score_generated_lineups_against_actuals_loose_name_match() -> None:
     assert float(phantom.iloc[0]["coverage_pct"]) == 100.0
 
 
+def test_score_generated_lineups_against_actuals_uses_name_plus_id_when_name_missing() -> None:
+    generated_lineups = [
+        {
+            "lineup_number": 1,
+            "lineup_strategy": "standard",
+            "salary": 5000,
+            "projected_points": 20.0,
+            "players": [{"Name + ID": "Alpha One Jr. (999)"}],
+        }
+    ]
+    actual_df = pd.DataFrame([{"ID": "77", "Name": "Alpha One", "actual_dk_points": 30.0}])
+    phantom = score_generated_lineups_against_actuals(
+        generated_lineups=generated_lineups,
+        actual_results_df=actual_df,
+        version_key="standard_v1",
+        version_label="Standard v1",
+    )
+    assert len(phantom) == 1
+    assert float(phantom.iloc[0]["actual_points"]) == 30.0
+    assert int(phantom.iloc[0]["matched_players"]) == 1
+    assert float(phantom.iloc[0]["coverage_pct"]) == 100.0
+
+
+def test_build_projection_actual_comparison_uses_name_plus_id_when_name_missing() -> None:
+    projection_df = pd.DataFrame(
+        [
+            {
+                "ID": "dk-1",
+                "Name": "",
+                "Name + ID": "Alpha One (111)",
+                "TeamAbbrev": "AAA",
+                "Position": "G",
+                "Salary": 7000,
+                "blended_projection": 20.0,
+                "our_dk_projection": 19.0,
+                "vegas_dk_projection": 18.0,
+                "our_minutes_avg": 28.0,
+                "our_minutes_last7": 29.0,
+            }
+        ]
+    )
+    actual_df = pd.DataFrame(
+        [
+            {
+                "ID": "ncaa-9",
+                "Name": "Alpha One Jr.",
+                "actual_dk_points": 30.0,
+                "actual_minutes": 35.0,
+            }
+        ]
+    )
+    compared = build_projection_actual_comparison(projection_df, actual_df)
+    assert len(compared) == 1
+    assert round(float(compared.iloc[0]["actual_dk_points"]), 2) == 30.0
+    assert round(float(compared.iloc[0]["actual_minutes"]), 2) == 35.0
+    assert round(float(compared.iloc[0]["blend_error"]), 2) == 10.0
+
+
 def test_build_user_strategy_summary_uses_computed_actual_points_when_available() -> None:
     df = pd.DataFrame(
         [
@@ -782,3 +841,38 @@ def test_top10_winner_gap_analysis_uses_lineup_uid_for_distinct_rows() -> None:
     row = hit_dist.loc[hit_dist["top3_hits"] == 3]
     assert not row.empty
     assert int(row.iloc[0]["lineups"]) == 2
+
+
+def test_top10_winner_gap_analysis_uses_name_plus_id_for_loaded_lineups() -> None:
+    entries, expanded = build_field_entries_and_players(_sample_standings(), _sample_slate())
+    proj_compare = pd.DataFrame(
+        [
+            {"Name": "Alpha One", "actual_dk_points": 50.0, "blended_projection": 30.0, "blend_error": 20.0},
+            {"Name": "Bravo Two", "actual_dk_points": 45.0, "blended_projection": 31.0, "blend_error": 14.0},
+            {"Name": "Charlie Three", "actual_dk_points": 40.0, "blended_projection": 28.0, "blend_error": 12.0},
+        ]
+    )
+    generated_lineups = [
+        {
+            "lineup_number": 1,
+            "players": [
+                {"Name + ID": "Alpha One (101)"},
+                {"Name + ID": "Bravo Two (102)"},
+                {"Name + ID": "Hotel Eight (108)"},
+            ],
+        }
+    ]
+
+    packet = build_top10_winner_gap_analysis(
+        entries_df=entries,
+        expanded_players_df=expanded,
+        projection_comparison_df=proj_compare,
+        generated_lineups=generated_lineups,
+        top_n_winners=10,
+        top_points_focus=5,
+    )
+    summary = packet["summary"]
+    assert bool(summary["our_lineups_available"]) is True
+    assert int(summary["our_lineups_count"]) == 1
+    assert bool(summary["top_scorer_in_our_lineups"]) is True
+    assert int(summary["top3_covered_count"]) == 2
