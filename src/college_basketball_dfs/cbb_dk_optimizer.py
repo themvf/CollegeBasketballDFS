@@ -5655,6 +5655,13 @@ def generate_lineups(
         best_lineup_metrics: dict[str, Any] | None = None
         best_score = -10**12
 
+        # Pre-filter once per lineup: exposure_counts only changes after a lineup
+        # is committed (line below the attempt loop), never during the 1200 attempts.
+        eligible_players = [
+            p for p in players
+            if exposure_counts[str(p["_player_id"])] < cap_counts.get(str(p["_player_id"]), candidate_num_lineups)
+        ]
+
         for _ in range(max_attempts_per_lineup):
             selected = list(lock_players)
             selected_ids = set(lock_player_ids)
@@ -5678,11 +5685,9 @@ def generate_lineups(
                 candidates: list[dict[str, Any]] = []
                 weights: list[float] = []
 
-                for p in players:
+                for p in eligible_players:
                     pid = str(p["_player_id"])
                     if pid in selected_ids:
-                        continue
-                    if exposure_counts[pid] >= cap_counts.get(pid, candidate_num_lineups):
                         continue
                     next_salary = salary + int(p["_salary_int"])
                     if next_salary > SALARY_CAP:
