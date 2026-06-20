@@ -10,8 +10,10 @@ from typing import Any
 
 try:
     from google.cloud import storage  # type: ignore[import-not-found]
+    from google.cloud.exceptions import NotFound as _GCSNotFound  # type: ignore[import-not-found]
 except Exception:  # pragma: no cover - handled at runtime in build_storage_client
     storage = None  # type: ignore[assignment]
+    _GCSNotFound = KeyError  # type: ignore[assignment,misc]
 
 
 def build_storage_client(
@@ -234,10 +236,10 @@ class CbbGcsStore:
         return f"{self.phantom_reviews_prefix}/{game_date.isoformat()}/{run_key}/summary.json"
 
     def read_raw_json(self, game_date: date) -> dict[str, Any] | None:
-        blob = self.bucket.blob(self.raw_blob_name(game_date))
-        if not blob.exists():
+        try:
+            text = self.bucket.blob(self.raw_blob_name(game_date)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        text = blob.download_as_text(encoding="utf-8")
         payload = json.loads(text)
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected cached payload type: {type(payload).__name__}")
@@ -274,10 +276,10 @@ class CbbGcsStore:
         return blob.download_as_text(encoding="utf-8")
 
     def read_odds_json(self, game_date: date) -> dict[str, Any] | None:
-        blob = self.bucket.blob(self.odds_blob_name(game_date))
-        if not blob.exists():
+        try:
+            text = self.bucket.blob(self.odds_blob_name(game_date)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        text = blob.download_as_text(encoding="utf-8")
         payload = json.loads(text)
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected odds payload type: {type(payload).__name__}")
@@ -287,7 +289,7 @@ class CbbGcsStore:
         blob_name = self.odds_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(
-            json.dumps(payload, indent=2),
+            json.dumps(payload),
             content_type="application/json",
         )
         return blob_name
@@ -299,10 +301,10 @@ class CbbGcsStore:
         return blob_name
 
     def read_props_json(self, game_date: date) -> dict[str, Any] | None:
-        blob = self.bucket.blob(self.props_blob_name(game_date))
-        if not blob.exists():
+        try:
+            text = self.bucket.blob(self.props_blob_name(game_date)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        text = blob.download_as_text(encoding="utf-8")
         payload = json.loads(text)
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected props payload type: {type(payload).__name__}")
@@ -312,7 +314,7 @@ class CbbGcsStore:
         blob_name = self.props_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(
-            json.dumps(payload, indent=2),
+            json.dumps(payload),
             content_type="application/json",
         )
         return blob_name
@@ -336,9 +338,10 @@ class CbbGcsStore:
             if safe_slate == "main":
                 candidate_names.append(self.dk_slate_blob_name(game_date))
         for blob_name in candidate_names:
-            blob = self.bucket.blob(blob_name)
-            if blob.exists():
-                return blob.download_as_text(encoding="utf-8")
+            try:
+                return self.bucket.blob(blob_name).download_as_text(encoding="utf-8")
+            except _GCSNotFound:
+                continue
         return None
 
     def write_dk_slate_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
@@ -359,17 +362,18 @@ class CbbGcsStore:
             if safe_slate == "main":
                 candidate_names.append(self.dk_slate_blob_name(game_date))
         for blob_name in candidate_names:
-            blob = self.bucket.blob(blob_name)
-            if blob.exists():
-                blob.delete()
+            try:
+                self.bucket.blob(blob_name).delete()
                 return True
+            except _GCSNotFound:
+                continue
         return False
 
     def read_dk_registry_manual_csv(self) -> str | None:
-        blob = self.bucket.blob(self.dk_registry_manual_blob_name())
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.dk_registry_manual_blob_name()).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_dk_registry_manual_csv(self, csv_text: str) -> str:
         blob_name = self.dk_registry_manual_blob_name()
@@ -378,10 +382,10 @@ class CbbGcsStore:
         return blob_name
 
     def read_injuries_csv(self) -> str | None:
-        blob = self.bucket.blob(self.injuries_blob_name())
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.injuries_blob_name()).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_injuries_csv(self, csv_text: str) -> str:
         blob_name = self.injuries_blob_name()
@@ -390,15 +394,17 @@ class CbbGcsStore:
         return blob_name
 
     def read_injuries_feed_csv(self, game_date: date | None = None) -> str | None:
-        blob = self.bucket.blob(self.injuries_feed_blob_name(game_date))
-        if not blob.exists():
-            if game_date is not None:
-                # Backward compatibility for older single-file feed storage.
-                legacy_blob = self.bucket.blob(self.injuries_feed_blob_name(None))
-                if legacy_blob.exists():
-                    return legacy_blob.download_as_text(encoding="utf-8")
-            return None
-        return blob.download_as_text(encoding="utf-8")
+        try:
+            return self.bucket.blob(self.injuries_feed_blob_name(game_date)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
+            pass
+        if game_date is not None:
+            # Backward compatibility for older single-file feed storage.
+            try:
+                return self.bucket.blob(self.injuries_feed_blob_name(None)).download_as_text(encoding="utf-8")
+            except _GCSNotFound:
+                pass
+        return None
 
     def write_injuries_feed_csv(self, csv_text: str, game_date: date | None = None) -> str:
         blob_name = self.injuries_feed_blob_name(game_date)
@@ -407,17 +413,17 @@ class CbbGcsStore:
         return blob_name
 
     def delete_injuries_feed_csv(self, game_date: date | None = None) -> bool:
-        blob = self.bucket.blob(self.injuries_feed_blob_name(game_date))
-        if not blob.exists():
+        try:
+            self.bucket.blob(self.injuries_feed_blob_name(game_date)).delete()
+            return True
+        except _GCSNotFound:
             return False
-        blob.delete()
-        return True
 
     def read_injuries_manual_csv(self) -> str | None:
-        blob = self.bucket.blob(self.injuries_manual_blob_name())
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.injuries_manual_blob_name()).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_injuries_manual_csv(self, csv_text: str) -> str:
         blob_name = self.injuries_manual_blob_name()
@@ -426,10 +432,10 @@ class CbbGcsStore:
         return blob_name
 
     def read_projections_csv(self, game_date: date, slate_key: str | None = None) -> str | None:
-        blob = self.bucket.blob(self.projections_blob_name(game_date))
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.projections_blob_name(game_date)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_projections_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
         blob_name = self.projections_blob_name(game_date)
@@ -438,10 +444,10 @@ class CbbGcsStore:
         return blob_name
 
     def read_lineupstarter_csv(self, game_date: date, slate_key: str | None = None) -> str | None:
-        blob = self.bucket.blob(self.lineupstarter_blob_name(game_date))
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.lineupstarter_blob_name(game_date)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_lineupstarter_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
         blob_name = self.lineupstarter_blob_name(game_date)
@@ -450,10 +456,10 @@ class CbbGcsStore:
         return blob_name
 
     def read_ownership_csv(self, game_date: date, slate_key: str | None = None) -> str | None:
-        blob = self.bucket.blob(self.ownership_blob_name(game_date))
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.ownership_blob_name(game_date)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_ownership_csv(self, game_date: date, csv_text: str, slate_key: str | None = None) -> str:
         blob_name = self.ownership_blob_name(game_date)
@@ -467,10 +473,10 @@ class CbbGcsStore:
         contest_id: str,
         slate_key: str | None = None,
     ) -> str | None:
-        blob = self.bucket.blob(self.contest_standings_blob_name(game_date, contest_id))
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.contest_standings_blob_name(game_date, contest_id)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_contest_standings_csv(
         self,
@@ -498,8 +504,7 @@ class CbbGcsStore:
         )
         if not blob_name:
             return None
-        blob = self.bucket.blob(blob_name)
-        payload = json.loads(blob.download_as_text(encoding="utf-8"))
+        payload = json.loads(self.bucket.blob(blob_name).download_as_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected lineup-run manifest payload type: {type(payload).__name__}")
         return payload
@@ -513,7 +518,7 @@ class CbbGcsStore:
     ) -> str:
         blob_name = self.lineup_run_manifest_blob_name(game_date, run_id, slate_key=slate_key)
         blob = self.bucket.blob(blob_name)
-        blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+        blob.upload_from_string(json.dumps(payload), content_type="application/json")
         return blob_name
 
     def read_lineup_version_json(
@@ -548,7 +553,7 @@ class CbbGcsStore:
     ) -> str:
         blob_name = self.lineup_version_json_blob_name(game_date, run_id, version_key, slate_key=slate_key)
         blob = self.bucket.blob(blob_name)
-        blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+        blob.upload_from_string(json.dumps(payload), content_type="application/json")
         return blob_name
 
     def read_lineup_version_csv(
@@ -675,10 +680,10 @@ class CbbGcsStore:
         return sorted(dates_found, reverse=True)
 
     def read_phantom_review_csv(self, game_date: date, run_id: str, version_key: str) -> str | None:
-        blob = self.bucket.blob(self.phantom_review_csv_blob_name(game_date, run_id, version_key))
-        if not blob.exists():
+        try:
+            return self.bucket.blob(self.phantom_review_csv_blob_name(game_date, run_id, version_key)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        return blob.download_as_text(encoding="utf-8")
 
     def write_phantom_review_csv(self, game_date: date, run_id: str, version_key: str, csv_text: str) -> str:
         blob_name = self.phantom_review_csv_blob_name(game_date, run_id, version_key)
@@ -687,10 +692,11 @@ class CbbGcsStore:
         return blob_name
 
     def read_phantom_review_summary_json(self, game_date: date, run_id: str) -> dict[str, Any] | None:
-        blob = self.bucket.blob(self.phantom_review_summary_blob_name(game_date, run_id))
-        if not blob.exists():
+        try:
+            text = self.bucket.blob(self.phantom_review_summary_blob_name(game_date, run_id)).download_as_text(encoding="utf-8")
+        except _GCSNotFound:
             return None
-        payload = json.loads(blob.download_as_text(encoding="utf-8"))
+        payload = json.loads(text)
         if not isinstance(payload, dict):
             raise ValueError(f"Unexpected phantom-review summary payload type: {type(payload).__name__}")
         return payload
@@ -698,14 +704,14 @@ class CbbGcsStore:
     def write_phantom_review_summary_json(self, game_date: date, run_id: str, payload: dict[str, Any]) -> str:
         blob_name = self.phantom_review_summary_blob_name(game_date, run_id)
         blob = self.bucket.blob(blob_name)
-        blob.upload_from_string(json.dumps(payload, indent=2), content_type="application/json")
+        blob.upload_from_string(json.dumps(payload), content_type="application/json")
         return blob_name
 
     def write_raw_json(self, game_date: date, payload: dict[str, Any]) -> str:
         blob_name = self.raw_blob_name(game_date)
         blob = self.bucket.blob(blob_name)
         blob.upload_from_string(
-            json.dumps(payload, indent=2),
+            json.dumps(payload),
             content_type="application/json",
         )
         return blob_name

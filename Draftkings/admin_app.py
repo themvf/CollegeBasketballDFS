@@ -1889,7 +1889,7 @@ def persist_lineup_run_bundle(
     }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_saved_lineup_run_manifests(
     bucket_name: str,
     selected_date: date,
@@ -2002,7 +2002,7 @@ def load_all_saved_lineup_run_manifests(
     return manifests
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_saved_lineup_run_dates(
     bucket_name: str,
     selected_slate_key: str | None,
@@ -2022,7 +2022,7 @@ def load_saved_lineup_run_dates(
         return store.list_lineup_run_dates()
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def compute_projection_calibration_from_phantom(
     bucket_name: str,
     selected_date: date,
@@ -2162,7 +2162,7 @@ def _default_salary_bucket_calibration(
     }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def compute_projection_salary_bucket_calibration(
     bucket_name: str,
     selected_date: date,
@@ -2312,7 +2312,7 @@ def _default_role_bucket_calibration(
     }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def compute_projection_role_bucket_calibration(
     bucket_name: str,
     selected_date: date,
@@ -2435,7 +2435,7 @@ def compute_projection_role_bucket_calibration(
     }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def compute_phantom_version_performance_weights(
     bucket_name: str,
     selected_date: date,
@@ -2555,7 +2555,7 @@ def compute_phantom_version_performance_weights(
     }
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_saved_lineup_version_payload(
     bucket_name: str,
     selected_date: date,
@@ -2601,7 +2601,7 @@ def load_local_lineup_version_payload(
     return payload
 
 
-@st.cache_data(ttl=300, show_spinner=False)
+@st.cache_data(ttl=1800, show_spinner=False)
 def load_saved_phantom_review_outputs(
     bucket_name: str,
     selected_date: date,
@@ -2684,7 +2684,7 @@ def _read_players_csv_blob(store: CbbGcsStore, blob_name: str) -> str:
     return blob.download_as_text(encoding="utf-8")
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_team_lookup_frame(
     bucket_name: str,
     gcp_project: str | None,
@@ -3012,7 +3012,7 @@ def load_injuries_frame(
     return normalize_injuries_frame(combined)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_season_player_history_frame(
     bucket_name: str,
     selected_date: date,
@@ -3068,7 +3068,7 @@ def load_season_player_history_frame(
     return pd.concat(frames, ignore_index=True)
 
 
-@st.cache_data(ttl=1800, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_season_vegas_history_frame(
     bucket_name: str,
     selected_date: date,
@@ -3304,7 +3304,7 @@ def load_ownership_frame_for_date(
     return normalize_ownership_frame(df)
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_actual_results_frame_for_date(
     bucket_name: str,
     selected_date: date,
@@ -3397,7 +3397,7 @@ def load_actual_results_frame_for_date(
     return out
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_contest_standings_frame(
     bucket_name: str,
     selected_date: date,

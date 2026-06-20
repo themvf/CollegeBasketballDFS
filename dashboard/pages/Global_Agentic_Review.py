@@ -197,7 +197,7 @@ def _safe_int(value: object, default: int = 0) -> int:
     return int(_safe_float(value, float(default)))
 
 
-@st.cache_data(ttl=600, show_spinner=False)
+@st.cache_data(ttl=3600, show_spinner=False)
 def load_saved_lineup_run_dates(
     bucket_name: str,
     selected_slate_key: str | None,

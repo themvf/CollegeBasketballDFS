@@ -65,7 +65,7 @@ def _resolve_credential_json_b64() -> str | None:
     return os.getenv("GCP_SERVICE_ACCOUNT_JSON_B64") or _secret("gcp_service_account_json_b64")
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_vegas_review_dataset(
     bucket_name: str,
     start_date: date,
@@ -106,7 +106,7 @@ def load_vegas_review_dataset(
     return games_df, meta
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_projection_player_totals_dataset(
     bucket_name: str,
     start_date: date,

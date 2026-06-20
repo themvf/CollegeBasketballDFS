@@ -156,7 +156,7 @@ def _read_contest_standings_ownership_for_date(store: CbbGcsStore, slate_date: d
     return out
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_projection_player_totals_dataset(
     bucket_name: str,
     start_date: date,
@@ -369,7 +369,7 @@ def _build_actual_results_from_players_frame(players_df: pd.DataFrame) -> pd.Dat
     return out
 
 
-@st.cache_data(ttl=900, show_spinner=False)
+@st.cache_data(ttl=86400, show_spinner=False)
 def load_actual_player_history_dataset(
     bucket_name: str,
     start_date: date,

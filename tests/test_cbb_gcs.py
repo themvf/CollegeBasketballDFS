@@ -2,6 +2,11 @@ from datetime import date
 
 from college_basketball_dfs.cbb_gcs import CbbGcsStore
 
+try:
+    from google.cloud.exceptions import NotFound as _FakeNotFound  # type: ignore[import-not-found]
+except Exception:
+    _FakeNotFound = KeyError  # type: ignore[assignment,misc]
+
 
 class _FakeBlob:
     def __init__(self, name: str, store: dict[str, str]) -> None:
@@ -15,10 +20,14 @@ class _FakeBlob:
         self._store[self.name] = payload
 
     def download_as_text(self, encoding: str = "utf-8") -> str:
+        if self.name not in self._store:
+            raise _FakeNotFound(self.name)
         return self._store[self.name]
 
     def delete(self) -> None:
-        self._store.pop(self.name, None)
+        if self.name not in self._store:
+            raise _FakeNotFound(self.name)
+        del self._store[self.name]
 
 
 class _FakeBucket:
